@@ -1,0 +1,26 @@
+---
+description: Spec-driven workflow for large features, architectural refactors, and major API work
+globs:
+  - "**/*.go"
+  - "docs/**"
+  - "AGENTS.md"
+alwaysApply: true
+---
+
+# Spec-Driven Development Rule
+
+Apply this rule whenever the request is a large feature, major API change, architectural refactor, or concurrency-heavy system change.
+
+## Required planning workflow
+1. Read `PLANS.md`.
+2. Read `.cursor/rules/01-master-design.mdc`.
+3. Read `.cursor/rules/20-architecture.mdc`.
+4. Read `.cursor/rules/21-api-design.mdc`.
+5. Summarize the current implementation and unresolved owner decisions.
+6. Produce a feature plan before implementation.
+7. Then implement and verify.
+
+## Enforcement
+- Do not invent settled architecture or API policy where the repository explicitly marks those as `TBD`.
+- If a change materially depends on a missing owner decision, surface that clearly.
+- Prefer staged delivery with reversible increments.

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "agent": {
+    "reviewer": {
+      "description": "Read-only code reviewer for Go changes. Use after implementation for a fresh-context review of the diff, touched files, and check output.",
+      "mode": "subagent",
+      "prompt": "{file:./prompts/code-review.md}",
+      "tools": {
+        "write": false,
+        "edit": false
+      }
+    },
+    "planner-researcher": {
+      "description": "Read-only planning sub-agent for large or ambiguous work. Use only when multiple materially different designs are possible.",
+      "mode": "subagent",
+      "prompt": "You are the planning and research sub-agent for this repository. Read AGENTS.md, PLANS.md, .cursor/rules/01-master-design.mdc, .cursor/rules/20-architecture.mdc, .cursor/rules/21-api-design.mdc, and .cursor/rules/35-testing-tdd.mdc before responding. Summarize current context, constraints, open questions, design branches, tests first, and a recommended staged roadmap. Do not edit files.",
+      "tools": {
+        "write": false,
+        "edit": false
+      }
+    }
+  },
+  "command": {
+    "review": {
+      "description": "Run a fresh-context code review using the shared review contract",
+      "template": "Review the current changes using prompts/code-review.md and AGENTS.md. Use this evidence:\\n- Diff stat: !`git diff --stat`\\n- Full diff: !`git diff`\\n- Relevant lint/test output: run or use what is provided.\\n\\nReport findings using the required sections and end with Verdict: accept or Verdict: revise. Do not edit files unless explicitly asked.",
+      "agent": "reviewer",
+      "subtask": true
+    },
+    "plan": {
+      "description": "Run a planning pass for large or ambiguous work",
+      "template": "Create a plan for the current task using AGENTS.md, PLANS.md, and the repository rules. Summarize the current state, constraints, open questions, design branches, tests first, and a staged rollout. Do not edit files.",
+      "agent": "planner-researcher",
+      "subtask": true
+    }
+  }
+}

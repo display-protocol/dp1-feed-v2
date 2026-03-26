@@ -1,0 +1,33 @@
+---
+description: Mandatory testing and verification rule for Go changes
+globs:
+  - "**/*.go"
+  - "**/*_test.go"
+alwaysApply: true
+---
+
+# Testing and Verification Rule
+
+## 1) Required sequence
+1. Write or refine small, testable units first.
+2. Add or update unit tests.
+3. Add integration tests for cross-boundary behavior where applicable.
+4. Implement or finish production wiring.
+5. Run formatting, vet, lint, and tests.
+
+## 2) Constraints
+- Do not ship behavior changes without tests unless explicitly approved.
+- Do not skip failure-path coverage for meaningful error handling changes.
+- Do not skip concurrency-sensitive verification for goroutine, channel, lock, or context changes.
+
+## 3) Required verification
+- `gofmt -w` or equivalent formatting pass
+- `go vet ./...`
+- `golangci-lint run ./...`
+- `go test ./...`
+- `go test -race ./...` when supported by the target packages/platform
+- `scripts/agent-helpers/post-implementation-checks`
+
+## 4) Coverage posture
+- Prioritize coverage for domain logic, boundary behavior, and failure modes over chasing raw percentages.
+- Do not allow meaningful test regressions without explicitly calling them out.

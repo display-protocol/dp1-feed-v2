@@ -1,0 +1,17 @@
+---
+alwaysApply: true
+---
+
+# Review Workflow Rule
+
+When implementation is complete and checks are green, run a review loop until the reviewer qualifies the change.
+
+1. Produce a compact handoff:
+   - goal
+   - files changed
+   - key decisions and trade-offs
+   - checks run
+   - unresolved assumptions
+2. Invoke the reviewer sub-agent with the handoff, diff, and relevant outputs.
+3. If the verdict is `revise`, address findings and rerun the loop.
+4. Do not commit, push, or open a PR before `Verdict: accept`.

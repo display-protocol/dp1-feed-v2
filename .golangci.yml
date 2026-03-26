@@ -1,68 +1,89 @@
 version: "2"
 
-# ================
-# Core run options
-# ================
 run:
-  go: "1.22"          # minimum Go version your project supports
-  timeout: 10m        # timeout for the linting process
-  concurrency: 4      # parallelism (optional – default is auto‑detected)
+  timeout: 5m
+  tests: true
 
-# =================
-# Code formatters
-# =================
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - dogsled
+    - errcheck
+    - exhaustive
+    - gocritic
+    - gofmt
+    - gofumpt
+    - goimports
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - whitespace
+
 formatters:
   enable:
-    - goimports        # keeps import blocks ordered & grouped
-  settings:
-    goimports:
-      # change to your project’s import path(s)
-      local-prefixes:
-        - github.com/display-protocol/dp1-feed-v2
+    - gofmt
+    - gofumpt
+    - goimports
 
-# =========
-# Linters
-# =========
-linters:
-  # v2 replaces the old "disable-all: true" with this:
-  default: none        # start from an empty set and opt‑in
-  enable:
-    # Bugs / correctness
-    - govet
-    - staticcheck      # includes old gosimple & stylecheck bundles
-    - errcheck
-    - ineffassign
-    - unused
+linters-settings:
+  exhaustive:
+    default-signifies-exhaustive: true
+  goimports:
+    local-prefixes:
+      - github.com/display-protocol/dp1-feed-v2
+  revive:
+    severity: warning
+    rules:
+      - name: atomic
+      - name: bare-return
+      - name: blank-imports
+      - name: bool-literal-in-expr
+      - name: comment-spacings
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: deep-exit
+      - name: duplicated-imports
+      - name: empty-block
+      - name: empty-lines
+      - name: error-return
+      - name: error-strings
+      - name: errorf
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: indent-error-flow
+      - name: modifies-parameter
+      - name: optimize-operands-order
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: redefines-builtin-id
+      - name: string-of-int
+      - name: superfluous-else
+      - name: time-equal
+      - name: time-naming
+      - name: unchecked-type-assertion
+      - name: unnecessary-stmt
+      - name: unreachable-code
+      - name: unused-parameter
+      - name: var-declaration
+      - name: var-naming
+  staticcheck:
+    checks:
+      - all
 
-    # Error‑handling hints
-    - errorlint
-    - errname
-
-    # Security
-    - gosec
-
-    # Style / spelling
-    - misspell
-  settings:
-    misspell:
-      locale: US       # US or UK spelling dictionary
-      ignore-rules:
-        - MONITORD
-
-# ==========
-# Issues UI
-# ==========
 issues:
-  max-issues-per-linter: 0   # keep unlimited, as before
-  max-same-issues: 0         # …
-  new: true                  # show only issues on changed lines (handy for CI)
-  new-from-merge-base: develop  # compare against the develop branch
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-use-default: false
 
-
-# ==========
-# CLI output
-# ==========
-output:
-  formats:
-    text:
-      print-issued-lines: true  # show offending code lines
+severity:
+  default: error

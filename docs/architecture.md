@@ -1,147 +1,161 @@
 # Architecture
 
-DP-1 Feed is a simple HTTP server that creates, signs, and stores DP-1 playlists. Single process, no queues, no complex dependencies—just Go, Gin, and PostgreSQL.
+DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 playlists, playlist-groups, and channels. It runs as a single process: Go, Gin, PostgreSQL—no message queues.
 
-## Design Philosophy
-
-**Simplicity first.** One process does one thing well: manage cryptographically signed playlist documents. Easy to understand, easy to deploy, easy to contribute to.
-
-## System Overview
+**Design philosophy:** simplicity first—one process, synchronous request handling, and a small set of packages with clear roles.
 
 ```
 Client → HTTP → dp1-feed-v2 → PostgreSQL
               (validate + sign)
 ```
 
-Three layers:
-1. **HTTP** (`internal/httpserver`) — REST API, auth, error handling
-2. **Executor** (`internal/executor`) — Business logic, validation, signing
-3. **Store** (`internal/store/pg`) — PostgreSQL persistence
+---
 
-## Core Components
+## Target package layout
 
-### HTTP Server
-- Gin-based REST API
-- API key auth on writes (POST/PUT/DELETE)
-- Public reads (GET)
-- JSON request/response
+| Area | Packages | Role |
+|------|----------|------|
+| **Entry + config** | `cmd/server`, `internal/config` | Process bootstrap, configuration (defaults → YAML → env). |
+| **Transport** | `internal/httpserver` | Gin server: routes, middleware, DTOs, HTTP errors, pagination helpers. |
+| **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
+| **DP-1 protocol adapter** | `internal/dp1svc` | Wraps [dp1-go](https://github.com/display-protocol/dp1-go): schema validation and v1.1+ multisig signing. |
+| **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
+| **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL implementation, migrations, pagination types. |
+| **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
+| **Cross-cutting** | `internal/logger` | Zap logger construction; Sentry is wired with Gin in `httpserver` (see Observability). |
+| **Tests** | `internal/mocks`, `internal/store/pg/pgtest` | Generated mocks and Postgres test helpers. |
+| **Small utilities** | `internal/utils` | Shared non-domain helpers (e.g. JSON). |
 
-### Executor
-- Validates playlists against DP-1 JSON schemas
-- Signs with Ed25519 using [dp1-go](https://github.com/display-protocol/dp1-go)
-- Coordinates storage
+---
 
-**Signing flow:**
-1. Build playlist JSON
-2. Canonicalize with JCS (RFC 8785)
-3. Hash with SHA-256
-4. Sign with Ed25519 private key
-5. Attach signature with did:key identifier
+## Domain / service / store / transport boundaries
 
-### Store
-- PostgreSQL with pgx driver
-- JSONB columns for document flexibility
-- Junction tables for relationships
-- Migrations via golang-migrate
+- **Transport (`internal/httpserver`):** HTTP only—parse bodies, auth for mutating methods, call the executor, map errors to API responses, JSON encode. No DP-1 signing or schema logic here.
+- **Application (`internal/executor`):** Owns feed workflows: create/replace/update/delete documents, list and index reads, transactional ingest when groups/channels reference playlists (local resolution vs fetch). Depends on `dp1svc`, `store`, `fetcher`, and `models`; it does not speak HTTP.
+- **Domain / protocol (`internal/dp1svc` + dp1-go):** Validation against embedded JSON Schema and signing canonical payloads (JCS, SHA-256 digest, Ed25519). The executor treats `dp1svc.ValidatorSigner` as the boundary to the spec.
+- **Store (`internal/store`):** Persistence and queries—IDs, slugs, JSONB bodies, membership tables, playlist-item index, cursor pagination. The store does not validate DP-1 or sign.
 
-### Configuration
-Load order: defaults → YAML file → environment variables
+---
 
-For Docker, all config comes from `config/.env`.
+## Dependency direction rules
 
-## Database Schema
+- **Allowed:** `httpserver` → `executor` → (`dp1svc`, `store`, `fetcher`) → (`models`, `config` as needed). `executor` must not import `httpserver`.
+- **Store** implements interfaces consumed by `executor`; it must not import `executor` or `httpserver`.
+- **`dp1svc`** depends on dp1-go and crypto only—not on `store` or HTTP.
+- **Avoid cycles:** shared DTOs live in `internal/models` (or `internal/store` for pagination/sort types) rather than importing “up” the stack.
 
-**Core tables:**
-- `playlists` — id, slug, body (jsonb), timestamps
-- `playlist_groups` — id, slug, body (jsonb), timestamps
-- `channels` — id, slug, body (jsonb), timestamps
+---
 
-**Relationships:**
-- `playlist_group_members` — links playlists to groups
-- `channel_members` — links playlists to channels
+## Background job and transaction ownership
 
-**Key features:**
-- JSONB for flexible document storage
-- Automatic `updated_at` via PostgreSQL triggers
-- Indexes on id, slug, and (created_at, id) for pagination
+- **Background jobs:** none by design. Every operation completes in the request path; there are no workers or queues.
+- **Transactions:** multi-step writes (e.g. playlist-group or channel create with resolved playlists and membership) are owned by **`internal/executor`**, which uses the store’s transactional APIs so ingest + persist commit or roll back together. The HTTP layer does not start or manage database transactions.
 
-## Request Flow
+---
 
-**Creating a playlist:**
+## Observability expectations
+
+- **Logging:** structured logs via Zap (`internal/logger`); level follows config (debug vs production defaults).
+- **Errors:** HTTP mapping lives in `internal/httpserver/errors.go`; executor returns domain/store errors that handlers translate.
+- **Sentry:** optional error reporting is integrated with Gin in the HTTP server (see `internal/logger` package comment for lifecycle notes—not duplicated in the logger package itself).
+- **Metrics / tracing:** not prescribed in-repo beyond what Gin and the process expose; add deliberately if operational requirements grow.
+
+---
+
+## Persistence strategy
+
+- **Engine:** PostgreSQL via `pgx`.
+- **Documents:** JSONB columns for playlist, playlist-group, and channel bodies (flexible schema-aligned storage with validated write path).
+- **Relationships:** junction tables (e.g. group/channel membership); appropriate indexes for id, slug, and key pagination patterns.
+- **Migrations:** `golang-migrate` (SQL under `db/migrations/`).
+- **Timekeeping:** `updated_at` maintained with database triggers where applicable.
+
+Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membership tables, and indexed playlist items—see migrations for the authoritative schema.
+
+---
+
+## Request flow (illustrative)
+
+**Create playlist**
+
 ```
 POST /api/v1/playlists
   → Validate API key
-  → Parse JSON
-  → Validate against DP-1 schema
-  → Generate UUID and slug
-  → Sign with Ed25519
-  → Store in PostgreSQL
-  → Return signed playlist
+  → Parse JSON into models
+  → Executor: sign (dp1svc) → validate → store
+  → Return signed playlist JSON
 ```
 
-**Retrieving a playlist:**
+**Read playlist**
+
 ```
 GET /api/v1/playlists/:id
-  → Query PostgreSQL
-  → Return JSONB (includes signatures)
+  → Store load by id or slug
+  → Return JSONB body (signatures included)
 ```
 
-## Technology Stack
-
-- **Go** — Fast, single binary, great stdlib
-- **Gin** — Lightweight web framework
-- **PostgreSQL** — Reliable, JSONB support
-- **pgx** — High-performance Postgres driver
-- **dp1-go** — DP-1 spec implementation
+---
 
 ## Authentication
 
-- **Writes:** Require `Authorization: Bearer <api-key>`
-- **Reads:** Public, no auth needed
-- **Signatures:** Ed25519, included in response
+- **Writes:** `Authorization: Bearer <api-key>`.
+- **Reads:** public unless restricted by deployment.
+- **Cryptographic signatures:** Ed25519 (v1.1+ multisig) via `dp1svc`; documents carry feed-operator proof, not end-user OAuth.
 
-Single shared API key (not per-user). For production, integrate with your auth system or use a reverse proxy.
+Single shared API key is the default deployment story; production may front the service with stronger auth or a reverse proxy.
 
-## Deployment
+---
 
-**Development:**
+## Technology stack
+
+- Go, Gin, PostgreSQL, pgx, dp1-go, Zap (and optional Sentry via httpserver).
+
+---
+
+## Deployment (summary)
+
+**Development**
+
 ```bash
 go run ./cmd/server -config config/config.yaml
 ```
 
-**Docker:**
+**Docker**
+
 ```bash
 cp config/.env.example config/.env  # customize if needed
 docker compose up --build
 ```
 
-**Production:**
+**Production binary**
+
 ```bash
 CGO_ENABLED=0 go build -o dp1-feed ./cmd/server
-# Set DP1_FEED_* environment variables
+# Set DP1_FEED_* environment variables as needed
 ./dp1-feed -config /path/to/config.yaml
 ```
 
-## What's Not Included
+Configuration load order: defaults → YAML → environment variables. For Docker, env from `config/.env` is typical.
 
-By design, this server is focused and minimal:
+---
 
-- ❌ No OAuth/JWT (use API keys or add a proxy)
-- ❌ No rate limiting (add nginx/caddy if needed)
-- ❌ No async operations (all requests are synchronous)
-- ❌ No message queues
-- ❌ No microservices
+## Intentionally out of scope
 
-These are intentional choices to keep the system simple and deployable.
+- OAuth/JWT (use API keys or a proxy).
+- Built-in rate limiting (use edge proxy if required).
+- Async pipelines and message queues.
+- Splitting into multiple services for this codebase’s default deployment model.
+
+---
+
+## Further reading
+
+- [DP-1 Specification](https://github.com/display-protocol/dp1)
+- [OpenAPI Spec](../api/openapi.yaml)
+- [DEVELOPMENT.md](../DEVELOPMENT.md)
+
+---
 
 ## Contributing
 
-See [DEVELOPMENT.md](../DEVELOPMENT.md) for setup and testing.
-
-Keep changes simple. When in doubt, prefer clarity over cleverness.
-
-## Further Reading
-
-- [DP-1 Specification](https://github.com/display-protocol/dp1)
-- [OpenAPI Spec](../api/openapi.yaml) for complete API reference
-- [DEVELOPMENT.md](../DEVELOPMENT.md) for contributing guide
+See [DEVELOPMENT.md](../DEVELOPMENT.md). Prefer small, clear changes over clever abstractions.

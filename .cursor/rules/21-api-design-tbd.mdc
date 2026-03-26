@@ -1,0 +1,65 @@
+---
+description: >-
+  HTTP API conventions for dp1-feed-v2—OpenAPI as contract, URLs, auth,
+  pagination, errors. Mirrors docs/api_design.md.
+globs:
+  - "**/*.go"
+  - "docs/**"
+  - "api/**"
+alwaysApply: true
+---
+
+# API Design
+
+**Normative contract:** `api/openapi.yaml`. **`docs/api_design.md`** is the narrative summary; when API policy or behavior changes, update **OpenAPI, handlers, and both docs** together so clients and codegen stay accurate.
+
+## Base URL and versioning
+
+- Product routes under **`/api/v1`**; **`GET /api/v1`** returns deployment metadata (`extensionsEnabled`, endpoints, etc.).
+- **`/health`** and **`/api/v1/health`** for liveness (no auth).
+- Version changes are explicit path revisions (e.g. future `v2`); do not silently change `v1` semantics.
+
+## Resource naming and URL shape
+
+- Plural segments: `playlists`, `playlist-groups`, `channels`, `playlist-items`.
+- Kebab-case multi-word paths; single resource **`{id}`** path param = UUID **or** slug.
+- Registry: **`GET`** / **`PUT`** `/api/v1/registry/channels` (PUT authenticated).
+
+## JSON
+
+- **`application/json`**; field names follow handler/DP-1 JSON tags and OpenAPI schemas (e.g. list: `items`, `hasMore`, optional `cursor`).
+
+## Authentication
+
+- **Bearer API key** on mutating routes and registry PUT: `Authorization: Bearer <secret>` (`ApiKeyAuth`).
+- Constant-time comparison of full header value vs configured secret (`internal/httpserver/middleware.go`).
+- Reads public unless network-restricted; no built-in OAuth.
+
+## Pagination, sort, filter
+
+- **`limit`:** 1–100, default 100. **`cursor`:** opaque. **`sort`:** `asc`|`desc` by `created_at`, default `asc`.
+- **Playlist items list only:** query `channel` or `playlist-group` (UUID/slug); mutually exclusive where enforced.
+
+## Error model
+
+- Body shape: `{"error":"<stable_code>","message":"<detail>"}` — see `internal/httpserver/errors.go`.
+- Typical codes: `bad_request`, `validation_error`, `signature_invalid` (400); `unauthorized` (401); `not_found`, `extensions_disabled` (404); `internal_error` (500).
+- Prefer branching on **`error`**; **`message`** may vary.
+
+## HTTP semantics (summary)
+
+- POST create, GET read/list, PUT full replace, PATCH partial update, DELETE remove (per OpenAPI per resource).
+- Registry PUT replaces the **entire** registry atomically.
+- Extensions off: channel-style routes → **404** + `extensions_disabled`.
+
+## Idempotency
+
+- No idempotency-key header; POST may duplicate on retry; GET/DELETE retries are usual; PUT/PATCH are last-write-wins.
+
+## Compatibility
+
+- Avoid breaking OpenAPI without version or client migration plan; additive changes preferred.
+
+## References
+
+- `docs/api_design.md`, `api/openapi.yaml`, `docs/architecture.md`
