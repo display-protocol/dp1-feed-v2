@@ -10,7 +10,9 @@ on:
       - '*.go'
       - 'go.mod'
       - 'go.sum'
+      - '**/*.md'
       - '.golangci.yml'
+      - '.markdownlint-cli2.jsonc'
       - '.github/workflows/lint.yaml'
   pull_request:
     branches:
@@ -21,15 +23,17 @@ on:
       - '*.go'
       - 'go.mod'
       - 'go.sum'
+      - '**/*.md'
       - '.golangci.yml'
+      - '.markdownlint-cli2.jsonc'
       - '.github/workflows/lint.yaml'
 
 permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint and build
+  golang:
+    name: Lint and build (Go)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -68,3 +72,14 @@ jobs:
 
       - name: Build all packages
         run: go build -v ./...
+
+  markdown:
+    name: Lint markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run markdownlint
+        run: npx --yes markdownlint-cli2 "**/*.md" "#node_modules"

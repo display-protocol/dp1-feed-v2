@@ -60,12 +60,12 @@ Check health:
 curl http://localhost:8787/health
 ```
 
-Create your first playlist:
+Create your first playlist (set `DP1_FEED_API_KEY` in your shell to match `config/config.yaml` or `config/.env`):
 
 ```bash
 curl -X POST http://localhost:8787/api/v1/playlists \
-  -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${DP1_FEED_API_KEY}" \
   -d '{
     "dpVersion": "1.1.0",
     "title": "My First Playlist",
