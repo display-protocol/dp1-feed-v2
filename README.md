@@ -1,5 +1,9 @@
 # DP-1 Feed
 
+[![Lint](https://github.com/display-protocol/dp1-feed-v2/actions/workflows/lint.yaml/badge.svg)](https://github.com/display-protocol/dp1-feed-v2/actions/workflows/lint.yaml)
+[![Unit tests](https://github.com/display-protocol/dp1-feed-v2/actions/workflows/test.yaml/badge.svg)](https://github.com/display-protocol/dp1-feed-v2/actions/workflows/test.yaml)
+[![Codecov](https://codecov.io/gh/display-protocol/dp1-feed-v2/graph/badge.svg)](https://codecov.io/gh/display-protocol/dp1-feed-v2)
+
 > A simple, spec-compliant API server for creating and managing [DP-1](https://github.com/display-protocol/dp1) playlists.
 
 DP-1 Feed helps you build and serve cryptographically signed digital display playlists. Think of it as a lightweight backend for digital art exhibitions, media displays, or any content that needs verifiable playlists.

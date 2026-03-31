@@ -5,10 +5,22 @@ on:
     branches:
       - main
       - develop
+    paths:
+      - '**/*.go'
+      - '*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test.yaml'
   pull_request:
     branches:
       - main
       - develop
+    paths:
+      - '**/*.go'
+      - '*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test.yaml'
 
 permissions:
   contents: read
@@ -34,15 +46,6 @@ jobs:
 
       - name: Verify dependencies
         run: go mod verify
-
-      # - name: Check generated code
-      #   run: |
-      #     go generate ./...
-      #     git diff --exit-code || {
-      #       echo "Generated files are out of date. Run 'go generate ./...' and commit changes."
-      #       git diff
-      #       exit 1
-      #     }
 
       - name: Run unit tests with coverage
         run: |

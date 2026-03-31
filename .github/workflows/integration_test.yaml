@@ -5,10 +5,22 @@ on:
     branches:
       - main
       - develop
+    paths:
+      - '**/*.go'
+      - '*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test.yaml'
   pull_request:
     branches:
       - main
       - develop
+    paths:
+      - '**/*.go'
+      - '*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test.yaml'
 
 permissions:
   contents: read
