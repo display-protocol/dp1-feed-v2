@@ -8,33 +8,33 @@ Welcome! This guide helps you understand and contribute to DP-1 Feed.
 
 1. **Clone and set up dependencies**
 
-```bash
-git clone https://github.com/your-org/dp1-feed-v2.git
-cd dp1-feed-v2
+   ```bash
+   git clone https://github.com/your-org/dp1-feed-v2.git
+   cd dp1-feed-v2
 
-# Clone dp1-go next to this repo (required for local development)
-cd ..
-git clone https://github.com/display-protocol/dp1-go.git
-cd dp1-feed-v2
-```
+   # Clone dp1-go next to this repo (required for local development)
+   cd ..
+   git clone https://github.com/display-protocol/dp1-go.git
+   cd dp1-feed-v2
+   ```
 
 2. **Install Go dependencies**
 
-```bash
-go mod download
-```
+   ```bash
+   go mod download
+   ```
 
 3. **Set up your local database**
 
-```bash
-createdb dp1_feed_test
-```
+   ```bash
+   createdb dp1_feed_test
+   ```
 
 4. **Run the tests**
 
-```bash
-go test ./... -race -count=1
-```
+   ```bash
+   go test ./... -race -count=1
+   ```
 
 If tests pass, you're ready to develop!
 
@@ -42,7 +42,7 @@ If tests pass, you're ready to develop!
 
 The codebase follows a clean, layered architecture:
 
-```
+```text
 dp1-feed-v2/
 ├── cmd/server/          # Application entry point
 │   └── main.go          # Startup, config loading, wiring

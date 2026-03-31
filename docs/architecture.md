@@ -4,7 +4,7 @@ DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 pl
 
 **Design philosophy:** simplicity first—one process, synchronous request handling, and a small set of packages with clear roles.
 
-```
+```text
 Client → HTTP → dp1-feed-v2 → PostgreSQL
               (validate + sign)
 ```
@@ -14,7 +14,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 ## Target package layout
 
 | Area | Packages | Role |
-|------|----------|------|
+| ---- | -------- | ---- |
 | **Entry + config** | `cmd/server`, `internal/config` | Process bootstrap, configuration (defaults → YAML → env). |
 | **Transport** | `internal/httpserver` | Gin server: routes, middleware, DTOs, HTTP errors, pagination helpers. |
 | **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
@@ -76,9 +76,9 @@ Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membersh
 
 ## Request flow (illustrative)
 
-**Create playlist**
+### Create playlist
 
-```
+```text
 POST /api/v1/playlists
   → Validate API key
   → Parse JSON into models
@@ -86,9 +86,9 @@ POST /api/v1/playlists
   → Return signed playlist JSON
 ```
 
-**Read playlist**
+### Read playlist
 
-```
+```text
 GET /api/v1/playlists/:id
   → Store load by id or slug
   → Return JSONB body (signatures included)
@@ -114,20 +114,20 @@ Single shared API key is the default deployment story; production may front the 
 
 ## Deployment (summary)
 
-**Development**
+### Development
 
 ```bash
 go run ./cmd/server -config config/config.yaml
 ```
 
-**Docker**
+### Docker
 
 ```bash
 cp config/.env.example config/.env  # customize if needed
 docker compose up --build
 ```
 
-**Production binary**
+### Production binary
 
 ```bash
 CGO_ENABLED=0 go build -o dp1-feed ./cmd/server

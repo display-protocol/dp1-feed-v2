@@ -46,7 +46,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 **Lists** (`playlists`, `playlist-groups`, `channels`, `playlist-items`) share:
 
 | Query param | Meaning |
-|-------------|---------|
+| ----------- | ------- |
 | **`limit`** | Page size, integer **1–100**, default **100**. |
 | **`cursor`** | Opaque cursor from the previous response’s `cursor` field. |
 | **`sort`** | **`asc`** or **`desc`** by `created_at`; default **`asc`**. |
@@ -89,7 +89,7 @@ Errors use a single JSON shape everywhere:
 Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 
 | HTTP status | `error` (typical) | When |
-|------------|-------------------|------|
+| ----------- | ----------------- | ---- |
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
