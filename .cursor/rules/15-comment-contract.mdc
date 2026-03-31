@@ -1,0 +1,30 @@
+---
+description: Comment contract for preserving design context in non-obvious Go code
+globs:
+  - "**/*.go"
+alwaysApply: true
+---
+
+# Comment Contract
+
+This repository intentionally prefers richer comments than typical Go code when they preserve context future agents and maintainers would otherwise lose.
+
+## Add comments when code is non-obvious
+Prefer comments around:
+- concurrency and lifecycle coordination
+- data integrity assumptions
+- retries, timeouts, and idempotency rules
+- protocol or spec edge cases
+- package boundaries and dependency constraints
+- trade-offs where a simpler-looking alternative was intentionally rejected
+
+## Good comment content
+Comments should preserve:
+- why the code exists
+- invariants it must preserve
+- failure and recovery behavior
+- design trade-offs
+- TODO owner decisions that materially affect later amendments
+
+## Avoid low-value comments
+Do not narrate obvious syntax or restate the code mechanically.

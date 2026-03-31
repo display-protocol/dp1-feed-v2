@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ ! -f go.mod ]]; then
+  echo "No go.mod found. Skipping Go post-implementation checks."
+  exit 0
+fi
+
+echo "==> gofmt"
+unformatted="$(gofmt -l .)"
+if [[ -n "$unformatted" ]]; then
+  echo "The following files need gofmt:"
+  printf '%s\n' "$unformatted"
+  exit 1
+fi
+
+echo "==> go vet"
+go vet ./...
+
+echo "==> golangci-lint"
+golangci-lint run ./...
+
+echo "==> go test"
+go test ./...
+
+echo "==> go test -race"
+go test -race ./...
+
+echo "Post-implementation checks passed."

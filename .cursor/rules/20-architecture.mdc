@@ -1,0 +1,95 @@
+---
+description: >-
+  System architecture for dp1-feed-v2—package layout, boundaries, dependency
+  direction, transactions, observability, persistence. Mirrors docs/architecture.md.
+globs:
+  - "**/*.go"
+  - "docs/**"
+alwaysApply: true
+---
+
+# Architecture
+
+**Canonical detail:** `docs/architecture.md` (diagrams, deployment commands, links). When architecture changes, update **both** that doc and this rule so agents and humans stay aligned.
+
+DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 playlists, playlist-groups, and channels. Single process: Go, Gin, PostgreSQL—no message queues.
+
+**Design philosophy:** simplicity first—one process, synchronous request handling, a small set of packages with clear roles.
+
+Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
+
+## Target package layout
+
+| Area | Packages | Role |
+|------|----------|------|
+| **Entry + config** | `cmd/server`, `internal/config` | Process bootstrap; config defaults → YAML → env. |
+| **Transport** | `internal/httpserver` | Gin: routes, middleware, DTOs, HTTP errors, pagination. |
+| **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
+| **DP-1 protocol adapter** | `internal/dp1svc` | dp1-go: schema validation and v1.1+ multisig signing. |
+| **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
+| **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL, migrations, pagination types. |
+| **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
+| **Cross-cutting** | `internal/logger` | Zap; Sentry wired with Gin in `httpserver` (see Observability). |
+| **Tests** | `internal/mocks`, `internal/store/pg/pgtest` | Generated mocks and Postgres test helpers. |
+| **Small utilities** | `internal/utils` | Shared non-domain helpers (e.g. JSON). |
+
+## Domain / service / store / transport boundaries
+
+- **Transport (`internal/httpserver`):** HTTP only—parse bodies, auth on mutating methods, call executor, map errors to API responses, JSON encode. No DP-1 signing or schema logic in handlers.
+- **Application (`internal/executor`):** Owns feed workflows: CRUD, list/index reads, transactional ingest when groups/channels reference playlists (local resolution vs fetch). Depends on `dp1svc`, `store`, `fetcher`, `models`; no HTTP.
+- **Domain / protocol (`internal/dp1svc` + dp1-go):** JSON Schema validation and signing (JCS, SHA-256 digest, Ed25519). Executor uses `dp1svc.ValidatorSigner` as the spec boundary.
+- **Store (`internal/store`):** Persistence and queries—IDs, slugs, JSONB, membership, playlist-item index, cursor pagination. No DP-1 validation or signing.
+
+## Dependency direction rules
+
+- **Allowed:** `httpserver` → `executor` → (`dp1svc`, `store`, `fetcher`) → (`models`, `config` as needed). **`executor` must not import `httpserver`.**
+- **Store** implements interfaces used by `executor`; it must not import `executor` or `httpserver`.
+- **`dp1svc`** depends on dp1-go and crypto only—not `store` or HTTP.
+- **Avoid cycles:** shared DTOs in `internal/models`; pagination/sort types in `internal/store` as appropriate—not importing “up” the stack.
+
+## Background job and transaction ownership
+
+- **Background jobs:** none by design. Request-path only; no workers or queues.
+- **Transactions:** multi-step writes (e.g. playlist-group/channel create with resolved playlists and membership) are owned by **`internal/executor`**, using the store’s transactional APIs so ingest + persist commit or roll back together. **HTTP does not start or own DB transactions.**
+
+## Observability expectations
+
+- **Logging:** Zap via `internal/logger`; level from config (debug vs production defaults).
+- **Errors:** HTTP mapping in `internal/httpserver/errors.go`; executor returns errors handlers translate.
+- **Sentry:** optional, integrated with Gin in the HTTP server (see `internal/logger` package comment for lifecycle).
+- **Metrics / tracing:** not prescribed in-repo; add only when requirements justify it.
+
+## Persistence strategy
+
+- **Engine:** PostgreSQL via `pgx`.
+- **Documents:** JSONB for playlist, playlist-group, channel bodies (validated write path).
+- **Relationships:** junction tables; indexes for id, slug, pagination.
+- **Migrations:** golang-migrate; SQL under `db/migrations/`.
+- **Timekeeping:** `updated_at` via DB triggers where applicable.
+
+Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_groups`, `channels`, membership, indexed playlist items.
+
+## Request flow (illustrative)
+
+- **Create playlist:** POST → API key → parse models → executor: sign (`dp1svc`) → validate → store → JSON response.
+- **Read playlist:** GET → store by id/slug → JSONB body (signatures included).
+
+## Authentication
+
+- **Writes:** `Authorization: Bearer <api-key>`.
+- **Reads:** public unless deployment restricts.
+- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (feed operator), not end-user OAuth.
+
+## Technology stack
+
+Go, Gin, PostgreSQL, pgx, dp1-go, Zap; optional Sentry via httpserver.
+
+## Intentionally out of scope
+
+OAuth/JWT as built-in (use API keys or proxy); built-in rate limiting (use edge proxy); async pipelines and message queues; multi-service split as the default model.
+
+## Further reading
+
+- `docs/architecture.md`
+- DP-1: https://github.com/display-protocol/dp1
+- `api/openapi.yaml`, `DEVELOPMENT.md`

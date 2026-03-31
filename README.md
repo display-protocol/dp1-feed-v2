@@ -28,54 +28,54 @@ Built with Go, Gin, and PostgreSQL. No complex auth, no message queues—just st
 
 1. **Set up the database**
 
-```bash
-createdb dp1_feed
-```
+   ```bash
+   createdb dp1_feed
+   ```
 
-Or use Docker Compose (see below).
+   Or use Docker Compose (see below).
 
 2. **Configure the server**
 
-Copy the example config and customize it:
+   Copy the example config and customize it:
 
-```bash
-cp config/config.yaml.example config/config.yaml
-# Edit config/config.yaml to set your API key and signing key
-# Generate a signing key: openssl rand -hex 32
-```
+   ```bash
+   cp config/config.yaml.example config/config.yaml
+   # Edit config/config.yaml to set your API key and signing key
+   # Generate a signing key: openssl rand -hex 32
+   ```
 
 3. **Start the server**
 
-```bash
-go run ./cmd/server -config config/config.yaml
-```
+   ```bash
+   go run ./cmd/server -config config/config.yaml
+   ```
 
-The server starts on `http://localhost:8787` by default.
+   The server starts on `http://localhost:8787` by default.
 
 4. **Try it out**
 
-Check health:
+   Check health:
 
-```bash
-curl http://localhost:8787/health
-```
+   ```bash
+   curl http://localhost:8787/health
+   ```
 
-Create your first playlist:
+   Create your first playlist (set `DP1_FEED_API_KEY` in your shell to match `config/config.yaml` or `config/.env`):
 
-```bash
-curl -X POST http://localhost:8787/api/v1/playlists \
-  -H "Authorization: Bearer your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dpVersion": "1.1.0",
-    "title": "My First Playlist",
-    "items": [{
-      "source": "https://example.com/video.mp4",
-      "duration": 30000,
-      "license": "open"
-    }]
-  }'
-```
+   ```bash
+   curl -X POST http://localhost:8787/api/v1/playlists \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer ${DP1_FEED_API_KEY}" \
+     -d '{
+       "dpVersion": "1.1.0",
+       "title": "My First Playlist",
+       "items": [{
+         "source": "https://example.com/video.mp4",
+         "duration": 30000,
+         "license": "open"
+       }]
+     }'
+   ```
 
 ## Docker
 
@@ -83,16 +83,16 @@ Prefer containers? We've got you covered.
 
 1. **Set up environment variables**
 
-```bash
-cp config/.env.example config/.env
-# Edit config/.env to customize your API key and signing key if needed
-```
+   ```bash
+   cp config/.env.example config/.env
+   # Edit config/.env to customize your API key and signing key if needed
+   ```
 
 2. **Start the services**
 
-```bash
-docker compose up --build
-```
+   ```bash
+   docker compose up --build
+   ```
 
 This starts both PostgreSQL and the feed server. The API will be available at `http://localhost:8787`.
 

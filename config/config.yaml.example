@@ -29,6 +29,6 @@ extensions:
 playlist:
   fetch_timeout: 30s
   fetch_max_body_bytes: 4194304
-  # Ed25519 seed: 32 bytes = 64 hex chars. Generate: openssl rand -hex 32
-  signing_key_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  # Ed25519 seed: 32 bytes = 64 hex chars. Required — generate: openssl rand -hex 32 (or set DP1_FEED_SIGNING_KEY_HEX)
+  signing_key_hex: ""
   public_base_url: "http://localhost:8787"

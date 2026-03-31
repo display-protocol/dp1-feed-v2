@@ -1,0 +1,36 @@
+---
+description: Core architecture and implementation constraints for dp1-feed-v2
+globs:
+  - "**/*.go"
+  - "**/*_test.go"
+  - "AGENTS.md"
+  - "docs/**"
+alwaysApply: true
+---
+
+# Core Architecture Rule
+
+Use this rule for structural decisions and package boundaries.
+
+## 1) Non-negotiable constraints
+- Prefer deleting or replacing weak designs over layering on local fixes.
+- Do not preserve compatibility shims, transitional abstractions, or speculative extensibility unless explicitly requested.
+- Prefer small, cohesive, testable packages.
+- Keep side effects explicit and localized.
+- For non-obvious logic, add comments that preserve future amendment context: intent, invariants, trade-offs, rejected alternatives, failure modes, and concurrency assumptions.
+
+## 2) Boundary posture
+- Keep transport, persistence, domain, and orchestration concerns separated.
+- Keep domain logic decoupled from HTTP, storage, and infrastructure details where practical.
+- Keep package APIs narrow and purposeful.
+- Avoid circular dependencies and package sprawl.
+
+## 3) Current repository constraint
+- Canonical architecture rules remain `TBD` for the repository owner.
+- Canonical API design rules remain `TBD` for the repository owner.
+- Until those are finalized, avoid cementing large public contracts without documenting the assumption and trade-off.
+
+## 4) Completion checks
+- Boundaries are clearer after the change, not muddier.
+- Non-obvious behavior is documented where future agents would otherwise have to reverse-engineer intent.
+- No new hidden global state or hard-to-test coupling is introduced.

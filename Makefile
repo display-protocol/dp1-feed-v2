@@ -1,13 +1,14 @@
 # dp1-feed-v2 — local development helpers
 # Requires: Go 1.24+ (module uses tool/mockgen), Docker for integration tests & compose.
-# Lint: golangci-lint v2 on PATH (https://golangci-lint.run/welcome/install/)
+# Lint: golangci-lint v2 on PATH (https://golangci-lint.run/welcome/install/);
+#       markdown: npx markdownlint-cli2 (same as .github/workflows/lint.yaml)
 
 GOLANGCI_LINT ?= golangci-lint
 
 .PHONY: help
 help:
 	@echo "Targets:"
-	@echo "  make lint              - golangci-lint run (see .golangci.yml)"
+	@echo "  make lint              - golangci-lint (see .golangci.yml) + markdownlint-cli2 on *.md"
 	@echo "  make lint-fix          - golangci-lint run --fix (format + safe fixes)"
 	@echo "  make test              - unit tests (all packages, -race)"
 	@echo "  make test-integration  - store contract tests (Docker + -tags=integration)"
@@ -39,6 +40,8 @@ SERVER_BIN  ?= $(BIN_DIR)/server
 lint:
 	@$(GOLANGCI_LINT) version >/dev/null 2>&1 || { echo "golangci-lint not found; install: https://golangci-lint.run/welcome/install/"; exit 1; }
 	$(GOLANGCI_LINT) run ./...
+	@command -v npx >/dev/null 2>&1 || { echo "npx not found; install Node.js for markdown lint (https://nodejs.org/)"; exit 1; }
+	npx --yes markdownlint-cli2 "**/*.md" "#node_modules"
 
 .PHONY: lint-fix
 lint-fix:
