@@ -1,0 +1,1051 @@
+openapi: 3.1.0
+info:
+  title: DP-1 Feed V2
+  version: 0.1.0
+  description: |
+    REST API for DP-1 playlists, playlist-groups, channels, and curated channel registry.
+    
+    This service provides:
+    - DP-1 playlist management with v1.1+ multisig support
+    - Playlist-group (exhibition) composition
+    - Channel management (requires extensions enabled)
+    - Playlist item indexing and querying
+    - Curated channel registry
+
+    Authentication: Bearer token (API key) for write operations.
+
+servers:
+  - url: http://localhost:8787
+    description: Local development
+
+tags:
+  - name: health
+    description: Health check endpoints
+  - name: playlists
+    description: DP-1 playlist management
+  - name: playlist-groups
+    description: DP-1 playlist-group (exhibition) management
+  - name: channels
+    description: DP-1 channel management (extensions)
+  - name: playlist-items
+    description: Indexed playlist items
+  - name: registry
+    description: Curated channel registry
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Liveness endpoint (no auth required)
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  timestamp:
+                    type: string
+                    format: date-time
+                  version:
+                    type: string
+
+  /api/v1:
+    get:
+      tags: [health]
+      summary: API information
+      description: Returns deployment metadata and available endpoints
+      responses:
+        '200':
+          description: API metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  version:
+                    type: string
+                  description:
+                    type: string
+                  specification:
+                    type: string
+                  extensionsEnabled:
+                    type: boolean
+                  endpoints:
+                    type: object
+
+  /api/v1/health:
+    get:
+      tags: [health]
+      summary: API health check
+      description: Same as /health but under API namespace
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  timestamp:
+                    type: string
+                  version:
+                    type: string
+
+  /api/v1/playlists:
+    get:
+      tags: [playlists]
+      summary: List playlists
+      description: Returns paginated list of playlists ordered by created_at
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: List of playlists
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ListResponse'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Playlist'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    post:
+      tags: [playlists]
+      summary: Create playlist
+      description: Creates a new DP-1 playlist with v1.1+ multisig
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistInput'
+      responses:
+        '201':
+          description: Playlist created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playlist'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/playlists/{id}:
+    get:
+      tags: [playlists]
+      summary: Get playlist
+      description: Returns a single playlist by UUID or slug
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      responses:
+        '200':
+          description: Playlist document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playlist'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [playlists]
+      summary: Replace playlist
+      description: Fully replaces a playlist document
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistInput'
+      responses:
+        '200':
+          description: Playlist replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playlist'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [playlists]
+      summary: Update playlist
+      description: Partially updates a playlist document (only provided fields are updated)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistUpdateInput'
+      responses:
+        '200':
+          description: Playlist updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Playlist'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [playlists]
+      summary: Delete playlist
+      description: Deletes a playlist (fails if referenced by groups/channels)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      responses:
+        '204':
+          description: Playlist deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/playlist-groups:
+    get:
+      tags: [playlist-groups]
+      summary: List playlist-groups
+      description: Returns paginated list of playlist-groups (exhibitions)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: List of playlist-groups
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ListResponse'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PlaylistGroup'
+
+    post:
+      tags: [playlist-groups]
+      summary: Create playlist-group
+      description: Creates a new playlist-group with resolved playlist references
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistGroupInput'
+      responses:
+        '201':
+          description: Playlist-group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/playlist-groups/{id}:
+    get:
+      tags: [playlist-groups]
+      summary: Get playlist-group
+      description: Returns a single playlist-group by UUID or slug
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      responses:
+        '200':
+          description: Playlist-group document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistGroup'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [playlist-groups]
+      summary: Replace playlist-group
+      description: Fully replaces a playlist-group document
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistGroupInput'
+      responses:
+        '200':
+          description: Playlist-group replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [playlist-groups]
+      summary: Update playlist-group
+      description: Partially updates a playlist-group document (only provided fields are updated)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaylistGroupUpdateInput'
+      responses:
+        '200':
+          description: Playlist-group updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [playlist-groups]
+      summary: Delete playlist-group
+      description: Deletes a playlist-group (cascades membership)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      responses:
+        '204':
+          description: Playlist-group deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/channels:
+    get:
+      tags: [channels]
+      summary: List channels
+      description: Returns paginated list of channels (requires extensions enabled)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: List of channels
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ListResponse'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Channel'
+        '404':
+          $ref: '#/components/responses/ExtensionsDisabled'
+
+    post:
+      tags: [channels]
+      summary: Create channel
+      description: Creates a new channel with resolved playlist references (requires extensions)
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelInput'
+      responses:
+        '201':
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ExtensionsDisabled'
+
+  /api/v1/channels/{id}:
+    get:
+      tags: [channels]
+      summary: Get channel
+      description: Returns a single channel by UUID or slug (requires extensions)
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      responses:
+        '200':
+          description: Channel document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '404':
+          description: Channel not found or extensions disabled
+
+    put:
+      tags: [channels]
+      summary: Replace channel
+      description: Fully replaces a channel document (requires extensions)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelInput'
+      responses:
+        '200':
+          description: Channel replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Channel not found or extensions disabled
+
+    patch:
+      tags: [channels]
+      summary: Update channel
+      description: Partially updates a channel document (only provided fields are updated, requires extensions)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelUpdateInput'
+      responses:
+        '200':
+          description: Channel updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Channel not found or extensions disabled
+
+    delete:
+      tags: [channels]
+      summary: Delete channel
+      description: Deletes a channel (cascades membership, requires extensions)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdOrSlug'
+      responses:
+        '204':
+          description: Channel deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Channel not found or extensions disabled
+
+  /api/v1/playlist-items:
+    get:
+      tags: [playlist-items]
+      summary: List playlist items
+      description: Returns paginated indexed items across all playlists, optionally filtered
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Sort'
+        - name: channel
+          in: query
+          description: Filter by channel UUID or slug
+          schema:
+            type: string
+        - name: playlist-group
+          in: query
+          description: Filter by playlist-group UUID or slug (mutually exclusive with channel)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of playlist items
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ListResponse'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PlaylistItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/playlist-items/{id}:
+    get:
+      tags: [playlist-items]
+      summary: Get playlist item
+      description: Returns a single indexed playlist item by UUID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Playlist item UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Playlist item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaylistItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/registry/channels:
+    get:
+      tags: [registry]
+      summary: Get curated channel registry
+      description: Returns an ordered list of publishers with their channel URLs
+      responses:
+        '200':
+          description: Curated registry
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RegistryItem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    put:
+      tags: [registry]
+      summary: Replace curated channel registry
+      description: Atomically replaces the entire registry with validation
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              maxItems: 1000
+              items:
+                $ref: '#/components/schemas/RegistryItem'
+      responses:
+        '200':
+          description: Registry updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Curated registry updated successfully
+                  items_count:
+                    type: integer
+                    description: Number of publishers
+                  total_channels:
+                    type: integer
+                    description: Total number of channel URLs
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      description: API key for write operations
+
+  parameters:
+    IdOrSlug:
+      name: id
+      in: path
+      required: true
+      description: Resource UUID or slug
+      schema:
+        type: string
+
+    Limit:
+      name: limit
+      in: query
+      description: Maximum items to return (1-100, default 100)
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 100
+
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque pagination cursor from previous response
+      schema:
+        type: string
+
+    Sort:
+      name: sort
+      in: query
+      description: Sort order by created_at
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: asc
+
+  schemas:
+    ListResponse:
+      type: object
+      required:
+        - items
+        - hasMore
+      properties:
+        items:
+          type: array
+          description: Array of items (type varies by endpoint)
+        cursor:
+          type: string
+          description: Cursor for next page (omitted if no more pages)
+        hasMore:
+          type: boolean
+          description: Whether more items are available
+
+    PlaylistInput:
+      type: object
+      required:
+        - dpVersion
+        - title
+        - items
+      properties:
+        dpVersion:
+          type: string
+          example: "1.1.0"
+        title:
+          type: string
+        slug:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaylistItemInput'
+        curators:
+          type: array
+          items:
+            type: object
+        summary:
+          type: string
+        coverImage:
+          type: string
+          format: uri
+        defaults:
+          type: object
+        dynamicQuery:
+          type: object
+
+    PlaylistUpdateInput:
+      type: object
+      description: Partial update for playlist (all fields optional, only provided fields are updated)
+      properties:
+        dpVersion:
+          type: string
+          example: "1.1.0"
+        title:
+          type: string
+        slug:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaylistItemInput'
+        curators:
+          type: array
+          items:
+            type: object
+        summary:
+          type: string
+        coverImage:
+          type: string
+          format: uri
+        defaults:
+          type: object
+        dynamicQuery:
+          type: object
+
+    PlaylistItemInput:
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          format: uri
+        title:
+          type: string
+        duration:
+          type: number
+        license:
+          type: string
+        ref:
+          type: string
+        override:
+          type: object
+        display:
+          type: object
+        repro:
+          type: object
+        provenance:
+          type: object
+
+    Playlist:
+      type: object
+      description: DP-1 playlist document (includes signatures)
+      properties:
+        dpVersion:
+          type: string
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        title:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaylistItem'
+        signatures:
+          type: array
+          description: v1.1+ multisig array
+        # Additional fields...
+
+    PlaylistItem:
+      type: object
+      required:
+        - id
+        - source
+      properties:
+        id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          format: uri
+        title:
+          type: string
+        created:
+          type: string
+          format: date-time
+        duration:
+          type: number
+        # Additional fields...
+
+    PlaylistGroupInput:
+      type: object
+      required:
+        - title
+        - playlists
+      properties:
+        title:
+          type: string
+        slug:
+          type: string
+        playlists:
+          type: array
+          description: Array of playlist URIs or slugs
+          items:
+            type: string
+        curator:
+          type: string
+        summary:
+          type: string
+        coverImage:
+          type: string
+          format: uri
+
+    PlaylistGroupUpdateInput:
+      type: object
+      description: Partial update for playlist-group (all fields optional, only provided fields are updated)
+      properties:
+        title:
+          type: string
+        slug:
+          type: string
+        playlists:
+          type: array
+          description: Array of playlist URIs or slugs
+          items:
+            type: string
+        curator:
+          type: string
+        summary:
+          type: string
+        coverImage:
+          type: string
+          format: uri
+
+    PlaylistGroup:
+      type: object
+      description: DP-1 playlist-group document
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        title:
+          type: string
+        playlists:
+          type: array
+          items:
+            type: string
+        # Additional fields...
+
+    ChannelInput:
+      type: object
+      required:
+        - title
+        - slug
+        - playlists
+      properties:
+        title:
+          type: string
+        slug:
+          type: string
+        version:
+          type: string
+          default: "1.0.0"
+        playlists:
+          type: array
+          description: Array of playlist URIs or slugs
+          items:
+            type: string
+        curators:
+          type: array
+          items:
+            type: object
+        publisher:
+          type: object
+        summary:
+          type: string
+        coverImage:
+          type: string
+          format: uri
+
+    ChannelUpdateInput:
+      type: object
+      description: Partial update for channel (all fields optional, only provided fields are updated)
+      properties:
+        title:
+          type: string
+        slug:
+          type: string
+        version:
+          type: string
+        playlists:
+          type: array
+          description: Array of playlist URIs or slugs
+          items:
+            type: string
+        curators:
+          type: array
+          items:
+            type: object
+        publisher:
+          type: object
+        summary:
+          type: string
+        coverImage:
+          type: string
+          format: uri
+
+    Channel:
+      type: object
+      description: DP-1 channel document (extensions)
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        title:
+          type: string
+        version:
+          type: string
+        playlists:
+          type: array
+          items:
+            type: string
+        # Additional fields...
+
+    RegistryItem:
+      type: object
+      required:
+        - name
+        - channel_urls
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Publisher name
+        channel_urls:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items:
+            type: string
+            format: uri
+            pattern: '\/api\/v1\/channels\/[0-9a-f-]{36}$'
+          description: Array of channel URLs
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable error message
+
+  responses:
+    BadRequest:
+      description: Bad request (validation error)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: bad_request
+            message: Invalid input
+
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: unauthorized
+            message: Invalid or missing API key
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: not_found
+            message: Resource not found
+
+    ExtensionsDisabled:
+      description: DP-1 extensions are disabled on this deployment
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: extensions_disabled
+            message: DP-1 extensions are disabled on this deployment
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: internal_error
+            message: An unexpected error occurred

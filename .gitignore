@@ -27,6 +27,11 @@ go.work.sum
 # env file
 .env
 
+# Config files (keep samples only)
+config.yaml
+!config.yaml.example
+**/config.yaml
+
 # Editor/IDE
 # .idea/
 # .vscode/
