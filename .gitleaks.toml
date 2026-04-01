@@ -1,0 +1,20 @@
+# Local allowlist for Gitleaks (CI: .github/workflows/gitleaks.yaml).
+# Extends the upstream default rules; only adds explicit allowlists for known
+# non-production placeholders (docs + example config + test constants).
+#
+# Commit 763e64a introduced README curl examples and example signing-key hex that
+# match generic/curl-auth rules; those values are intentional dev placeholders.
+
+title = "dp1-feed-v2 gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dev and documentation placeholders (not production secrets)"
+regexes = [
+	# README curl example used `Bearer your-api-key` before switching to env vars.
+	'''^your-api-key$''',
+	# Example Ed25519 seed placeholder (64 hex chars) in config examples and tests.
+	'''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
+]
