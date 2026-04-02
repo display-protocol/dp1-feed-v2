@@ -2,29 +2,21 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+
 if [[ ! -f go.mod ]]; then
   echo "No go.mod found. Skipping Go post-implementation checks."
   exit 0
 fi
 
-echo "==> gofmt"
-unformatted="$(gofmt -l .)"
-if [[ -n "$unformatted" ]]; then
-  echo "The following files need gofmt:"
-  printf '%s\n' "$unformatted"
+if ! command -v make >/dev/null 2>&1; then
+  echo "make not found; install Make to run the same gate as 'make verify' (see Makefile)."
   exit 1
 fi
 
-echo "==> go vet"
-go vet ./...
-
-echo "==> golangci-lint"
-golangci-lint run ./...
-
-echo "==> go test"
-go test ./...
-
-echo "==> go test -race"
-go test -race ./...
+echo "==> make verify (lint + test + test-integration; see Makefile)"
+make verify
 
 echo "Post-implementation checks passed."
