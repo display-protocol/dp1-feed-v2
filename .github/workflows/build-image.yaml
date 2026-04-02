@@ -14,9 +14,9 @@ on:
 env:
   AWS_REGION: us-west-2
   AWS_ACCOUNT_ID: "083397868157"
-  ECR_REPOSITORY: dp1-deed
+  ECR_REPOSITORY: dp1-feed
   ECR_REGISTRY: 083397868157.dkr.ecr.us-west-2.amazonaws.com
-  ECR_ROLE_ARN: arn:aws:iam::083397868157:role/gha-dp1-deed-ecr-usw2
+  ECR_ROLE_ARN: arn:aws:iam::083397868157:role/gha-dp1-feed-ecr-usw2
 
 jobs:
   build-and-push:
