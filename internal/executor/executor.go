@@ -117,14 +117,14 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 	slug := e.makePlaylistSlug(req, id)
 
 	// 1) Marshal DP-1 playlist fields; empty item IDs get new UUIDs so the stored document is self-consistent.
-	// Optional JSON "created" is omitted here; row ordering uses playlists.created_at (DB default now()).
-	raw, err := e.buildPlaylistDocument(req, id, slug, nil)
+	created := time.Now()
+	raw, err := e.buildPlaylistDocument(req, id, slug, created)
 	if err != nil {
 		return nil, err
 	}
 
 	// 2) Sign with v1.1+ multisig (feed role).
-	signed, err := e.dp1.SignPlaylist(raw, time.Now())
+	signed, err := e.dp1.SignPlaylist(raw, created)
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
 	}
@@ -155,8 +155,8 @@ func (e *impl) parseValidatedPlaylist(raw []byte) (*playlist.Playlist, error) {
 }
 
 // buildPlaylistDocument maps API input into a playlist.Playlist and marshals JSON.
-// createdAt is nil on insert (omit JSON "created"; playlists.created_at is authoritative). On replace, pass &rec.CreatedAt to embed creation time in the document.
-func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.UUID, slug string, createdAt *time.Time) ([]byte, error) {
+// On create, pass the signing time. On replace/update, pass the timestamp parsed from the stored body JSON "created" (not playlists.created_at).
+func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.UUID, slug string, createdAt time.Time) ([]byte, error) {
 	dp := strings.TrimSpace(req.DPVersion)
 	if dp == "" {
 		dp = models.DefaultDPVersion
@@ -173,9 +173,7 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 		Slug:      slug,
 		Title:     req.Title,
 		Items:     items,
-	}
-	if createdAt != nil {
-		p.Created = documentCreatedRFC3339Nano(*createdAt)
+		Created:   documentCreatedRFC3339Nano(createdAt),
 	}
 	if len(req.Curators) > 0 {
 		p.Curators = req.Curators
@@ -223,6 +221,15 @@ func documentCreatedRFC3339Nano(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
+// parseDocumentCreated parses JSON "created" from a stored DP-1 document body (RFC3339 / RFC3339Nano).
+func parseDocumentCreated(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse document created: %w", err)
+	}
+	return t, nil
+}
+
 // GetPlaylist returns the stored playlist document for id or slug.
 func (e *impl) GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Playlist, error) {
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
@@ -249,7 +256,7 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 	return out, nextCur, nil
 }
 
-// ReplacePlaylist replaces a playlist by id/slug (full body); id and slug come from the row; "created" in JSON (if any) uses playlists.created_at.
+// ReplacePlaylist replaces a playlist by id/slug (full body); id and slug come from the row; "created" in JSON follows the stored document.
 func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error) {
 	// 1) Get the existing playlist row.
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
@@ -258,7 +265,11 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	}
 
 	// 2) Build the new playlist document.
-	raw, err := e.buildPlaylistDocument(req, rec.ID, rec.Slug, &rec.CreatedAt)
+	created, err := parseDocumentCreated(rec.Body.Created)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := e.buildPlaylistDocument(req, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -335,8 +346,12 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		mergedReq.DynamicQuery = req.DynamicQuery
 	}
 
-	// 3. Build the new playlist document using the existing record's id, slug, and created_at.
-	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, rec.Slug, &rec.CreatedAt)
+	// 3. Build the new playlist document using the existing record's id, slug, and document "created".
+	created, err := parseDocumentCreated(rec.Body.Created)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -402,16 +417,14 @@ func (e *impl) GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*playlist
 }
 
 // buildPlaylistGroupDocument builds the group JSON; Playlists holds the same URI strings the client submitted (order preserved).
-// createdAt is nil on insert (omit JSON "created"; playlist_groups.created_at is authoritative). On replace, pass &rec.CreatedAt.
-func (e *impl) buildPlaylistGroupDocument(req *models.PlaylistGroupCreateRequest, uris []string, id uuid.UUID, slug string, createdAt *time.Time) ([]byte, error) {
+// On create, pass the signing time. On replace/update, pass the timestamp parsed from the stored body JSON "created" (not playlist_groups.created_at).
+func (e *impl) buildPlaylistGroupDocument(req *models.PlaylistGroupCreateRequest, uris []string, id uuid.UUID, slug string, createdAt time.Time) ([]byte, error) {
 	g := playlistgroup.Group{
 		ID:        id.String(),
 		Slug:      slug,
 		Title:     req.Title,
 		Playlists: uris,
-	}
-	if createdAt != nil {
-		g.Created = documentCreatedRFC3339Nano(*createdAt)
+		Created:   documentCreatedRFC3339Nano(createdAt),
 	}
 	if req.Curator != "" {
 		g.Curator = req.Curator
@@ -467,13 +480,14 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 	slug := e.makeGroupSlug(req, id)
 
 	// 2. Build the group document.
-	raw, err := e.buildPlaylistGroupDocument(req, uris, id, slug, nil)
+	created := time.Now()
+	raw, err := e.buildPlaylistGroupDocument(req, uris, id, slug, created)
 	if err != nil {
 		return nil, err
 	}
 
 	// 3. Sign with v1.1+ multisig (feed role).
-	signed, err := e.dp1.SignPlaylistGroup(raw, time.Now())
+	signed, err := e.dp1.SignPlaylistGroup(raw, created)
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
 	}
@@ -542,7 +556,11 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	}
 
 	// 3. Build the group document.
-	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, rec.Slug, &rec.CreatedAt)
+	created, err := parseDocumentCreated(rec.Body.Created)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -617,8 +635,12 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 		return nil, err
 	}
 
-	// 4. Build the group document using the existing record's id, slug, and created_at.
-	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, rec.Slug, &rec.CreatedAt)
+	// 4. Build the group document using the existing record's id, slug, and document "created".
+	created, err := parseDocumentCreated(rec.Body.Created)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -654,8 +676,8 @@ func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string) error {
 }
 
 // buildChannelDocument maps API input to channels.Channel (extensions schema) including curators/publisher entities.
-// createdAt is nil on insert (omit JSON "created"; channels.created_at is authoritative). On replace, pass &rec.CreatedAt.
-func (e *impl) buildChannelDocument(req *models.ChannelCreateRequest, uris []string, id uuid.UUID, slug string, createdAt *time.Time) ([]byte, error) {
+// On create, pass the signing time. On replace/update, pass the timestamp parsed from the stored body JSON "created" (not channels.created_at).
+func (e *impl) buildChannelDocument(req *models.ChannelCreateRequest, uris []string, id uuid.UUID, slug string, createdAt time.Time) ([]byte, error) {
 	ver := strings.TrimSpace(req.Version)
 	if ver == "" {
 		ver = models.DefaultChannelVersion
@@ -666,9 +688,7 @@ func (e *impl) buildChannelDocument(req *models.ChannelCreateRequest, uris []str
 		Title:     req.Title,
 		Version:   ver,
 		Playlists: uris,
-	}
-	if createdAt != nil {
-		ch.Created = documentCreatedRFC3339Nano(*createdAt)
+		Created:   documentCreatedRFC3339Nano(createdAt),
 	}
 	if len(req.Curators) > 0 {
 		ch.Curators = req.Curators
@@ -702,13 +722,14 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	slug := e.makeChannelSlug(req, id)
 
 	// 2. Build the channel document.
-	raw, err := e.buildChannelDocument(req, uris, id, slug, nil)
+	created := time.Now()
+	raw, err := e.buildChannelDocument(req, uris, id, slug, created)
 	if err != nil {
 		return nil, err
 	}
 
 	// 3. Sign with v1.1+ multisig (curator role).
-	signed, err := e.dp1.SignChannel(raw, time.Now())
+	signed, err := e.dp1.SignChannel(raw, created)
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
 	}
@@ -786,7 +807,11 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	}
 
 	// 3. Build the channel document.
-	raw, err := e.buildChannelDocument(req, uris, rec.ID, rec.Slug, &rec.CreatedAt)
+	created, err := parseDocumentCreated(rec.Body.Created)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := e.buildChannelDocument(req, uris, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -873,8 +898,12 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 		return nil, err
 	}
 
-	// 4. Build the channel document using the existing record's id, slug, and created_at.
-	raw, err := e.buildChannelDocument(mergedReq, uris, rec.ID, rec.Slug, &rec.CreatedAt)
+	// 4. Build the channel document using the existing record's id, slug, and document "created".
+	created, err := parseDocumentCreated(rec.Body.Created)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := e.buildChannelDocument(mergedReq, uris, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
 	}

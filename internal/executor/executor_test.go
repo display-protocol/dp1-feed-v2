@@ -297,6 +297,65 @@ func TestReplacePlaylist_notFound(t *testing.T) {
 	}
 }
 
+func TestPlaylist_replaceAndUpdate_parseDocumentCreatedFails(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		created string
+	}{
+		{"empty", ""},
+		{"malformed", "not-a-valid-rfc3339"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name+"/replace", func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+			mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl").Return(&store.PlaylistRecord{
+				ID:   id,
+				Slug: "pl",
+				Body: playlist.Playlist{
+					DPVersion: "1.1.0",
+					Title:     "T",
+					Created:   tc.created,
+					Items:     []playlist.PlaylistItem{{Source: "https://x"}},
+				},
+			}, nil)
+
+			e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+			_, err := e.ReplacePlaylist(context.Background(), "pl", validCreateReq())
+			if err == nil || !strings.Contains(err.Error(), "parse document created") {
+				t.Fatalf("expected parse document created error, got %v", err)
+			}
+		})
+		t.Run(tc.name+"/update", func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+			mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl").Return(&store.PlaylistRecord{
+				ID:   id,
+				Slug: "pl",
+				Body: playlist.Playlist{
+					DPVersion: "1.1.0",
+					Title:     "T",
+					Created:   tc.created,
+					Items:     []playlist.PlaylistItem{{Source: "https://x"}},
+				},
+			}, nil)
+
+			e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+			title := "New"
+			_, err := e.UpdatePlaylist(context.Background(), "pl", &models.PlaylistUpdateRequest{Title: &title})
+			if err == nil || !strings.Contains(err.Error(), "parse document created") {
+				t.Fatalf("expected parse document created error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestUpdatePlaylist_success_partialFields(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -309,6 +368,7 @@ func TestUpdatePlaylist_success_partialFields(t *testing.T) {
 		DPVersion:  "1.1.0",
 		Title:      "Old Title",
 		Slug:       "old-slug",
+		Created:    created.UTC().Format(time.RFC3339Nano),
 		Summary:    "Old summary",
 		CoverImage: "https://old.example/cover.jpg",
 		Items: []playlist.PlaylistItem{
@@ -351,9 +411,11 @@ func TestUpdatePlaylist_success_multipleFields(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	docCreated := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
 	existingBody := playlist.Playlist{
 		DPVersion:  "1.1.0",
 		Title:      "Old",
+		Created:    docCreated.UTC().Format(time.RFC3339Nano),
 		Summary:    "Old summary",
 		CoverImage: "https://old.example/img.jpg",
 		Items: []playlist.PlaylistItem{
@@ -413,10 +475,16 @@ func TestUpdatePlaylist_signError(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	signCreated := time.Date(2018, 2, 2, 0, 0, 0, 0, time.UTC)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), id.String()).Return(&store.PlaylistRecord{
 		ID:   id,
 		Slug: "test",
-		Body: playlist.Playlist{DPVersion: "1.1.0", Title: "Old", Items: []playlist.PlaylistItem{{Source: "https://x"}}},
+		Body: playlist.Playlist{
+			DPVersion: "1.1.0",
+			Title:     "Old",
+			Created:   signCreated.UTC().Format(time.RFC3339Nano),
+			Items:     []playlist.PlaylistItem{{Source: "https://x"}},
+		},
 	}, nil)
 
 	signErr := errors.New("sign failed")
@@ -721,9 +789,11 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 	gid := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 	created := time.Date(2019, 6, 1, 12, 0, 0, 0, time.UTC)
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "keep-g").Return(&store.PlaylistGroupRecord{
-		ID:        gid,
-		Slug:      "keep-g",
-		Body:      playlistgroup.Group{},
+		ID:   gid,
+		Slug: "keep-g",
+		Body: playlistgroup.Group{
+			Created: created.UTC().Format(time.RFC3339Nano),
+		},
 		CreatedAt: created,
 	}, nil)
 
@@ -787,6 +857,7 @@ func TestUpdatePlaylistGroup_success_partialFields(t *testing.T) {
 	existingBody := playlistgroup.Group{
 		Title:      "Old Group Title",
 		Slug:       "old-group",
+		Created:    created.UTC().Format(time.RFC3339Nano),
 		Playlists:  []string{localPlaylistRef("pl1")},
 		Curator:    "Old Curator",
 		Summary:    "Old summary",
@@ -833,8 +904,10 @@ func TestUpdatePlaylistGroup_success_updatePlaylists(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	gid := uuid.MustParse("12121212-1212-1212-1212-121212121212")
+	groupCreated := time.Date(2020, 8, 8, 8, 0, 0, 0, time.UTC)
 	existingBody := playlistgroup.Group{
 		Title:     "Group",
+		Created:   groupCreated.UTC().Format(time.RFC3339Nano),
 		Playlists: []string{localPlaylistRef("old-pl")},
 	}
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), gid.String()).Return(&store.PlaylistGroupRecord{
@@ -1217,9 +1290,11 @@ func TestReplaceChannel_success(t *testing.T) {
 	cid := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
 	created := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
 	mockStore.EXPECT().GetChannel(gomock.Any(), "ch-slug").Return(&store.ChannelRecord{
-		ID:        cid,
-		Slug:      "ch-slug",
-		Body:      channels.Channel{},
+		ID:   cid,
+		Slug: "ch-slug",
+		Body: channels.Channel{
+			Created: created.UTC().Format(time.RFC3339Nano),
+		},
 		CreatedAt: created,
 	}, nil)
 
@@ -1294,6 +1369,7 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 		Title:      "Old Channel",
 		Slug:       "old-ch",
 		Version:    "1.0.0",
+		Created:    created.UTC().Format(time.RFC3339Nano),
 		Playlists:  []string{localPlaylistRef("ch-pl1")},
 		Summary:    "Old channel summary",
 		CoverImage: "https://old.example/ch-cover.jpg",
@@ -1339,10 +1415,12 @@ func TestUpdateChannel_success_updateMultipleFields(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	cid := uuid.MustParse("17171717-1717-1717-1717-171717171717")
+	chCreated := time.Date(2021, 4, 4, 4, 0, 0, 0, time.UTC)
 	existingBody := channels.Channel{
 		Title:     "Old",
 		Slug:      "ch",
 		Version:   "1.0.0",
+		Created:   chCreated.UTC().Format(time.RFC3339Nano),
 		Playlists: []string{localPlaylistRef("old-pl")},
 		Summary:   "Old summary",
 	}
@@ -1441,10 +1519,16 @@ func TestUpdateChannel_validationFails(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	cid := uuid.MustParse("21212121-2121-2121-2121-212121212121")
+	valCreated := time.Date(2020, 3, 3, 0, 0, 0, 0, time.UTC)
 	mockStore.EXPECT().GetChannel(gomock.Any(), cid.String()).Return(&store.ChannelRecord{
 		ID:   cid,
 		Slug: "ch",
-		Body: channels.Channel{Title: "Ch", Slug: "ch", Playlists: []string{localPlaylistRef("pl")}},
+		Body: channels.Channel{
+			Title:     "Ch",
+			Slug:      "ch",
+			Created:   valCreated.UTC().Format(time.RFC3339Nano),
+			Playlists: []string{localPlaylistRef("pl")},
+		},
 	}, nil)
 
 	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
