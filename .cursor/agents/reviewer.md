@@ -1,6 +1,6 @@
 ---
 name: reviewer
-model: premium
+model: composer-2-fast
 description: Read-only Go code reviewer. Use after implementation for a fresh-context review. Follows prompts/code-review.md and does not edit unless asked.
 readonly: true
 ---
