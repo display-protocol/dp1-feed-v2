@@ -1,0 +1,98 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (for example: v0.1.0, prod, 2026-04-02)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+env:
+  AWS_REGION: us-west-2
+  AWS_ACCOUNT_ID: "083397868157"
+  ECR_REPOSITORY: dp1-deed
+  ECR_REGISTRY: 083397868157.dkr.ecr.us-west-2.amazonaws.com
+  ECR_ROLE_ARN: arn:aws:iam::083397868157:role/gha-dp1-deed-ecr-usw2
+
+jobs:
+  build-and-push:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout dp1-feed-v2
+        uses: actions/checkout@v4
+        with:
+          path: dp1-feed-v2
+
+      - name: Checkout dp1-go
+        uses: actions/checkout@v4
+        with:
+          repository: display-protocol/dp1-go
+          path: dp1-go
+
+      - name: Determine image tag
+        id: determine-tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Using tag: ${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Verify AWS identity and ECR repository
+        run: |
+          aws sts get-caller-identity
+          aws ecr describe-repositories \
+            --repository-names "${ECR_REPOSITORY}" \
+            --region "${AWS_REGION}" >/dev/null
+
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=raw,value=${{ steps.determine-tag.outputs.tag }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./dp1-feed-v2/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Output image tag
+        run: |
+          echo "## Built image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ steps.determine-tag.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"

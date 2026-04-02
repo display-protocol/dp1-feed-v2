@@ -12,7 +12,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /out/dp1-feed-v2 /app/dp1-feed-v2
-COPY dp1-feed-v2/config/config.yaml /app/config/config.yaml
+COPY dp1-feed-v2/config/config.yaml.example /app/config/config.yaml
 COPY dp1-feed-v2/db/migrations /app/db/migrations
 EXPOSE 8787
 ENTRYPOINT ["/app/dp1-feed-v2", "-config", "/app/config/config.yaml", "-migrations", "/app/db/migrations"]
