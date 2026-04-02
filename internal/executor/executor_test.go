@@ -975,23 +975,104 @@ func TestDeleteChannel_extensionsDisabled(t *testing.T) {
 	}
 }
 
-func TestCreateChannel_slugRequired(t *testing.T) {
+func TestCreateChannel_whitespaceSlugFallsBackToAuto(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	plID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "p").Return(&store.PlaylistRecord{
-		ID:   uuid.MustParse("77777777-7777-7777-7777-777777777777"),
-		Slug: "p", Body: mustDecodePlaylist(t, []byte(`{"id":"77777777-7777-7777-7777-777777777777"}`)),
+		ID: plID, Slug: "p", Body: mustDecodePlaylist(t, []byte(`{"id":"77777777-7777-7777-7777-777777777777"}`)),
 	}, nil)
 
-	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
+	signed := []byte(`{"kind":"signed-channel"}`)
+	wantCh := mustDecodeChannel(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
+	)
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
+		if in.Slug == "" || !strings.HasPrefix(in.Slug, "t-") {
+			t.Fatalf("expected auto slug from title \"T\", got %q", in.Slug)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
 		Title:     "T",
 		Slug:      "   ",
 		Playlists: []string{localPlaylistRef("p")},
 	})
-	if err == nil || !strings.Contains(err.Error(), "slug is required") {
-		t.Fatalf("got %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateChannel_unslugifiableClientSlugFallsBackToTitle(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	plID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "p").Return(&store.PlaylistRecord{
+		ID: plID, Slug: "p", Body: mustDecodePlaylist(t, []byte(`{"id":"66666666-6666-6666-6666-666666666666"}`)),
+	}, nil)
+
+	signed := []byte(`{"kind":"signed-channel"}`)
+	wantCh := mustDecodeChannel(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
+	)
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
+		if in.Slug == "" || !strings.HasPrefix(in.Slug, "derive-me-") {
+			t.Fatalf("expected auto slug from title, got %q", in.Slug)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
+		Title:     "Derive me",
+		Slug:      "@@@",
+		Playlists: []string{localPlaylistRef("p")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateChannel_unslugifiableTitleUsesChannelPrefix(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	plID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "p").Return(&store.PlaylistRecord{
+		ID: plID, Slug: "p", Body: mustDecodePlaylist(t, []byte(`{"id":"55555555-5555-5555-5555-555555555555"}`)),
+	}, nil)
+
+	signed := []byte(`{"kind":"signed-channel"}`)
+	wantCh := mustDecodeChannel(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
+	)
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
+		if in.Slug == "" || !strings.HasPrefix(in.Slug, "channel-") {
+			t.Fatalf("expected channel- prefix slug, got %q", in.Slug)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
+		Title:     "###",
+		Playlists: []string{localPlaylistRef("p")},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

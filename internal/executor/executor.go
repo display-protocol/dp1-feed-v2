@@ -437,6 +437,20 @@ func (e *impl) makeGroupSlug(req *models.PlaylistGroupCreateRequest, id uuid.UUI
 	return fmt.Sprintf("%s-%s", base, id.String()[:8])
 }
 
+// makeChannelSlug mirrors makeGroupSlug for channels (optional client slug, else title- or "channel"-based with id suffix).
+func (e *impl) makeChannelSlug(req *models.ChannelCreateRequest, id uuid.UUID) string {
+	if s := strings.TrimSpace(req.Slug); s != "" {
+		if got := slugify(s); got != "" {
+			return got
+		}
+	}
+	base := slugify(req.Title)
+	if base == "" {
+		base = "channel"
+	}
+	return fmt.Sprintf("%s-%s", base, id.String()[:8])
+}
+
 // CreatePlaylistGroup resolves playlist URIs (parallel fetch or local GET), signs the group document,
 // validates the signed JSON (playlist-group schema requires signatures, so unlike core playlists there is no pre-sign schema pass),
 // and commits upserted playlists, the group row, and membership in one transaction.
@@ -684,12 +698,8 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 		return nil, err
 	}
 
-	// Channel requires an explicit slug (unlike playlist/group auto-slug); used in storage and document.
 	id := uuid.New()
-	slug := slugify(strings.TrimSpace(req.Slug))
-	if slug == "" {
-		return nil, fmt.Errorf("slug is required")
-	}
+	slug := e.makeChannelSlug(req, id)
 
 	// 2. Build the channel document.
 	raw, err := e.buildChannelDocument(req, uris, id, slug, nil)

@@ -8,9 +8,10 @@ const DefaultChannelVersion = "1.0.0"
 
 // ChannelCreateRequest is the JSON body for POST /api/v1/channels (extensions).
 // Playlists is an ordered list of playlist URIs, resolved the same way as for playlist-groups.
+// Slug is optional; when omitted, whitespace-only, or un-slugifiable, the executor derives a unique slug from title (same pattern as playlist-groups). If the title is also un-slugifiable, the executor uses a "channel-" prefix with a short id suffix.
 type ChannelCreateRequest struct {
 	Title      string            `json:"title" binding:"required"`
-	Slug       string            `json:"slug" binding:"required"`
+	Slug       string            `json:"slug,omitempty"`
 	Version    string            `json:"version,omitempty"`
 	Playlists  []string          `json:"playlists" binding:"required"`
 	Curators   []identity.Entity `json:"curators,omitempty"`

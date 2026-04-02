@@ -892,13 +892,16 @@ components:
       type: object
       required:
         - title
-        - slug
         - playlists
       properties:
         title:
           type: string
         slug:
           type: string
+          description: >-
+            Optional. If omitted, only whitespace, or not slugifiable after normalization, the server derives a
+            unique slug from the title (same pattern as playlist-groups). If the title is also empty or not
+            slugifiable, the server uses a "channel-" prefix with a short id suffix.
         version:
           type: string
           default: "1.0.0"

@@ -1452,7 +1452,6 @@ func TestListChannels(t *testing.T) {
 func TestCreateChannel(t *testing.T) {
 	validBody := models.ChannelCreateRequest{
 		Title:     "Test Channel",
-		Slug:      "test-channel",
 		Playlists: []string{"http://example.com/api/v1/playlists/test"},
 	}
 
