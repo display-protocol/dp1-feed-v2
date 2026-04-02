@@ -307,7 +307,6 @@ func TestPlaylist_replaceAndUpdate_parseDocumentCreatedFails(t *testing.T) {
 		{"malformed", "not-a-valid-rfc3339"},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name+"/replace", func(t *testing.T) {
 			t.Parallel()
 			ctrl := gomock.NewController(t)
