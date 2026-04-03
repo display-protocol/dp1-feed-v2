@@ -296,7 +296,7 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 		t.Fatal(err)
 	}
 
-	groupID := uuid.MustParse("g1g1g1g1-g1g1-g1g1-g1g1-g1g1g1g1g1g1")
+	groupID := uuid.MustParse("81818181-8181-4181-8181-818181818181")
 	groupSlug := "filter-test-group"
 	groupBody := playlistgroup.Group{
 		ID:        groupID.String(),
