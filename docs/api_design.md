@@ -53,11 +53,11 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 **Envelope:** `items` (array), `hasMore` (boolean), `cursor` (string, omitted when no next page). See `ListResponse` in OpenAPI and `internal/httpserver/dto.go`.
 
-**Filtering (playlist items only):**
+**Filtering (`playlist-items` and `playlists` lists):**
 
-- **`channel`** — filter by channel UUID or slug.
-- **`playlist-group`** — filter by playlist-group UUID or slug.
-- These are **mutually exclusive** where the implementation enforces it; sending conflicting filters may yield **400**.
+- **`channel`** — restrict to playlists that belong to that channel (UUID or slug). On `GET /api/v1/playlists`, requires **extensions**; if extensions are off, the response is **`404`** `extensions_disabled` (same as other channel features).
+- **`playlist-group`** — restrict to playlists that belong to that group (UUID or slug).
+- These two query params are **mutually exclusive** where the implementation enforces it; sending both may yield **400**.
 
 ---
 

@@ -223,7 +223,7 @@ func TestListPlaylists(t *testing.T) {
 	}).Return(recs, "next-page", nil)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	items, next, err := e.ListPlaylists(context.Background(), 25, "cur", store.SortDesc)
+	items, next, err := e.ListPlaylists(context.Background(), 25, "cur", store.SortDesc, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +235,142 @@ func TestListPlaylists(t *testing.T) {
 	}
 	if !reflect.DeepEqual(items[0], recs[0].Body) || !reflect.DeepEqual(items[1], recs[1].Body) {
 		t.Fatalf("items mismatch: %+v %+v", items[0], items[1])
+	}
+}
+
+func TestListPlaylists_filters(t *testing.T) {
+	t.Parallel()
+
+	errStoreUnavailable := errors.New("db unavailable")
+
+	wantParams := func(limit int, cursor string, sort store.SortOrder, ch, pg string) *store.ListPlaylistsParams {
+		return &store.ListPlaylistsParams{
+			Limit:               limit,
+			Cursor:              cursor,
+			Sort:                sort,
+			ChannelFilter:       ch,
+			PlaylistGroupFilter: pg,
+		}
+	}
+
+	tests := []struct {
+		name           string
+		extEnabled     bool
+		ch             string
+		pg             string
+		setupMock      func(*mocks.MockStore) // nil when the store must not be called
+		wantErr        error
+		wantItems      int
+		wantNext       string
+		wantFirstTitle string
+	}{
+		{
+			name:       "channel_filter_extensions_disabled_returns_without_calling_store",
+			extEnabled: false,
+			ch:         "any-channel",
+			pg:         "",
+			setupMock:  nil,
+			wantErr:    executor.ErrExtensionsDisabled,
+		},
+		{
+			name:       "channel_filter_forwards_to_store_when_extensions_enabled",
+			extEnabled: true,
+			ch:         "my-channel",
+			pg:         "",
+			setupMock: func(m *mocks.MockStore) {
+				m.EXPECT().ListPlaylists(gomock.Any(), wantParams(10, "", store.SortAsc, "my-channel", "")).
+					Return([]store.PlaylistRecord{{Body: playlist.Playlist{Title: "In Channel"}}}, "next-c", nil)
+			},
+			wantErr:        nil,
+			wantItems:      1,
+			wantNext:       "next-c",
+			wantFirstTitle: "In Channel",
+		},
+		{
+			name:       "playlist_group_filter_forwards_when_extensions_disabled",
+			extEnabled: false,
+			ch:         "",
+			pg:         "my-group",
+			setupMock: func(m *mocks.MockStore) {
+				m.EXPECT().ListPlaylists(gomock.Any(), wantParams(10, "", store.SortAsc, "", "my-group")).
+					Return([]store.PlaylistRecord{{Body: playlist.Playlist{Title: "In Group"}}}, "", nil)
+			},
+			wantErr:        nil,
+			wantItems:      1,
+			wantNext:       "",
+			wantFirstTitle: "In Group",
+		},
+		{
+			name:       "both_channel_and_playlist_group_filters_forwarded_to_store",
+			extEnabled: true,
+			ch:         "ch-slug",
+			pg:         "grp-slug",
+			setupMock: func(m *mocks.MockStore) {
+				// HTTP rejects both query params together; executor still forwards if a caller passes both (e.g. tests or future RPC).
+				m.EXPECT().ListPlaylists(gomock.Any(), wantParams(10, "", store.SortAsc, "ch-slug", "grp-slug")).
+					Return(nil, "", nil)
+			},
+			wantErr:   nil,
+			wantItems: 0,
+			wantNext:  "",
+		},
+		{
+			name:       "channel_filter_whitespace_only_does_not_trigger_extensions_gate",
+			extEnabled: false,
+			ch:         "   ",
+			pg:         "",
+			setupMock: func(m *mocks.MockStore) {
+				m.EXPECT().ListPlaylists(gomock.Any(), wantParams(10, "", store.SortAsc, "   ", "")).
+					Return(nil, "", nil)
+			},
+			wantErr:   nil,
+			wantItems: 0,
+			wantNext:  "",
+		},
+		{
+			name:       "store_error_propagates_with_channel_filter",
+			extEnabled: true,
+			ch:         "ch",
+			pg:         "",
+			setupMock: func(m *mocks.MockStore) {
+				m.EXPECT().ListPlaylists(gomock.Any(), wantParams(10, "", store.SortAsc, "ch", "")).
+					Return(nil, "", errStoreUnavailable)
+			},
+			wantErr: errStoreUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			if tt.setupMock != nil {
+				tt.setupMock(mockStore)
+			}
+
+			e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), tt.extEnabled, nil, "")
+			items, next, err := e.ListPlaylists(context.Background(), 10, "", store.SortAsc, tt.ch, tt.pg)
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err: got %v want %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != tt.wantItems {
+				t.Fatalf("len(items)=%d want %d", len(items), tt.wantItems)
+			}
+			if next != tt.wantNext {
+				t.Fatalf("next=%q want %q", next, tt.wantNext)
+			}
+			if tt.wantItems > 0 && items[0].Title != tt.wantFirstTitle {
+				t.Fatalf("items[0].Title=%q want %q", items[0].Title, tt.wantFirstTitle)
+			}
+		})
 	}
 }
 

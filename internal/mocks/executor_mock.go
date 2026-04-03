@@ -273,9 +273,9 @@ func (mr *MockExecutorMockRecorder) ListPlaylistItems(ctx, limit, cursor, sort, 
 }
 
 // ListPlaylists mocks base method.
-func (m *MockExecutor) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]playlist.Playlist, string, error) {
+func (m *MockExecutor) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]playlist.Playlist, string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListPlaylists", ctx, limit, cursor, sort)
+	ret := m.ctrl.Call(m, "ListPlaylists", ctx, limit, cursor, sort, channelFilter, playlistGroupFilter)
 	ret0, _ := ret[0].([]playlist.Playlist)
 	ret1, _ := ret[1].(string)
 	ret2, _ := ret[2].(error)
@@ -283,9 +283,9 @@ func (m *MockExecutor) ListPlaylists(ctx context.Context, limit int, cursor stri
 }
 
 // ListPlaylists indicates an expected call of ListPlaylists.
-func (mr *MockExecutorMockRecorder) ListPlaylists(ctx, limit, cursor, sort any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) ListPlaylists(ctx, limit, cursor, sort, channelFilter, playlistGroupFilter any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPlaylists", reflect.TypeOf((*MockExecutor)(nil).ListPlaylists), ctx, limit, cursor, sort)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPlaylists", reflect.TypeOf((*MockExecutor)(nil).ListPlaylists), ctx, limit, cursor, sort, channelFilter, playlistGroupFilter)
 }
 
 // ReplaceChannel mocks base method.

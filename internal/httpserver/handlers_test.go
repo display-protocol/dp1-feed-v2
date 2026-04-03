@@ -121,7 +121,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc).
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return([]playlist.Playlist{{DPVersion: "1.1.0"}}, "cursor1", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -138,7 +138,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?limit=50&sort=desc",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 50, "", store.SortDesc).
+					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "").
 					Return([]playlist.Playlist{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -154,7 +154,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?cursor=abc123",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc).
+					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "").
 					Return([]playlist.Playlist{{DPVersion: "1.1.0"}}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -187,11 +187,53 @@ func TestListPlaylists(t *testing.T) {
 			},
 		},
 		{
+			name:        "success with channel filter",
+			queryParams: "?channel=my-channel",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "").
+					Return([]playlist.Playlist{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[playlist.Playlist]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
+			},
+		},
+		{
+			name:        "success with playlist-group filter",
+			queryParams: "?playlist-group=my-group",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "my-group").
+					Return([]playlist.Playlist{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[playlist.Playlist]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
+			},
+		},
+		{
+			name:           "both filters provided",
+			queryParams:    "?channel=ch&playlist-group=pg",
+			setupMock:      func(m *mocks.MockExecutor) {},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, "bad_request", resp.Error)
+				assert.Contains(t, resp.Message, "cannot be used together")
+			},
+		},
+		{
 			name:        "executor returns not found error",
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc).
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return(nil, "", store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -206,7 +248,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc).
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return(nil, "", errors.New("db connection failed"))
 			},
 			expectedStatus: http.StatusInternalServerError,

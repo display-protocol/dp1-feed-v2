@@ -71,6 +71,7 @@ type PlaylistItemRecord struct {
 }
 
 // ListPlaylistsParams filters list results.
+// ChannelFilter and PlaylistGroupFilter are mutually exclusive when both non-empty (HTTP returns 400).
 type ListPlaylistsParams struct {
 	// Limit is the maximum rows to return (validated in the store layer via ResolveListLimit).
 	Limit int
@@ -78,6 +79,10 @@ type ListPlaylistsParams struct {
 	Cursor string
 	// Sort orders by created_at (see SortAsc / SortDesc).
 	Sort SortOrder
+	// ChannelFilter, if non-empty, restricts to playlists that are members of that channel (UUID or slug).
+	ChannelFilter string
+	// PlaylistGroupFilter, if non-empty, restricts to playlists that are members of that group (UUID or slug).
+	PlaylistGroupFilter string
 }
 
 // ListPlaylistItemsParams lists rows from playlist_item_index for stable keyset pagination.

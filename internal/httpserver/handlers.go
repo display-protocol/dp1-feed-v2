@@ -64,7 +64,14 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	pl, next, err := h.Exec.ListPlaylists(c.Request.Context(), limit, cursor, sortOrder)
+	chF := strings.TrimSpace(c.Query("channel"))
+	pgF := strings.TrimSpace(c.Query("playlist-group"))
+	if chF != "" && pgF != "" {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel and playlist-group filters cannot be used together")
+		return
+	}
+
+	pl, next, err := h.Exec.ListPlaylists(c.Request.Context(), limit, cursor, sortOrder, chF, pgF)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)

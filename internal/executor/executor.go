@@ -37,8 +37,8 @@ type Executor interface {
 	CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*playlist.Playlist, error)
 	// GetPlaylist returns the stored playlist document for id or slug (HTTP layer JSON-encodes the response).
 	GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Playlist, error)
-	// ListPlaylists returns one page of playlist bodies and an optional next cursor.
-	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]playlist.Playlist, string, error)
+	// ListPlaylists returns one page of playlist bodies and an optional next cursor (optional channel or playlist-group filter; id or slug).
+	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]playlist.Playlist, string, error)
 	// ReplacePlaylist performs a full PUT: sign, validate signed JSON, and update storage.
 	ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error)
 	// UpdatePlaylist performs a partial PATCH: merges non-nil fields from req with existing playlist, then signs, validates, and updates storage.
@@ -240,11 +240,17 @@ func (e *impl) GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Play
 }
 
 // ListPlaylists returns one page of stored playlist documents.
-func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]playlist.Playlist, string, error) {
+func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]playlist.Playlist, string, error) {
+	if !e.extensionsEnabled && strings.TrimSpace(channelFilter) != "" {
+		return nil, "", ErrExtensionsDisabled
+	}
+
 	recs, nextCur, err := e.store.ListPlaylists(ctx, &store.ListPlaylistsParams{
-		Limit:  limit,
-		Cursor: cursor,
-		Sort:   sort,
+		Limit:               limit,
+		Cursor:              cursor,
+		Sort:                sort,
+		ChannelFilter:       channelFilter,
+		PlaylistGroupFilter: playlistGroupFilter,
 	})
 	if err != nil {
 		return nil, "", err

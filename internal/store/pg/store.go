@@ -308,21 +308,6 @@ WHERE item_id = $1`
 // Ordering: created_at then id, direction from p.Sort. Pagination: fetch limit+1 rows; if extra row exists,
 // trim to limit and return next_cursor built from the last kept row (see encodeCursor).
 func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams) ([]store.PlaylistRecord, string, error) {
-	const (
-		firstPage = `
-SELECT id, slug, body, created_at, updated_at
-FROM playlists
-ORDER BY created_at %s, id %s
-LIMIT $1`
-
-		afterCursor = `
-SELECT id, slug, body, created_at, updated_at
-FROM playlists
-WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)
-ORDER BY created_at %s, id %s
-LIMIT $1`
-	)
-
 	if p == nil {
 		return nil, "", fmt.Errorf("nil list params")
 	}
@@ -333,18 +318,74 @@ LIMIT $1`
 	order := p.Sort.SQLOrder()
 	tupleOp := p.Sort.TupleAfterCursorOp()
 
-	var rows pgx.Rows
+	chF := strings.TrimSpace(p.ChannelFilter)
+	pgF := strings.TrimSpace(p.PlaylistGroupFilter)
+
+	var filterSQL string
+	var args []any
 	if p.Cursor == "" {
-		q := fmt.Sprintf(firstPage, order, order)
-		rows, err = s.pool.Query(ctx, q, limit+1)
+		args = []any{limit + 1}
+		if chF != "" {
+			const n = 2
+			filterSQL = fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM channel_members cm
+			WHERE cm.playlist_id = playlists.id
+			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
+		)`, n, n)
+			args = append(args, chF)
+		} else if pgF != "" {
+			const n = 2
+			filterSQL = fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM playlist_group_members pgm
+			WHERE pgm.playlist_id = playlists.id
+			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
+		)`, n, n)
+			args = append(args, pgF)
+		}
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
 			return nil, "", fmt.Errorf("cursor: %w", derr)
 		}
-		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
-		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
+		args = []any{limit + 1, created, id}
+		if chF != "" {
+			const n = 4
+			filterSQL = fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM channel_members cm
+			WHERE cm.playlist_id = playlists.id
+			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
+		)`, n, n)
+			args = append(args, chF)
+		} else if pgF != "" {
+			const n = 4
+			filterSQL = fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM playlist_group_members pgm
+			WHERE pgm.playlist_id = playlists.id
+			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
+		)`, n, n)
+			args = append(args, pgF)
+		}
 	}
+
+	var q string
+	if p.Cursor == "" {
+		q = fmt.Sprintf(`
+SELECT id, slug, body, created_at, updated_at
+FROM playlists
+WHERE 1=1%s
+ORDER BY created_at %s, id %s
+LIMIT $1`, filterSQL, order, order)
+	} else {
+		q = fmt.Sprintf(`
+SELECT id, slug, body, created_at, updated_at
+FROM playlists
+WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)%s
+ORDER BY created_at %s, id %s
+LIMIT $1`, tupleOp, filterSQL, order, order)
+	}
+
+	var rows pgx.Rows
+	rows, err = s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("list playlists: %w", err)
 	}

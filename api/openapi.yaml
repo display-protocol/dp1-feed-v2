@@ -110,6 +110,16 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Sort'
+        - name: channel
+          in: query
+          description: Filter by channel UUID or slug (membership). Requires extensions when used.
+          schema:
+            type: string
+        - name: playlist-group
+          in: query
+          description: Filter by playlist-group UUID or slug (mutually exclusive with channel)
+          schema:
+            type: string
       responses:
         '200':
           description: List of playlists
@@ -126,6 +136,12 @@ paths:
                           $ref: '#/components/schemas/Playlist'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Extensions disabled (when filtering by channel)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
     post:
       tags: [playlists]

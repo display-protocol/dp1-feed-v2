@@ -271,6 +271,126 @@ func TestIntegration_ListPlaylists_paginationCursor(t *testing.T) {
 	}
 }
 
+func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	plID1 := uuid.MustParse("f1f1f1f1-f1f1-f1f1-f1f1-f1f1f1f1f1f1")
+	plID2 := uuid.MustParse("f2f2f2f2-f2f2-f2f2-f2f2-f2f2f2f2f2f2")
+	item1 := uuid.MustParse("a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1")
+	item2 := uuid.MustParse("b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2")
+	pl1 := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Filter P1",
+		Items:     []playlist.PlaylistItem{{ID: item1.String(), Source: "https://fp1"}},
+	}
+	pl2 := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Filter P2",
+		Items:     []playlist.PlaylistItem{{ID: item2.String(), Source: "https://fp2"}},
+	}
+	if err := st.CreatePlaylist(ctx, plID1, "filter-pl-1", &pl1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreatePlaylist(ctx, plID2, "filter-pl-2", &pl2); err != nil {
+		t.Fatal(err)
+	}
+
+	groupID := uuid.MustParse("g1g1g1g1-g1g1-g1g1-g1g1-g1g1g1g1g1g1")
+	groupSlug := "filter-test-group"
+	groupBody := playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      groupSlug,
+		Title:     "Filter Group",
+		Playlists: []string{"filter-pl-1"},
+	}
+	groupInput := &store.PlaylistGroupInput{
+		ID:   groupID,
+		Slug: groupSlug,
+		Body: groupBody,
+		Playlists: []store.IngestedPlaylist{
+			{ID: plID1, Slug: "filter-pl-1", Body: pl1},
+		},
+	}
+	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
+		t.Fatalf("CreatePlaylistGroup: %v", err)
+	}
+
+	byGroupSlug, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:               10,
+		Cursor:              "",
+		Sort:                store.SortAsc,
+		PlaylistGroupFilter: groupSlug,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byGroupSlug) != 1 || byGroupSlug[0].ID != plID1 {
+		t.Fatalf("playlist-group filter by slug: got %d rows, want 1 with id %v", len(byGroupSlug), plID1)
+	}
+
+	byGroupUUID, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:               10,
+		Cursor:              "",
+		Sort:                store.SortAsc,
+		PlaylistGroupFilter: groupID.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byGroupUUID) != 1 || byGroupUUID[0].ID != plID1 {
+		t.Fatalf("playlist-group filter by uuid: got %d rows", len(byGroupUUID))
+	}
+
+	chID := uuid.MustParse("c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1")
+	chSlug := "filter-test-channel"
+	chBody := channels.Channel{
+		ID:        chID.String(),
+		Slug:      chSlug,
+		Title:     "Filter Channel",
+		Version:   "1.0.0",
+		Playlists: []string{"filter-pl-1", "filter-pl-2"},
+	}
+	chInput := &store.ChannelInput{
+		ID:   chID,
+		Slug: chSlug,
+		Body: chBody,
+		Playlists: []store.IngestedPlaylist{
+			{ID: plID1, Slug: "filter-pl-1", Body: pl1},
+			{ID: plID2, Slug: "filter-pl-2", Body: pl2},
+		},
+	}
+	if err := st.CreateChannel(ctx, chInput); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	byChSlug, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:         10,
+		Cursor:        "",
+		Sort:          store.SortAsc,
+		ChannelFilter: chSlug,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byChSlug) != 2 {
+		t.Fatalf("channel filter: want 2 playlists, got %d", len(byChSlug))
+	}
+
+	byChUUID, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:         10,
+		Cursor:        "",
+		Sort:          store.SortAsc,
+		ChannelFilter: chID.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byChUUID) != 2 {
+		t.Fatalf("channel filter by uuid: want 2, got %d", len(byChUUID))
+	}
+}
+
 func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
