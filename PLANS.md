@@ -35,9 +35,8 @@ Do not use this for small, direct edits, isolated fixes, or straightforward test
 - compatibility or rollout requirements
 
 ### 3. Open questions
-- architecture decisions that remain `TBD`
-- API decisions that remain `TBD`
-- data model or ownership uncertainties
+- decisions not yet locked for *this* change (architecture, API, data model, ownership)
+- if none: state **none** and cite the canonical docs (`docs/architecture.md`, `docs/api_design.md`, `api/openapi.yaml`) instead of leaving this blank
 
 ### 4. Design options
 For each viable option, include:

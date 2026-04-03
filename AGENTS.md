@@ -20,10 +20,10 @@ This file defines repository-level constraints for coding agents. Detailed imple
 - Do not waste comments on obvious syntax. Bias toward useful design context, not narration.
 
 ## Architecture and API posture
-- Architecture rules are intentionally `TBD` for the repository owner to finalize.
-- API design rules are intentionally `TBD` for the repository owner to finalize.
-- Until those are finalized, do not invent durable architecture or API policy beyond what the code and explicit user requests require.
-- When a change depends on an unresolved architecture or API decision, document the assumption in code comments or docs and surface it clearly in the handoff.
+- **Architecture:** `docs/architecture.md` is the canonical package-boundary, dependency, and deployment story. Follow it; when you change structure or operations, update that document so the narrative stays accurate.
+- **HTTP API:** `docs/api_design.md` is the canonical API narrative. Do not change observable HTTP behavior without updating the specification, handlers, and documentation in the way that document prescribes (including its OpenAPI reference).
+- **Scope:** Do not quietly expand durable public contracts or cross-cutting policy beyond what `docs/architecture.md`, `docs/api_design.md`, and explicit task scope already imply.
+- **Gaps:** If a change needs a decision that is not covered by the above, document the interim assumption in code comments or docs and surface it clearly in the handoff.
 
 ## Go engineering contract
 - Follow standard Go guidance from:
@@ -67,7 +67,7 @@ If work is large or vague and no feature spec or decision record exists, do not 
 - `.cursor/rules/10-go-coding-standards.mdc`
 - `.cursor/rules/15-comment-contract.mdc`
 - `.cursor/rules/20-architecture.mdc`
-- `.cursor/rules/21-api-design.mdc`
+- `.cursor/rules/21-api-design-tbd.mdc`
 - `.cursor/rules/35-testing-tdd.mdc`
 - `.cursor/rules/spec-driven.mdc`
 - `.cursor/rules/review-workflow.mdc`

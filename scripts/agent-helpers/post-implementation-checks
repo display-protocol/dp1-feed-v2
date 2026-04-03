@@ -16,6 +16,9 @@ if ! command -v make >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "==> make fmt (format code; see Makefile)"
+make fmt
+
 echo "==> make verify (lint + test + test-integration; see Makefile)"
 make verify
 

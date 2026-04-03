@@ -38,7 +38,7 @@ alwaysApply: true
 ## Pagination, sort, filter
 
 - **`limit`:** 1–100, default 100. **`cursor`:** opaque. **`sort`:** `asc`|`desc` by `created_at`, default `asc`.
-- **Playlist items list only:** query `channel` or `playlist-group` (UUID/slug); mutually exclusive where enforced.
+- **`playlist-items` and `playlists` lists:** query `channel` or `playlist-group` (UUID/slug); mutually exclusive where enforced. Channel filter on `GET /api/v1/playlists` follows extensions policy (404 `extensions_disabled` when extensions off).
 
 ## Error model
 

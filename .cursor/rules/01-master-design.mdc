@@ -25,10 +25,10 @@ Use this rule for structural decisions and package boundaries.
 - Keep package APIs narrow and purposeful.
 - Avoid circular dependencies and package sprawl.
 
-## 3) Current repository constraint
-- Canonical architecture rules remain `TBD` for the repository owner.
-- Canonical API design rules remain `TBD` for the repository owner.
-- Until those are finalized, avoid cementing large public contracts without documenting the assumption and trade-off.
+## 3) Canonical sources
+- **Architecture:** `docs/architecture.md` (mirrored in `.cursor/rules/20-architecture.mdc`). Treat it as the source of truth for package layout, boundaries, and dependency direction; update it when structural or operational assumptions change.
+- **HTTP API:** `docs/api_design.md` and `api/openapi.yaml` (mirrored in `.cursor/rules/21-api-design-tbd.mdc`). Keep observable HTTP behavior, OpenAPI, handlers, and narrative docs in sync.
+- **New surface area:** Avoid cementing large new public contracts or cross-cutting policy that contradict those documents; when a change genuinely extends them, update the docs and spec together and record any interim assumption until the narrative catches up.
 
 ## 4) Completion checks
 - Boundaries are clearer after the change, not muddier.

@@ -21,6 +21,5 @@ Apply this rule whenever the request is a large feature, major API change, archi
 7. Then implement and verify.
 
 ## Enforcement
-- Do not invent settled architecture or API policy where the repository explicitly marks those as `TBD`.
 - If a change materially depends on a missing owner decision, surface that clearly.
 - Prefer staged delivery with reversible increments.

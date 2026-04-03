@@ -35,7 +35,6 @@ Assess only real gaps:
 2. Do integration tests cover boundary behavior where it matters?
 3. Are concurrency and failure paths meaningfully exercised?
 4. Should docs, comments, or owner-facing decision records be updated?
-5. If architecture or API decisions are still `TBD`, did the change document its assumptions clearly enough?
 
 ### Preferred review output shape
 Use only sections that have real content:
