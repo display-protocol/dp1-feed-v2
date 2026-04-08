@@ -123,8 +123,8 @@ Check [DEVELOPMENT.md](DEVELOPMENT.md) for details on the codebase structure and
 
 ## Community
 
-- **Questions?** Open a [GitHub Issue](https://github.com/your-org/dp1-feed-v2/issues)
-- **Ideas?** Start a [Discussion](https://github.com/your-org/dp1-feed-v2/discussions)
+- **Questions?** Open a [GitHub Issue](https://github.com/display-protocol/dp1-feed-v2/issues)
+- **Ideas?** Start a [Discussion](https://github.com/display-protocol/dp1-feed-v2/discussions)
 - **Found a bug?** Please report it with steps to reproduce
 
 ## License
