@@ -3,7 +3,7 @@ module github.com/display-protocol/dp1-feed-v2
 go 1.25.0
 
 require (
-	github.com/display-protocol/dp1-go v0.1.0
+	github.com/display-protocol/dp1-go v0.2.2
 	github.com/getsentry/sentry-go v0.29.1
 	github.com/gin-gonic/gin v1.10.0
 	github.com/golang-migrate/migrate/v4 v4.18.1
