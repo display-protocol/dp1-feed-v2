@@ -12,6 +12,7 @@ help:
 	@echo "  make lint-fix          - golangci-lint run --fix (format + safe fixes)"
 	@echo "  make test              - unit tests (all packages, -race)"
 	@echo "  make test-integration  - store contract tests (Docker + -tags=integration)"
+	@echo "  make test-coverage     - unit + integration tests with merged coverage"
 	@echo "  make verify            - lint + test + test-integration (full local gate)"
 	@echo "  make check             - lint + test (no Docker)"
 	@echo "  make generate          - go generate ./... (mocks)"
@@ -26,10 +27,10 @@ help:
 	@echo ""
 	@echo "GitHub Actions (local with act):"
 	@echo "  make act-lint          - run lint workflow locally"
-	@echo "  make act-test          - run unit test workflow locally"
-	@echo "  make act-integration   - run integration test workflow locally"
+	@echo "  make act-test          - run test workflow locally (unit + integration + merged coverage)"
 	@echo "  make act-all           - run all workflows locally"
 	@echo "  make act-list          - list all available workflows"
+	@echo "  make act-clean         - clean up act containers, volumes, and artifacts"
 
 CONFIG      ?= config/config.yaml
 MIGRATIONS  ?= db/migrations
@@ -55,6 +56,34 @@ test:
 .PHONY: test-integration
 test-integration:
 	go test -tags=integration -count=1 -v ./internal/store/...
+
+.PHONY: test-coverage
+test-coverage:
+	@echo "Running unit tests with coverage..."
+	@go test -race -count=1 -timeout=5m \
+		-coverprofile=coverage-unit.out \
+		-covermode=atomic \
+		-coverpkg=$$(go list ./... | grep -v '/mocks' | grep -v '/cmd/' | grep -v '/internal/store' | paste -sd, -) \
+		./...
+	@cat coverage-unit.out | grep -v "/mocks/" | grep -v "/cmd/" | grep -v "/internal/store" > coverage-unit.filtered.out
+	@mv coverage-unit.filtered.out coverage-unit.out
+	@echo ""
+	@echo "Running integration tests with coverage..."
+	@go test -tags=integration -count=1 -timeout=10m \
+		-coverprofile=coverage-integration.out \
+		-covermode=atomic \
+		-coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg \
+		./internal/store/
+	@echo ""
+	@echo "Merging coverage profiles..."
+	@echo "mode: atomic" > coverage-merged.out
+	@tail -n +2 coverage-unit.out >> coverage-merged.out
+	@tail -n +2 coverage-integration.out >> coverage-merged.out
+	@echo ""
+	@echo "=== Merged Coverage Report ==="
+	@go tool cover -func=coverage-merged.out | tail -20
+	@echo ""
+	@echo "Coverage files: coverage-unit.out, coverage-integration.out, coverage-merged.out"
 
 .PHONY: verify
 verify: lint test test-integration
@@ -108,9 +137,11 @@ clean:
 #
 # Note: act runs workflows in Docker containers, so Docker must be running.
 #       Use -P flag to specify runner image: ubuntu-latest=catthehacker/ubuntu:act-latest
+#       Artifacts are stored locally in /tmp/act-artifacts to avoid ACTIONS_RUNTIME_TOKEN errors
 
 ACT ?= act
 ACT_FLAGS ?= -P ubuntu-latest=catthehacker/ubuntu:act-latest --container-architecture linux/amd64
+ACT_ARTIFACT_DIR ?= /tmp/act-artifacts
 
 .PHONY: act-check
 act-check:
@@ -129,14 +160,10 @@ act-lint: act-check
 
 .PHONY: act-test
 act-test: act-check
-	@echo "Running unit test workflow locally..."
-	$(ACT) $(ACT_FLAGS) -W .github/workflows/test.yaml
-
-.PHONY: act-integration
-act-integration: act-check
-	@echo "Running integration test workflow locally..."
-	@echo "⚠️  Note: This requires Docker-in-Docker for testcontainers"
-	$(ACT) $(ACT_FLAGS) -W .github/workflows/integration_test.yaml --privileged
+	@echo "Running test workflow locally (unit + integration + merged coverage)..."
+	@echo "⚠️  Note: Integration tests require Docker-in-Docker for testcontainers"
+	@mkdir -p $(ACT_ARTIFACT_DIR)
+	$(ACT) $(ACT_FLAGS) -W .github/workflows/test.yaml --privileged --artifact-server-path $(ACT_ARTIFACT_DIR)
 
 .PHONY: act-all
 act-all: act-check
@@ -146,11 +173,8 @@ act-all: act-check
 	@echo "Running lint..."
 	$(MAKE) act-lint
 	@echo ""
-	@echo "Running tests..."
+	@echo "Running tests (unit + integration + coverage)..."
 	$(MAKE) act-test
-	@echo ""
-	@echo "Running integration tests..."
-	$(MAKE) act-integration
 
 .PHONY: act-list
 act-list: act-check
@@ -167,3 +191,5 @@ act-clean:
 	@echo "Cleaning up act containers and volumes..."
 	@docker ps -a | grep act- | awk '{print $$1}' | xargs -r docker rm -f || true
 	@docker volume ls | grep act- | awk '{print $$2}' | xargs -r docker volume rm || true
+	@echo "Cleaning up act artifacts..."
+	@rm -rf $(ACT_ARTIFACT_DIR)
