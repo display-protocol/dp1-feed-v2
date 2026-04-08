@@ -1,4 +1,4 @@
-name: Unit Tests
+name: Tests
 
 on:
   push:
@@ -24,10 +24,11 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
-  test:
-    name: Unit tests and coverage
+  unit-test:
+    name: Unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -50,22 +51,129 @@ jobs:
       - name: Run unit tests with coverage
         run: |
           go test -v -race -count=1 -timeout=5m \
-            -coverprofile=coverage.out \
+            -coverprofile=coverage-unit.out \
             -covermode=atomic \
-            -coverpkg=$(go list ./... | grep -v '/mocks' | grep -v '/cmd/' | paste -sd, -) \
+            -coverpkg=$(go list ./... | grep -v '/mocks' | grep -v '/cmd/' | grep -v '/internal/store' | paste -sd, -) \
             ./...
-          # Exclude generated mocks and main packages from coverage
-          cat coverage.out | grep -v "/mocks/" | grep -v "/cmd/" > coverage.filtered.out
-          mv coverage.filtered.out coverage.out
+          # Exclude generated mocks, main packages, and store packages from coverage (store is covered by integration tests)
+          cat coverage-unit.out | grep -v "/mocks/" | grep -v "/cmd/" | grep -v "/internal/store" > coverage-unit.filtered.out
+          mv coverage-unit.filtered.out coverage-unit.out
 
-      - name: Display coverage summary
-        run: go tool cover -func=coverage.out | tail -20
+      - name: Display unit coverage summary
+        run: go tool cover -func=coverage-unit.out | tail -20
 
-      - name: Upload coverage to Codecov
+      - name: Upload unit coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage-unit.out
+          retention-days: 1
+
+  integration-test:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run integration tests with coverage
+        run: |
+          go test -v -race -count=1 -timeout=10m \
+            -tags=integration \
+            -coverprofile=coverage-integration.out \
+            -covermode=atomic \
+            -coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg \
+            ./internal/store/
+
+      - name: Display integration coverage summary
+        run: go tool cover -func=coverage-integration.out | tail -20
+
+      - name: Upload integration coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: coverage-integration.out
+          retention-days: 1
+
+  merge-coverage:
+    name: Merge and report coverage
+    needs: [unit-test, integration-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+
+      - name: Download unit coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-unit
+          path: ./coverage-artifacts/unit
+
+      - name: Download integration coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-integration
+          path: ./coverage-artifacts/integration
+
+      - name: Merge coverage profiles
+        run: |
+          echo "mode: atomic" > coverage-merged.out
+          tail -n +2 coverage-artifacts/unit/coverage-unit.out >> coverage-merged.out
+          tail -n +2 coverage-artifacts/integration/coverage-integration.out >> coverage-merged.out
+
+      - name: Display merged coverage summary
+        run: |
+          echo "=== Merged Coverage Report ==="
+          go tool cover -func=coverage-merged.out | tail -20
+
+      - name: Upload merged coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.out
-          flags: unittests
+          file: ./coverage-merged.out
+          flags: tests
           fail_ci_if_error: false
         continue-on-error: true
+
+      - name: Comment merged coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            
+            // Get total coverage percentage
+            const output = execSync('go tool cover -func=coverage-merged.out').toString();
+            const lines = output.split('\n');
+            const totalLine = lines.find(line => line.includes('total:'));
+            const match = totalLine ? totalLine.match(/(\d+\.\d+)%/) : null;
+            const percentage = match ? match[1] : 'N/A';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### 🧪 Test Coverage Report\n\n**Merged Coverage:** ${percentage}%\n\n_Coverage from both unit and integration tests_`
+            });
