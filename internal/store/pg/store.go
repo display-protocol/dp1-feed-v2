@@ -1131,6 +1131,46 @@ ORDER BY m.position`
 	return out, nil
 }
 
+// ListChannelsForPlaylist implements store.Store.
+func (s *Store) ListChannelsForPlaylist(ctx context.Context, idOrSlug string) ([]store.ChannelRecord, error) {
+	if _, err := s.GetPlaylist(ctx, idOrSlug); err != nil {
+		return nil, err
+	}
+
+	const query = `
+SELECT DISTINCT c.id, c.slug, c.body, c.created_at, c.updated_at
+FROM channels c
+JOIN channel_members m ON m.channel_id = c.id
+JOIN playlists p ON p.id = m.playlist_id
+WHERE p.id::text = $1 OR p.slug = $1
+ORDER BY c.created_at ASC, c.id ASC`
+
+	rows, err := s.pool.Query(ctx, query, idOrSlug)
+	if err != nil {
+		return nil, fmt.Errorf("list channels for playlist: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.ChannelRecord
+	for rows.Next() {
+		var rec store.ChannelRecord
+		var raw []byte
+		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan channel: %w", err)
+		}
+		ch, err := utils.DecodeJSONB[channels.Channel](raw, "channel body")
+		if err != nil {
+			return nil, err
+		}
+		rec.Body = ch
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeleteChannel implements store.Store.
 func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string) error {
 	const (

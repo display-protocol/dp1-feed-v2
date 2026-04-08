@@ -167,6 +167,9 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 			items[i].ID = uuid.New().String()
 		}
 	}
+	if req.Note != nil || playlistItemsHaveNotes(items) {
+		dp = "1.1.1"
+	}
 	p := playlist.Playlist{
 		DPVersion: dp,
 		ID:        id.String(),
@@ -174,6 +177,9 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 		Title:     req.Title,
 		Items:     items,
 		Created:   documentCreatedRFC3339Nano(createdAt),
+	}
+	if req.Note != nil {
+		p.Note = req.Note
 	}
 	if len(req.Curators) > 0 {
 		p.Curators = req.Curators
@@ -191,6 +197,15 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 		p.DynamicQuery = req.DynamicQuery
 	}
 	return json.Marshal(&p)
+}
+
+func playlistItemsHaveNotes(items []playlist.PlaylistItem) bool {
+	for _, item := range items {
+		if item.Note != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // makePlaylistSlug returns client slug if set (slugified), else title-based slug with short id suffix for uniqueness.
@@ -317,6 +332,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		Title:        existing.Title,
 		Slug:         existing.Slug,
 		Items:        existing.Items,
+		Note:         existing.Note,
 		Curators:     existing.Curators,
 		Summary:      existing.Summary,
 		CoverImage:   existing.CoverImage,
@@ -335,6 +351,9 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	}
 	if req.Items != nil {
 		mergedReq.Items = req.Items
+	}
+	if req.Note != nil {
+		mergedReq.Note = req.Note
 	}
 	if req.Curators != nil {
 		mergedReq.Curators = req.Curators

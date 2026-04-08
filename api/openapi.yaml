@@ -728,6 +728,8 @@ components:
           type: string
         slug:
           type: string
+        note:
+          $ref: '#/components/schemas/Note'
         items:
           type: array
           items:
@@ -757,6 +759,8 @@ components:
           type: string
         slug:
           type: string
+        note:
+          $ref: '#/components/schemas/Note'
         items:
           type: array
           items:
@@ -791,6 +795,8 @@ components:
           type: string
         ref:
           type: string
+        note:
+          $ref: '#/components/schemas/Note'
         override:
           type: object
         display:
@@ -813,6 +819,8 @@ components:
           type: string
         title:
           type: string
+        note:
+          $ref: '#/components/schemas/Note'
         items:
           type: array
           items:
@@ -836,12 +844,27 @@ components:
           format: uri
         title:
           type: string
+        note:
+          $ref: '#/components/schemas/Note'
         created:
           type: string
           format: date-time
         duration:
           type: number
         # Additional fields...
+
+    Note:
+      type: object
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          maxLength: 500
+        display_duration:
+          type: integer
+          minimum: 1
+          default: 20
 
     PlaylistGroupInput:
       type: object

@@ -14,6 +14,7 @@ import (
 
 	"github.com/display-protocol/dp1-feed-v2/internal/config"
 	"github.com/display-protocol/dp1-feed-v2/internal/executor"
+	"github.com/display-protocol/dp1-feed-v2/internal/publisherauth"
 )
 
 // Server wraps stdlib http.Server with the Gin engine built in New.
@@ -25,7 +26,7 @@ type Server struct {
 }
 
 // New builds a Gin engine: recovery, optional Sentry, Zap request logging, RegisterRoutes, and http.Server timeouts from cfg.
-func New(cfg *config.Config, log *zap.Logger, exec executor.Executor, version string) *Server {
+func New(cfg *config.Config, log *zap.Logger, exec executor.Executor, authz publisherauth.Authorizer, pubauth publisherauth.Service, version string) *Server {
 	if !cfg.Logging.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -36,7 +37,17 @@ func New(cfg *config.Config, log *zap.Logger, exec executor.Executor, version st
 	r.Use(gin.Recovery())
 	r.Use(ZapLogger(log))
 
-	h := &Handler{Exec: exec, Log: log, Version: version}
+	h := &Handler{
+		Exec:               exec,
+		Log:                log,
+		Version:            version,
+		Publisher:          authz,
+		PublisherAuth:      pubauth,
+		SessionCookieName:  cfg.PublisherAuth.SessionCookieName,
+		CeremonyCookieName: cfg.PublisherAuth.CeremonyCookieName,
+		SessionTTL:         cfg.PublisherAuth.SessionTTL,
+		CeremonyTTL:        cfg.PublisherAuth.CeremonyTTL,
+	}
 	RegisterRoutes(r, h, cfg, log)
 
 	addr := cfg.Address()

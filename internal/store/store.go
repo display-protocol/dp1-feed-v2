@@ -169,6 +169,8 @@ type Store interface {
 	UpdateChannel(ctx context.Context, idOrSlug string, in *ChannelInput) error
 	// ListPlaylistsInChannel returns full playlist rows in membership order (position 0 first). ErrNotFound if the channel does not exist.
 	ListPlaylistsInChannel(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
+	// ListChannelsForPlaylist returns full channel rows for a playlist. ErrNotFound if the playlist does not exist.
+	ListChannelsForPlaylist(ctx context.Context, idOrSlug string) ([]ChannelRecord, error)
 	// DeleteChannel removes a channel row.
 	DeleteChannel(ctx context.Context, idOrSlug string) error
 

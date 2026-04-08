@@ -1,4 +1,5 @@
-# Non-secret defaults. Override secrets with DP1_FEED_* environment variables.
+# Ready-to-run local config for the publisher/passkey/note prototype.
+# Copy to config/config.yaml and replace only the signing key.
 
 server:
   host: "0.0.0.0"
@@ -14,24 +15,19 @@ database:
   max_conn_lifetime: 1h
 
 auth:
-  # Replace in production; override with DP1_FEED_API_KEY
   api_key: "dev-change-me"
-  # Optional publisher-scoped bearer tokens. These authenticate the publisher identity,
-  # but authorization still checks channel ownership via channel.publisher.key.
   publisher_tokens: []
-    # - name: "Casey Reas"
-    #   token: "publisher-dev-token"
-    #   publisher_key: "did:key:z6Mk..."
 
 publisher_auth:
-  rp_id: ""
+  rp_id: "localhost"
   rp_display_name: "Feral File Publisher"
-  rp_origins: []
+  rp_origins:
+    - "http://localhost:8787"
   session_cookie_name: "dp1_publisher_session"
   ceremony_cookie_name: "dp1_publisher_ceremony"
   session_ttl: 720h
   ceremony_ttl: 15m
-  domain_resolver_url: ""
+  domain_resolver_url: "https://domain-name-resolvers.autonomy-system.workers.dev"
   domain_resolver_api_key: ""
   ens_rpc_url: ""
 
@@ -47,6 +43,7 @@ extensions:
 playlist:
   fetch_timeout: 30s
   fetch_max_body_bytes: 4194304
-  # Ed25519 seed: 32 bytes = 64 hex chars. Required — generate: openssl rand -hex 32 (or set DP1_FEED_SIGNING_KEY_HEX)
-  signing_key_hex: ""
+  # Replace this before running:
+  # openssl rand -hex 32
+  signing_key_hex: "replace-me-with-openssl-rand-hex-32"
   public_base_url: "http://localhost:8787"

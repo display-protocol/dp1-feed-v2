@@ -3,6 +3,7 @@ package httpserver
 // HTTP handlers: parse query/body, call executor, map errors to OpenAPI-style JSON (see ErrorResponse).
 
 import (
+	"encoding/json"
 	"net/http"
 	"regexp"
 	"strings"
@@ -14,14 +15,22 @@ import (
 
 	"github.com/display-protocol/dp1-feed-v2/internal/executor"
 	"github.com/display-protocol/dp1-feed-v2/internal/models"
+	"github.com/display-protocol/dp1-feed-v2/internal/publisherauth"
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
+	"github.com/display-protocol/dp1-go/extension/identity"
 )
 
 // Handler carries the executor, logger, and build version for health/metadata responses.
 type Handler struct {
-	Exec    executor.Executor
-	Log     *zap.Logger
-	Version string
+	Exec               executor.Executor
+	Log                *zap.Logger
+	Version            string
+	Publisher          publisherauth.Authorizer
+	PublisherAuth      publisherauth.Service
+	SessionCookieName  string
+	CeremonyCookieName string
+	SessionTTL         time.Duration
+	CeremonyTTL        time.Duration
 }
 
 // channelURLPattern matches /api/v1/channels/{uuid} at the end of a URL.
@@ -30,6 +39,165 @@ var channelURLPattern = regexp.MustCompile(`^https?://.*\/api\/v1\/channels\/[0-
 // isValidChannelURL checks if a URL matches the channel URL pattern.
 func isValidChannelURL(url string) bool {
 	return channelURLPattern.MatchString(url)
+}
+
+type beginPublisherRegistrationRequest struct {
+	DisplayName string `json:"displayName"`
+}
+
+type beginLocalPublisherSessionRequest struct {
+	DisplayName string `json:"displayName"`
+}
+
+type finishPublisherRegistrationRequest struct {
+	Credential json.RawMessage `json:"credential"`
+}
+
+type finishPublisherLoginRequest struct {
+	Credential json.RawMessage `json:"credential"`
+}
+
+type beginWalletProofRequest struct {
+	Address string `json:"address"`
+}
+
+type finishWalletProofRequest struct {
+	Signature string `json:"signature"`
+}
+
+type verifyENSProofRequest struct {
+	Name string `json:"name"`
+}
+
+func (h *Handler) RequirePublisherSession(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, ErrorResponse{Error: "not_found", Message: "publisher auth is not configured"})
+		return
+	}
+	sessionToken, err := c.Cookie(h.SessionCookieName)
+	if err != nil || strings.TrimSpace(sessionToken) == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "publisher session required"})
+		return
+	}
+	principal, err := h.PublisherAuth.LookupSession(c.Request.Context(), sessionToken)
+	if err != nil || principal == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "publisher session required"})
+		return
+	}
+	c.Set(authPrincipalContextKey, authPrincipal{
+		Kind:         principalPublisher,
+		Name:         principal.DisplayName,
+		PublisherKey: principal.PublisherKey,
+		AccountID:    principal.AccountID.String(),
+		ProofCount:   principal.ProofCount,
+	})
+	c.Next()
+}
+
+func (h *Handler) setSessionCookie(c *gin.Context, token string) {
+	if c == nil {
+		return
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(h.SessionCookieName, token, int(h.SessionTTL.Seconds()), "/", "", false, true)
+}
+
+func (h *Handler) setCeremonyCookie(c *gin.Context, token string) {
+	if c == nil {
+		return
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(h.CeremonyCookieName, token, int(h.CeremonyTTL.Seconds()), "/", "", false, true)
+}
+
+func (h *Handler) clearSessionCookie(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.SetCookie(h.SessionCookieName, "", -1, "/", "", false, true)
+}
+
+func (h *Handler) clearCeremonyCookie(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.SetCookie(h.CeremonyCookieName, "", -1, "/", "", false, true)
+}
+
+func currentPublisherAccountID(c *gin.Context) (uuid.UUID, bool) {
+	principal := currentPrincipal(c)
+	if principal == nil || strings.TrimSpace(principal.AccountID) == "" {
+		return uuid.UUID{}, false
+	}
+	id, err := uuid.Parse(principal.AccountID)
+	if err != nil {
+		return uuid.UUID{}, false
+	}
+	return id, true
+}
+
+func (h *Handler) authorizePublisherChannelWrite(c *gin.Context, channelRef string, nextPublisherKey string, requireReplacePublisher bool) bool {
+	if !isPublisherPrincipal(c) {
+		return true
+	}
+	principal, ok := requirePublisherPrincipal(c)
+	if !ok {
+		return false
+	}
+	if principal.ProofCount < 1 {
+		writeForbidden(c, "publisher account must link at least one verified proof before publishing")
+		return false
+	}
+	if h.Publisher == nil {
+		writeForbidden(c, "publisher authorization is not configured")
+		return false
+	}
+	allowed, err := h.Publisher.CanManageChannel(c.Request.Context(), channelRef, principal.PublisherKey)
+	if err != nil {
+		writeMappedError(c, err)
+		return false
+	}
+	if !allowed {
+		writeForbidden(c, "publisher does not control this channel")
+		return false
+	}
+	if requireReplacePublisher && strings.TrimSpace(nextPublisherKey) == "" {
+		writeForbidden(c, "publisher replacement must preserve publisher.key")
+		return false
+	}
+	if strings.TrimSpace(nextPublisherKey) != "" && strings.TrimSpace(nextPublisherKey) != principal.PublisherKey {
+		writeForbidden(c, "publisher key cannot be reassigned")
+		return false
+	}
+	return true
+}
+
+func (h *Handler) authorizePublisherPlaylistWrite(c *gin.Context, playlistRef string) bool {
+	if !isPublisherPrincipal(c) {
+		return true
+	}
+	principal, ok := requirePublisherPrincipal(c)
+	if !ok {
+		return false
+	}
+	if principal.ProofCount < 1 {
+		writeForbidden(c, "publisher account must link at least one verified proof before publishing")
+		return false
+	}
+	if h.Publisher == nil {
+		writeForbidden(c, "publisher authorization is not configured")
+		return false
+	}
+	allowed, err := h.Publisher.CanManagePlaylist(c.Request.Context(), playlistRef, principal.PublisherKey)
+	if err != nil {
+		writeMappedError(c, err)
+		return false
+	}
+	if !allowed {
+		writeForbidden(c, "publisher does not control this playlist")
+		return false
+	}
+	return true
 }
 
 // Health is a liveness endpoint (no version prefix in plan; we expose both /health and /api/v1/health).
@@ -49,6 +217,236 @@ func (h *Handler) HealthAPI(c *gin.Context) {
 // APIInfo serves GET /api/v1.
 func (h *Handler) APIInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, h.Exec.APIInfo(h.Version))
+}
+
+// BeginPublisherRegistration starts a passkey registration ceremony for a new publisher account.
+func (h *Handler) BeginPublisherRegistration(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	var req beginPublisherRegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	options, ceremonyToken, err := h.PublisherAuth.BeginRegistration(c.Request.Context(), req.DisplayName)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.setCeremonyCookie(c, ceremonyToken)
+	c.JSON(http.StatusOK, options)
+}
+
+// BeginLocalPublisherSession creates or reuses a local publisher account and issues a browser session.
+// This is intended only for local debug/testing flows where passkeys are getting in the way.
+func (h *Handler) BeginLocalPublisherSession(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	var req beginLocalPublisherSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	principal, sessionToken, err := h.PublisherAuth.BootstrapLocalSession(c.Request.Context(), req.DisplayName)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.setSessionCookie(c, sessionToken)
+	c.JSON(http.StatusOK, gin.H{
+		"publisherKey": principal.PublisherKey,
+		"displayName":  principal.DisplayName,
+		"proofCount":   principal.ProofCount,
+	})
+}
+
+// FinishPublisherRegistration completes a passkey registration ceremony and creates a browser session.
+func (h *Handler) FinishPublisherRegistration(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	ceremonyToken, err := c.Cookie(h.CeremonyCookieName)
+	if err != nil || strings.TrimSpace(ceremonyToken) == "" {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher ceremony required")
+		return
+	}
+	var req finishPublisherRegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	principal, sessionToken, err := h.PublisherAuth.FinishRegistration(c.Request.Context(), ceremonyToken, req.Credential)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.clearCeremonyCookie(c)
+	h.setSessionCookie(c, sessionToken)
+	c.JSON(http.StatusOK, gin.H{
+		"publisherKey": principal.PublisherKey,
+		"displayName":  principal.DisplayName,
+		"proofCount":   principal.ProofCount,
+	})
+}
+
+// BeginPublisherLogin starts a discoverable passkey login ceremony.
+func (h *Handler) BeginPublisherLogin(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	options, ceremonyToken, err := h.PublisherAuth.BeginLogin(c.Request.Context())
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.setCeremonyCookie(c, ceremonyToken)
+	c.JSON(http.StatusOK, options)
+}
+
+// FinishPublisherLogin completes a passkey login ceremony and issues a browser session.
+func (h *Handler) FinishPublisherLogin(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	ceremonyToken, err := c.Cookie(h.CeremonyCookieName)
+	if err != nil || strings.TrimSpace(ceremonyToken) == "" {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher ceremony required")
+		return
+	}
+	var req finishPublisherLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	principal, sessionToken, err := h.PublisherAuth.FinishLogin(c.Request.Context(), ceremonyToken, req.Credential)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.clearCeremonyCookie(c)
+	h.setSessionCookie(c, sessionToken)
+	c.JSON(http.StatusOK, gin.H{
+		"publisherKey": principal.PublisherKey,
+		"displayName":  principal.DisplayName,
+		"proofCount":   principal.ProofCount,
+	})
+}
+
+// PublisherLogout removes the browser publisher session.
+func (h *Handler) PublisherLogout(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	token, _ := c.Cookie(h.SessionCookieName)
+	_ = h.PublisherAuth.DeleteSession(c.Request.Context(), token)
+	h.clearSessionCookie(c)
+	c.Status(http.StatusNoContent)
+}
+
+// GetPublisherMe returns the authenticated publisher account and linked proofs.
+func (h *Handler) GetPublisherMe(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	accountID, ok := currentPublisherAccountID(c)
+	if !ok {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher session required")
+		return
+	}
+	account, err := h.PublisherAuth.GetAccount(c.Request.Context(), accountID)
+	if err != nil {
+		writeError(c.Writer, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, account)
+}
+
+// BeginPublisherWalletProof creates a wallet-signing challenge for the authenticated publisher account.
+func (h *Handler) BeginPublisherWalletProof(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	accountID, ok := currentPublisherAccountID(c)
+	if !ok {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher session required")
+		return
+	}
+	var req beginWalletProofRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	message, ceremonyToken, err := h.PublisherAuth.BeginWalletProof(c.Request.Context(), accountID, req.Address)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.setCeremonyCookie(c, ceremonyToken)
+	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+// FinishPublisherWalletProof verifies the wallet signature and stores the linked proof.
+func (h *Handler) FinishPublisherWalletProof(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	accountID, ok := currentPublisherAccountID(c)
+	if !ok {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher session required")
+		return
+	}
+	ceremonyToken, err := c.Cookie(h.CeremonyCookieName)
+	if err != nil || strings.TrimSpace(ceremonyToken) == "" {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher ceremony required")
+		return
+	}
+	var req finishWalletProofRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	proof, err := h.PublisherAuth.FinishWalletProof(c.Request.Context(), accountID, ceremonyToken, req.Signature)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	h.clearCeremonyCookie(c)
+	c.JSON(http.StatusOK, proof)
+}
+
+// VerifyPublisherENSProof resolves an ENS name and links it if it matches a verified wallet proof.
+func (h *Handler) VerifyPublisherENSProof(c *gin.Context) {
+	if h.PublisherAuth == nil {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "publisher auth is not configured")
+		return
+	}
+	accountID, ok := currentPublisherAccountID(c)
+	if !ok {
+		writeError(c.Writer, http.StatusUnauthorized, "unauthorized", "publisher session required")
+		return
+	}
+	var req verifyENSProofRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	proof, err := h.PublisherAuth.VerifyENSProof(c.Request.Context(), accountID, req.Name)
+	if err != nil {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, proof)
 }
 
 // ListPlaylists GET /api/v1/playlists.
@@ -86,6 +484,16 @@ func (h *Handler) CreatePlaylist(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
+	}
+	if isPublisherPrincipal(c) {
+		principal, ok := requirePublisherPrincipal(c)
+		if !ok {
+			return
+		}
+		if principal.ProofCount < 1 {
+			writeForbidden(c, "publisher account must link at least one verified proof before publishing")
+			return
+		}
 	}
 	body, err := h.Exec.CreatePlaylist(c.Request.Context(), &req)
 	if err != nil {
@@ -178,6 +586,9 @@ func (h *Handler) ReplacePlaylist(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	if !h.authorizePublisherPlaylistWrite(c, id) {
+		return
+	}
 	body, err := h.Exec.ReplacePlaylist(c.Request.Context(), id, &req)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
@@ -200,6 +611,9 @@ func (h *Handler) UpdatePlaylist(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	if !h.authorizePublisherPlaylistWrite(c, id) {
+		return
+	}
 	body, err := h.Exec.UpdatePlaylist(c.Request.Context(), id, &req)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
@@ -216,6 +630,9 @@ func (h *Handler) UpdatePlaylist(c *gin.Context) {
 
 // DeletePlaylist DELETE /api/v1/playlists/:id.
 func (h *Handler) DeletePlaylist(c *gin.Context) {
+	if !requireOperator(c) {
+		return
+	}
 	id := c.Param("id")
 	if err := h.Exec.DeletePlaylist(c.Request.Context(), id); err != nil {
 		st, code, msg := mapExecutorError(err)
@@ -249,6 +666,9 @@ func (h *Handler) ListPlaylistGroups(c *gin.Context) {
 
 // CreatePlaylistGroup POST /api/v1/playlist-groups.
 func (h *Handler) CreatePlaylistGroup(c *gin.Context) {
+	if !requireOperator(c) {
+		return
+	}
 	var req models.PlaylistGroupCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
@@ -288,6 +708,9 @@ func (h *Handler) GetPlaylistGroup(c *gin.Context) {
 
 // ReplacePlaylistGroup PUT /api/v1/playlist-groups/:id.
 func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
+	if !requireOperator(c) {
+		return
+	}
 	id := c.Param("id")
 	var req models.PlaylistGroupReplaceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -310,6 +733,9 @@ func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
 
 // UpdatePlaylistGroup PATCH /api/v1/playlist-groups/:id.
 func (h *Handler) UpdatePlaylistGroup(c *gin.Context) {
+	if !requireOperator(c) {
+		return
+	}
 	id := c.Param("id")
 	var req models.PlaylistGroupUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -332,6 +758,9 @@ func (h *Handler) UpdatePlaylistGroup(c *gin.Context) {
 
 // DeletePlaylistGroup DELETE /api/v1/playlist-groups/:id.
 func (h *Handler) DeletePlaylistGroup(c *gin.Context) {
+	if !requireOperator(c) {
+		return
+	}
 	id := c.Param("id")
 	if err := h.Exec.DeletePlaylistGroup(c.Request.Context(), id); err != nil {
 		st, code, msg := mapExecutorError(err)
@@ -369,6 +798,22 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
+	}
+	if isPublisherPrincipal(c) {
+		principal, ok := requirePublisherPrincipal(c)
+		if !ok {
+			return
+		}
+		if principal.ProofCount < 1 {
+			writeForbidden(c, "publisher account must link at least one verified proof before publishing")
+			return
+		}
+		if req.Publisher == nil || strings.TrimSpace(req.Publisher.Key) == "" {
+			req.Publisher = &identity.Entity{Name: principal.Name, Key: principal.PublisherKey}
+		} else if strings.TrimSpace(req.Publisher.Key) != principal.PublisherKey {
+			writeForbidden(c, "publisher key does not match authenticated publisher")
+			return
+		}
 	}
 	body, err := h.Exec.CreateChannel(c.Request.Context(), &req)
 	if err != nil {
@@ -418,6 +863,13 @@ func (h *Handler) ReplaceChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	nextPublisherKey := ""
+	if req.Publisher != nil {
+		nextPublisherKey = req.Publisher.Key
+	}
+	if !h.authorizePublisherChannelWrite(c, id, nextPublisherKey, true) {
+		return
+	}
 	body, err := h.Exec.ReplaceChannel(c.Request.Context(), id, &req)
 	if err != nil {
 		if executor.IsExtensionsDisabled(err) {
@@ -444,6 +896,13 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	nextPublisherKey := ""
+	if req.Publisher != nil {
+		nextPublisherKey = req.Publisher.Key
+	}
+	if !h.authorizePublisherChannelWrite(c, id, nextPublisherKey, false) {
+		return
+	}
 	body, err := h.Exec.UpdateChannel(c.Request.Context(), id, &req)
 	if err != nil {
 		if executor.IsExtensionsDisabled(err) {
@@ -465,6 +924,9 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 // DeleteChannel DELETE /api/v1/channels/:id.
 func (h *Handler) DeleteChannel(c *gin.Context) {
 	id := c.Param("id")
+	if !h.authorizePublisherChannelWrite(c, id, "", false) {
+		return
+	}
 	if err := h.Exec.DeleteChannel(c.Request.Context(), id); err != nil {
 		if executor.IsExtensionsDisabled(err) {
 			writeError(c.Writer, http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment")
@@ -511,6 +973,9 @@ func (h *Handler) GetChannelRegistry(c *gin.Context) {
 
 // ReplaceChannelRegistry PUT /api/v1/registry/channels.
 func (h *Handler) ReplaceChannelRegistry(c *gin.Context) {
+	if !requireOperator(c) {
+		return
+	}
 	var req models.RegistryUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())

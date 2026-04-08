@@ -298,6 +298,21 @@ func (mr *MockStoreMockRecorder) ListPlaylistsInChannel(ctx, idOrSlug any) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPlaylistsInChannel", reflect.TypeOf((*MockStore)(nil).ListPlaylistsInChannel), ctx, idOrSlug)
 }
 
+// ListChannelsForPlaylist mocks base method.
+func (m *MockStore) ListChannelsForPlaylist(ctx context.Context, idOrSlug string) ([]store.ChannelRecord, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListChannelsForPlaylist", ctx, idOrSlug)
+	ret0, _ := ret[0].([]store.ChannelRecord)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListChannelsForPlaylist indicates an expected call of ListChannelsForPlaylist.
+func (mr *MockStoreMockRecorder) ListChannelsForPlaylist(ctx, idOrSlug any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListChannelsForPlaylist", reflect.TypeOf((*MockStore)(nil).ListChannelsForPlaylist), ctx, idOrSlug)
+}
+
 // ListPlaylistsInGroup mocks base method.
 func (m *MockStore) ListPlaylistsInGroup(ctx context.Context, idOrSlug string) ([]store.PlaylistRecord, error) {
 	m.ctrl.T.Helper()

@@ -4,7 +4,9 @@ package config
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,13 +24,14 @@ const envPrefix = "DP1_FEED_"
 
 // Config is the root application configuration.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Database   DatabaseConfig   `yaml:"database"`
-	Auth       AuthConfig       `yaml:"auth"`
-	Sentry     SentryConfig     `yaml:"sentry"`
-	Logging    LoggingConfig    `yaml:"logging"`
-	Extensions ExtensionsConfig `yaml:"extensions"`
-	Playlist   PlaylistConfig   `yaml:"playlist"`
+	Server        ServerConfig        `yaml:"server"`
+	Database      DatabaseConfig      `yaml:"database"`
+	Auth          AuthConfig          `yaml:"auth"`
+	PublisherAuth PublisherAuthConfig `yaml:"publisher_auth"`
+	Sentry        SentryConfig        `yaml:"sentry"`
+	Logging       LoggingConfig       `yaml:"logging"`
+	Extensions    ExtensionsConfig    `yaml:"extensions"`
+	Playlist      PlaylistConfig      `yaml:"playlist"`
 }
 
 // ServerConfig controls the HTTP listener.
@@ -50,7 +53,30 @@ type DatabaseConfig struct {
 
 // AuthConfig protects mutating routes (Bearer API key).
 type AuthConfig struct {
-	APIKey string `yaml:"api_key"`
+	APIKey          string               `yaml:"api_key"`
+	PublisherTokens []PublisherTokenAuth `yaml:"publisher_tokens"`
+}
+
+// PublisherTokenAuth configures one publisher-scoped bearer token.
+// The token authenticates a publisher identity; authorization is still checked against channel ownership.
+type PublisherTokenAuth struct {
+	Name         string `yaml:"name"`
+	Token        string `yaml:"token"`
+	PublisherKey string `yaml:"publisher_key"`
+}
+
+// PublisherAuthConfig controls the browser-based publisher account flow.
+type PublisherAuthConfig struct {
+	RPID                 string        `yaml:"rp_id"`
+	RPDisplayName        string        `yaml:"rp_display_name"`
+	RPOrigins            []string      `yaml:"rp_origins"`
+	SessionCookieName    string        `yaml:"session_cookie_name"`
+	CeremonyCookieName   string        `yaml:"ceremony_cookie_name"`
+	SessionTTL           time.Duration `yaml:"session_ttl"`
+	CeremonyTTL          time.Duration `yaml:"ceremony_ttl"`
+	DomainResolverURL    string        `yaml:"domain_resolver_url"`
+	DomainResolverAPIKey string        `yaml:"domain_resolver_api_key"`
+	ENSRPCURL            string        `yaml:"ens_rpc_url"`
 }
 
 // SentryConfig is optional; empty DSN disables Sentry.
@@ -97,6 +123,9 @@ func Load(configPath string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.FinalizePublisherAuth(); err != nil {
+		return nil, err
+	}
 	if err := cfg.deriveSigningKid(); err != nil {
 		return nil, err
 	}
@@ -121,6 +150,13 @@ func defaultConfig() *Config {
 		},
 		Logging:    LoggingConfig{Debug: false},
 		Extensions: ExtensionsConfig{Enabled: true},
+		PublisherAuth: PublisherAuthConfig{
+			RPDisplayName:      "Feral File Publisher",
+			SessionCookieName:  "dp1_publisher_session",
+			CeremonyCookieName: "dp1_publisher_ceremony",
+			SessionTTL:         30 * 24 * time.Hour,
+			CeremonyTTL:        15 * time.Minute,
+		},
 		Playlist: PlaylistConfig{
 			FetchTimeout:      30 * time.Second,
 			FetchMaxBodyBytes: 4 << 20, // 4 MiB
@@ -135,6 +171,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv(envPrefix + "API_KEY"); v != "" {
 		cfg.Auth.APIKey = v
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_TOKENS_JSON"); v != "" {
+		var entries []PublisherTokenAuth
+		if err := json.Unmarshal([]byte(v), &entries); err == nil {
+			cfg.Auth.PublisherTokens = entries
+		}
 	}
 	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
 		cfg.Sentry.DSN = v
@@ -159,6 +201,33 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv(envPrefix + "PUBLIC_BASE_URL"); v != "" {
 		cfg.Playlist.PublicBaseURL = strings.TrimRight(v, "/")
 	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_RP_ID"); v != "" {
+		cfg.PublisherAuth.RPID = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_RP_DISPLAY_NAME"); v != "" {
+		cfg.PublisherAuth.RPDisplayName = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_RP_ORIGINS_JSON"); v != "" {
+		var origins []string
+		if err := json.Unmarshal([]byte(v), &origins); err == nil {
+			cfg.PublisherAuth.RPOrigins = origins
+		}
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_SESSION_COOKIE_NAME"); v != "" {
+		cfg.PublisherAuth.SessionCookieName = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_CEREMONY_COOKIE_NAME"); v != "" {
+		cfg.PublisherAuth.CeremonyCookieName = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_ENS_RPC_URL"); v != "" {
+		cfg.PublisherAuth.ENSRPCURL = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_DOMAIN_RESOLVER_URL"); v != "" {
+		cfg.PublisherAuth.DomainResolverURL = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envPrefix + "PUBLISHER_AUTH_DOMAIN_RESOLVER_API_KEY"); v != "" {
+		cfg.PublisherAuth.DomainResolverAPIKey = strings.TrimSpace(v)
+	}
 }
 
 func (c *Config) validate() error {
@@ -169,8 +238,33 @@ func (c *Config) validate() error {
 	if c.Auth.APIKey == "" {
 		return fmt.Errorf("api key is required (yaml auth.api_key or DP1_FEED_API_KEY)")
 	}
+	seenTokens := make(map[string]struct{}, len(c.Auth.PublisherTokens))
+	for i, entry := range c.Auth.PublisherTokens {
+		if strings.TrimSpace(entry.Token) == "" {
+			return fmt.Errorf("publisher token %d is missing auth.token", i)
+		}
+		if strings.TrimSpace(entry.PublisherKey) == "" {
+			return fmt.Errorf("publisher token %d is missing auth.publisher_key", i)
+		}
+		if _, ok := seenTokens[entry.Token]; ok {
+			return fmt.Errorf("duplicate publisher auth token configured")
+		}
+		seenTokens[entry.Token] = struct{}{}
+	}
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")
+	}
+	if c.PublisherAuth.SessionTTL <= 0 {
+		return fmt.Errorf("publisher auth session ttl must be positive")
+	}
+	if c.PublisherAuth.CeremonyTTL <= 0 {
+		return fmt.Errorf("publisher auth ceremony ttl must be positive")
+	}
+	if strings.TrimSpace(c.PublisherAuth.SessionCookieName) == "" {
+		return fmt.Errorf("publisher auth session cookie name is required")
+	}
+	if strings.TrimSpace(c.PublisherAuth.CeremonyCookieName) == "" {
+		return fmt.Errorf("publisher auth ceremony cookie name is required")
 	}
 	return nil
 }
@@ -196,4 +290,27 @@ func (c *Config) deriveSigningKid() error {
 // Address returns host:port for net.Listen.
 func (c *Config) Address() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+// FinalizePublisherAuth fills derived publisher auth defaults from the public base URL.
+func (c *Config) FinalizePublisherAuth() error {
+	base := strings.TrimSpace(c.Playlist.PublicBaseURL)
+	if base == "" {
+		host := c.Server.Host
+		if host == "" || host == "0.0.0.0" {
+			host = "localhost"
+		}
+		base = fmt.Sprintf("http://%s:%d", host, c.Server.Port)
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return fmt.Errorf("public_base_url parse: %w", err)
+	}
+	if strings.TrimSpace(c.PublisherAuth.RPID) == "" {
+		c.PublisherAuth.RPID = u.Hostname()
+	}
+	if len(c.PublisherAuth.RPOrigins) == 0 {
+		c.PublisherAuth.RPOrigins = []string{fmt.Sprintf("%s://%s", u.Scheme, u.Host)}
+	}
+	return nil
 }

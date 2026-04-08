@@ -17,6 +17,7 @@ type PlaylistCreateRequest struct {
 	Title     string                  `json:"title" binding:"required"`
 	Slug      string                  `json:"slug,omitempty"`
 	Items     []playlist.PlaylistItem `json:"items" binding:"required"`
+	Note      *playlist.Note          `json:"note,omitempty"`
 
 	Curators     []identity.Entity          `json:"curators,omitempty"`
 	Summary      string                     `json:"summary,omitempty"`
@@ -35,6 +36,7 @@ type PlaylistUpdateRequest struct {
 	Title     *string                 `json:"title,omitempty"`
 	Slug      *string                 `json:"slug,omitempty"`
 	Items     []playlist.PlaylistItem `json:"items,omitempty"`
+	Note      *playlist.Note          `json:"note,omitempty"`
 
 	Curators     []identity.Entity          `json:"curators,omitempty"`
 	Summary      *string                    `json:"summary,omitempty"`

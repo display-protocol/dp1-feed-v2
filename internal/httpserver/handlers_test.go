@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -52,6 +53,20 @@ func TestHealth(t *testing.T) {
 	assert.Equal(t, "healthy", resp["status"])
 	assert.Equal(t, "1.2.3", resp["version"])
 	assert.NotEmpty(t, resp["timestamp"])
+}
+
+type fakePublisherAuthorizer struct {
+	channelAllowed  bool
+	playlistAllowed bool
+	err             error
+}
+
+func (f fakePublisherAuthorizer) CanManageChannel(_ context.Context, _ string, _ string) (bool, error) {
+	return f.channelAllowed, f.err
+}
+
+func (f fakePublisherAuthorizer) CanManagePlaylist(_ context.Context, _ string, _ string) (bool, error) {
+	return f.playlistAllowed, f.err
 }
 
 func TestHealthAPI(t *testing.T) {
@@ -2198,6 +2213,116 @@ func TestReplaceChannelRegistry(t *testing.T) {
 			tt.checkResponse(t, w.Body.Bytes())
 		})
 	}
+}
+
+func TestUpdatePlaylist_PublisherForbiddenWithoutOwnedChannel(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	h := &Handler{
+		Exec:      mockExec,
+		Log:       zaptest.NewLogger(t),
+		Version:   "1.2.3",
+		Publisher: fakePublisherAuthorizer{playlistAllowed: false},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: "playlist-1"}}
+	c.Request = httptest.NewRequest(http.MethodPatch, "/api/v1/playlists/playlist-1", bytes.NewBufferString(`{"title":"Updated"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(authPrincipalContextKey, authPrincipal{Kind: principalPublisher, PublisherKey: "did:key:z6MkPublisher", ProofCount: 1})
+
+	h.UpdatePlaylist(c)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "forbidden", resp.Error)
+}
+
+func TestUpdatePlaylist_PublisherAllowedForOwnedChannel(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	mockExec.EXPECT().
+		UpdatePlaylist(gomock.Any(), "playlist-1", gomock.Any()).
+		Return(&playlist.Playlist{Title: "Updated"}, nil)
+
+	h := &Handler{
+		Exec:      mockExec,
+		Log:       zaptest.NewLogger(t),
+		Version:   "1.2.3",
+		Publisher: fakePublisherAuthorizer{playlistAllowed: true},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: "playlist-1"}}
+	c.Request = httptest.NewRequest(http.MethodPatch, "/api/v1/playlists/playlist-1", bytes.NewBufferString(`{"title":"Updated"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(authPrincipalContextKey, authPrincipal{Kind: principalPublisher, PublisherKey: "did:key:z6MkPublisher", ProofCount: 1})
+
+	h.UpdatePlaylist(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestCreateChannel_PublisherMustMatchBodyPublisher(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	h := &Handler{
+		Exec:      mockExec,
+		Log:       zaptest.NewLogger(t),
+		Version:   "1.2.3",
+		Publisher: fakePublisherAuthorizer{channelAllowed: true},
+	}
+
+	body := `{"title":"Casey Channel","playlists":["https://feed.example/api/v1/playlists/a"],"publisher":{"name":"Casey","key":"did:key:z6MkDifferent"}}`
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/channels", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(authPrincipalContextKey, authPrincipal{Kind: principalPublisher, PublisherKey: "did:key:z6MkPublisher", ProofCount: 1})
+
+	h.CreateChannel(c)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "forbidden", resp.Error)
+}
+
+func TestReplaceChannel_PublisherMustPreservePublisherKey(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	h := &Handler{
+		Exec:      mockExec,
+		Log:       zaptest.NewLogger(t),
+		Version:   "1.2.3",
+		Publisher: fakePublisherAuthorizer{channelAllowed: true},
+	}
+
+	body := `{"title":"Casey Channel","playlists":["https://feed.example/api/v1/playlists/a"]}`
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: "casey-channel"}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/channels/casey-channel", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(authPrincipalContextKey, authPrincipal{Kind: principalPublisher, PublisherKey: "did:key:z6MkPublisher", ProofCount: 1})
+
+	h.ReplaceChannel(c)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "forbidden", resp.Error)
 }
 
 func TestIsValidChannelURL(t *testing.T) {

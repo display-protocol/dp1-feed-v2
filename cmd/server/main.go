@@ -20,6 +20,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/httpserver"
 	"github.com/display-protocol/dp1-feed-v2/internal/logger"
+	"github.com/display-protocol/dp1-feed-v2/internal/publisherauth"
 	"github.com/display-protocol/dp1-feed-v2/internal/store/pg"
 )
 
@@ -75,7 +76,12 @@ func main() {
 	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes)
 
 	exec := executor.New(st, dp1, cfg.Extensions.Enabled, f, cfg.Playlist.PublicBaseURL)
-	srv := httpserver.New(cfg, zlog, exec, version)
+	authz := publisherauth.New(st)
+	pubauth, err := publisherauth.NewService(pool, cfg.PublisherAuth)
+	if err != nil {
+		zlog.Fatal("publisher auth", zap.Error(err))
+	}
+	srv := httpserver.New(cfg, zlog, exec, authz, pubauth, version)
 
 	// 3) Graceful shutdown on SIGINT/SIGTERM, then block on ListenAndServe.
 	sig := make(chan os.Signal, 1)

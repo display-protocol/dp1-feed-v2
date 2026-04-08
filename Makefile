@@ -17,6 +17,7 @@ help:
 	@echo "  make generate          - go generate ./... (mocks)"
 	@echo "  make build             - build API server to bin/server"
 	@echo "  make run               - go run server (config + migrations)"
+	@echo "  make publisher         - start local Postgres + run the local publisher prototype"
 	@echo "  make fmt               - go fmt ./..."
 	@echo "  make vet               - go vet ./..."
 	@echo "  make tidy              - go mod tidy"
@@ -74,6 +75,10 @@ build:
 .PHONY: run
 run:
 	go run ./cmd/server -config $(CONFIG) -migrations $(MIGRATIONS)
+
+.PHONY: publisher
+publisher:
+	bash ./scripts/run-local-publisher.sh
 
 .PHONY: fmt
 fmt:
