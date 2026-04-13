@@ -237,6 +237,9 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	if len(req.Curators) > 0 {
 		p.Curators = req.Curators
 	}
+	if req.Note != nil {
+		p.Note = req.Note
+	}
 	if req.Summary != "" {
 		p.Summary = req.Summary
 	}

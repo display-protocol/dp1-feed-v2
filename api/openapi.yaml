@@ -785,6 +785,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PlaylistItemInput'
+        note:
+          $ref: '#/components/schemas/Note'
         curators:
           type: array
           items:
@@ -823,6 +825,8 @@ components:
           type: object
         provenance:
           type: object
+        note:
+          $ref: '#/components/schemas/Note'
 
     Playlist:
       type: object
@@ -1119,6 +1123,22 @@ components:
           type: string
           description: Base64-encoded signature
           example: "dGVzdC1zaWduYXR1cmU="
+
+    Note:
+      type: object
+      description: Text note with optional display duration (playlists extension)
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          description: Note content
+          example: "This is a note about the playlist or item"
+        duration:
+          type: number
+          format: float
+          description: Display duration in seconds (defaults to 20 when omitted)
+          example: 15.0
 
   responses:
     BadRequest:
