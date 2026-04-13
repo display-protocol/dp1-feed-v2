@@ -23,6 +23,12 @@ type PlaylistCreateRequest struct {
 	CoverImage   string                     `json:"coverImage,omitempty"`
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
+
+	// Trusted model fields: user-provided id, created timestamp, and curator signatures.
+	// When signatures are present and valid, API key authentication is bypassed.
+	ID         *string              `json:"id,omitempty"`
+	Created    *string              `json:"created,omitempty"`
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }
 
 // PlaylistReplaceRequest is the JSON body for PUT /api/v1/playlists/{id} (full replacement, same shape as create).

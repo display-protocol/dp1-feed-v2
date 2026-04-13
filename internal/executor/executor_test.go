@@ -14,6 +14,7 @@ import (
 
 	dp1 "github.com/display-protocol/dp1-go"
 	"github.com/display-protocol/dp1-go/extension/channels"
+	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/display-protocol/dp1-go/sign"
@@ -1729,6 +1730,141 @@ func TestIsDP1ValidationError(t *testing.T) {
 	}
 	if executor.IsDP1ValidationError(sign.ErrSigInvalid) {
 		t.Fatal("sign error is not validation")
+	}
+}
+
+// =============================================================================
+// Trusted Model Tests
+// =============================================================================
+
+func TestCreatePlaylistWithSignatures_success(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.New().String()
+	created := time.Now().Add(-5 * time.Second).Format(time.RFC3339)
+	kid := "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+	sig := playlist.Signature{
+		Kid: kid,
+		Alg: "ed25519",
+		Sig: "test-sig",
+	}
+
+	req := &models.PlaylistCreateRequest{
+		DPVersion:  "1.1.0",
+		Title:      "Test Playlist",
+		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		Curators:   []identity.Entity{{Key: kid}},
+		ID:         &id,
+		Created:    &created,
+		Signatures: []playlist.Signature{sig},
+	}
+
+	// Mock signature verification passes
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil)
+
+	// Mock feed signing
+	signed := []byte(`{"dpVersion":"1.1.0","title":"Test Playlist","items":[{"source":"https://example.com"}],"curators":[{"key":"` + kid + `"}]}`)
+	mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
+
+	// Mock validation
+	parsed := mustDecodePlaylist(t, signed)
+	mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil)
+
+	// Mock store
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	result, err := e.CreatePlaylist(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestCreatePlaylistWithSignatures_verificationFailure(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.New().String()
+	created := time.Now().Add(-5 * time.Second).Format(time.RFC3339)
+	kid := "did:key:test"
+	sig := playlist.Signature{
+		Kid: kid,
+		Alg: "ed25519",
+		Sig: "bad-sig",
+	}
+
+	req := &models.PlaylistCreateRequest{
+		DPVersion:  "1.1.0",
+		Title:      "Test",
+		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		ID:         &id,
+		Created:    &created,
+		Signatures: []playlist.Signature{sig},
+	}
+
+	// Mock signature verification failure
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(false, []playlist.Signature{sig}, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	_, err := e.CreatePlaylist(context.Background(), req)
+	if err == nil || !errors.Is(err, executor.ErrSignatureVerificationFailed) {
+		t.Fatalf("expected ErrSignatureVerificationFailed, got: %v", err)
+	}
+}
+
+func TestIsSignatureVerificationError(t *testing.T) {
+	t.Parallel()
+
+	if !executor.IsSignatureVerificationError(executor.ErrSignatureVerificationFailed) {
+		t.Error("should recognize ErrSignatureVerificationFailed")
+	}
+	if !executor.IsSignatureVerificationError(executor.ErrNoValidCuratorSignature) {
+		t.Error("should recognize ErrNoValidCuratorSignature")
+	}
+	if !executor.IsSignatureVerificationError(executor.ErrNoValidPublisherSignature) {
+		t.Error("should recognize ErrNoValidPublisherSignature")
+	}
+	if executor.IsSignatureVerificationError(errors.New("other")) {
+		t.Error("should not recognize other error")
+	}
+	if executor.IsSignatureVerificationError(nil) {
+		t.Error("should not recognize nil")
+	}
+}
+
+func TestIsInvalidTimestampError(t *testing.T) {
+	t.Parallel()
+
+	if !executor.IsInvalidTimestampError(executor.ErrInvalidTimestamp) {
+		t.Error("should recognize ErrInvalidTimestamp")
+	}
+	if executor.IsInvalidTimestampError(errors.New("other")) {
+		t.Error("should not recognize other error")
+	}
+	if executor.IsInvalidTimestampError(nil) {
+		t.Error("should not recognize nil")
+	}
+}
+
+func TestIsInvalidIDError(t *testing.T) {
+	t.Parallel()
+
+	if !executor.IsInvalidIDError(executor.ErrInvalidID) {
+		t.Error("should recognize ErrInvalidID")
+	}
+	if executor.IsInvalidIDError(errors.New("other")) {
+		t.Error("should not recognize other error")
+	}
+	if executor.IsInvalidIDError(nil) {
+		t.Error("should not recognize nil")
 	}
 }
 

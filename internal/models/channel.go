@@ -1,6 +1,9 @@
 package models
 
-import "github.com/display-protocol/dp1-go/extension/identity"
+import (
+	"github.com/display-protocol/dp1-go/extension/identity"
+	"github.com/display-protocol/dp1-go/playlist"
+)
 
 // DefaultChannelVersion is used when POST /channels omits version (semver).
 
@@ -18,6 +21,12 @@ type ChannelCreateRequest struct {
 	Publisher  *identity.Entity  `json:"publisher,omitempty"`
 	Summary    string            `json:"summary,omitempty"`
 	CoverImage string            `json:"coverImage,omitempty"`
+
+	// Trusted model fields: user-provided id, created timestamp, and publisher signatures.
+	// When signatures are present and valid, API key authentication is bypassed.
+	ID         *string              `json:"id,omitempty"`
+	Created    *string              `json:"created,omitempty"`
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }
 
 // ChannelReplaceRequest is the JSON body for PUT /api/v1/channels/{id}.

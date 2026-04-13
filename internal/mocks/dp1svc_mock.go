@@ -147,3 +147,51 @@ func (mr *MockValidatorSignerMockRecorder) ValidatePlaylistWithExtension(raw any
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidatePlaylistWithExtension", reflect.TypeOf((*MockValidatorSigner)(nil).ValidatePlaylistWithExtension), raw)
 }
+
+// VerifyChannelSignatures mocks base method.
+func (m *MockValidatorSigner) VerifyChannelSignatures(raw []byte) (bool, []playlist.Signature, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "VerifyChannelSignatures", raw)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].([]playlist.Signature)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// VerifyChannelSignatures indicates an expected call of VerifyChannelSignatures.
+func (mr *MockValidatorSignerMockRecorder) VerifyChannelSignatures(raw any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifyChannelSignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifyChannelSignatures), raw)
+}
+
+// VerifyPlaylistGroupSignatures mocks base method.
+func (m *MockValidatorSigner) VerifyPlaylistGroupSignatures(raw []byte) (bool, []playlist.Signature, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "VerifyPlaylistGroupSignatures", raw)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].([]playlist.Signature)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// VerifyPlaylistGroupSignatures indicates an expected call of VerifyPlaylistGroupSignatures.
+func (mr *MockValidatorSignerMockRecorder) VerifyPlaylistGroupSignatures(raw any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifyPlaylistGroupSignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifyPlaylistGroupSignatures), raw)
+}
+
+// VerifyPlaylistSignatures mocks base method.
+func (m *MockValidatorSigner) VerifyPlaylistSignatures(raw []byte) (bool, []playlist.Signature, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "VerifyPlaylistSignatures", raw)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].([]playlist.Signature)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// VerifyPlaylistSignatures indicates an expected call of VerifyPlaylistSignatures.
+func (mr *MockValidatorSignerMockRecorder) VerifyPlaylistSignatures(raw any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifyPlaylistSignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifyPlaylistSignatures), raw)
+}

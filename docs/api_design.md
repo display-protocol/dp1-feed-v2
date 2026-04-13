@@ -34,8 +34,23 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Authentication and authorization
 
-- **Write operations** (POST, PUT, PATCH, DELETE on documents; **`PUT /api/v1/registry/channels`**) require **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI).
-- **Compare semantics:** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
+**Two authentication paths for POST operations (create):**
+
+1. **API key authentication (ops path):** Traditional Bearer token for all write operations.
+   - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
+   - Server generates `id`, `created`, `slug` (if omitted)
+   - Server adds feed signature to the document
+
+2. **Signature-based authentication (user path):** Cryptographic signatures for POST (create) operations only.
+   - **No API key required** when valid curator/publisher signatures are provided
+   - Request must include: `id` (UUID), `created` (RFC3339, not in future), `signatures` (array of DP-1 v1.1+ multisig)
+   - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec §7.1.1 and `Signature` schema in OpenAPI)
+   - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document
+   - Server verifies signatures cryptographically (JCS canonicalization, SHA-256 payload hash, Ed25519 signature verification)
+   - Server **always adds** its own feed signature regardless of authentication path
+   - **PUT/PATCH/DELETE operations still require API key** (signature-based authorization deferred)
+
+- **Compare semantics (API key):** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
 - **Per-user or OAuth** is out of scope for this service; front with a gateway if needed.
 
@@ -93,7 +108,10 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
-| **401** | `unauthorized` | Missing or wrong API key on protected routes. |
+| **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |
+| **400** | `invalid_timestamp` | User-provided `created` timestamp is in the future (`IsInvalidTimestampError`). |
+| **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
+| **401** | `unauthorized` | Missing or wrong API key on protected routes, or missing authentication (neither API key nor valid signatures). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |

@@ -660,7 +660,11 @@ components:
     ApiKeyAuth:
       type: http
       scheme: bearer
-      description: API key for write operations
+      description: >
+        API key for write operations. POST operations also support signature-based authentication
+        as an alternative: provide id, created, and signatures fields in the request body with valid
+        curator/publisher signatures to bypass API key requirement. PUT/PATCH/DELETE operations
+        require API key authentication.
 
   parameters:
     IdOrSlug:
@@ -745,6 +749,26 @@ components:
           type: object
         dynamicQuery:
           type: object
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Optional. User-provided UUID for signature-based authentication.
+            When provided with valid curator signatures, bypasses API key requirement.
+        created:
+          type: string
+          format: date-time
+          description: >-
+            Optional. User-provided RFC3339 timestamp for signature-based authentication.
+            Must not be in the future. Required when using signature-based authentication.
+        signatures:
+          type: array
+          description: >-
+            Optional. Array of cryptographic signatures for signature-based authentication.
+            When provided with valid curator signatures matching curators[], bypasses API key requirement.
+            Server always adds its feed signature regardless of authentication path.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistUpdateInput:
       type: object
@@ -865,6 +889,26 @@ components:
         coverImage:
           type: string
           format: uri
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Optional. User-provided UUID for signature-based authentication.
+            When provided with valid curator signatures, bypasses API key requirement.
+        created:
+          type: string
+          format: date-time
+          description: >-
+            Optional. User-provided RFC3339 timestamp for signature-based authentication.
+            Must not be in the future. Required when using signature-based authentication.
+        signatures:
+          type: array
+          description: >-
+            Optional. Array of cryptographic signatures for signature-based authentication.
+            When provided with valid curator signature matching curator field, bypasses API key requirement.
+            Server always adds its feed signature regardless of authentication path.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistGroupUpdateInput:
       type: object
@@ -937,6 +981,26 @@ components:
         coverImage:
           type: string
           format: uri
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Optional. User-provided UUID for signature-based authentication.
+            When provided with valid publisher signatures, bypasses API key requirement.
+        created:
+          type: string
+          format: date-time
+          description: >-
+            Optional. User-provided RFC3339 timestamp for signature-based authentication.
+            Must not be in the future. Required when using signature-based authentication.
+        signatures:
+          type: array
+          description: >-
+            Optional. Array of cryptographic signatures for signature-based authentication.
+            When provided with valid publisher signature matching publisher field, bypasses API key requirement.
+            Server always adds its feed signature regardless of authentication path.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     ChannelUpdateInput:
       type: object
@@ -1018,16 +1082,68 @@ components:
           type: string
           description: Human-readable error message
 
+    Signature:
+      type: object
+      description: DP-1 v1.1+ multisig signature (see DP-1 spec §7.1.1)
+      required:
+        - alg
+        - kid
+        - ts
+        - payload_hash
+        - role
+        - sig
+      properties:
+        alg:
+          type: string
+          description: Signature algorithm
+          example: "ed25519"
+        kid:
+          type: string
+          description: DID key identifier (e.g., did:key:z6Mk...)
+          example: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        ts:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp when signature was created
+          example: "2025-06-01T12:00:00Z"
+        payload_hash:
+          type: string
+          description: SHA-256 hash of the canonicalized JSON payload (JCS)
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        role:
+          type: string
+          description: Role of the signer
+          enum: ["curator", "feed", "agent", "institution", "licensor", "publisher"]
+          example: "curator"
+        sig:
+          type: string
+          description: Base64-encoded signature
+          example: "dGVzdC1zaWduYXR1cmU="
+
   responses:
     BadRequest:
-      description: Bad request (validation error)
+      description: Bad request (validation error, or signature verification failure)
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error: bad_request
-            message: Invalid input
+          examples:
+            validation:
+              value:
+                error: bad_request
+                message: Invalid input
+            invalid_timestamp:
+              value:
+                error: invalid_timestamp
+                message: Timestamp cannot be in the future
+            invalid_id:
+              value:
+                error: invalid_id
+                message: ID must be a valid UUID
+            signature_verification_failed:
+              value:
+                error: signature_verification_failed
+                message: Signature cryptographic verification failed
 
     Unauthorized:
       description: Missing or invalid API key
