@@ -29,6 +29,11 @@ alwaysApply: true
 
 - **`application/json`**; field names follow handler/DP-1 JSON tags and OpenAPI schemas (e.g. list: `items`, `hasMore`, optional `cursor`).
 
+## ETag (conditional GET)
+
+- **Single-resource GETs** (`GET` one playlist, playlist-group, channel, or playlist-item by id) return a strong **`ETag`** (SHA-256 of UTF-8 JSON body) and honor **`If-None-Match`** with **`304`** when unchanged. See `docs/api_design.md` and OpenAPI.
+- **List GETs, registry GET, health/metadata:** no **`ETag`** in API v1 unless a future spec revision adds it.
+
 ## Authentication
 
 - **Bearer API key** on all mutating routes, **or** (for POST and document PUT/PATCH on playlists, playlist-groups, channels) **signature-only** when the JSON body has a non-empty `signatures` array—see `SignatureOrAPIKeyAuth` in `internal/httpserver/middleware.go`.

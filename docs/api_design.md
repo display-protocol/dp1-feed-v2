@@ -30,6 +30,29 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - Requests and responses use **`application/json`** unless otherwise noted.
 - Response field naming follows the **Go/json tags** used in handlers and DP-1-aligned bodies (e.g. list envelope uses **`items`**, **`hasMore`**, optional **`cursor`**). Follow existing OpenAPI schemas and `internal/httpserver` DTOs when adding fields.
 
+---
+
+## ETag and conditional GET (single resources)
+
+**Scope (API v1):** Strong **ETag** support applies only to **GET** of a **single** resource by path:
+
+- `GET /api/v1/playlists/{id}`
+- `GET /api/v1/playlist-groups/{id}`
+- `GET /api/v1/channels/{id}` (when extensions are enabled)
+- `GET /api/v1/playlist-items/{id}`
+
+**Not in scope for v1:** Paginated **list** GETs (`/playlists`, `/playlist-groups`, `/channels`, `/playlist-items`), **`GET /api/v1/registry/channels`**, and metadata endpoints (`/health`, **`GET /api/v1`**) do **not** send `ETag`. Clients should not rely on conditional requests for those routes until explicitly documented in a future revision.
+
+**Semantics:**
+
+- **`ETag` response header:** Strong entity-tag over the **exact UTF-8 JSON bytes** of the response body: quoted **SHA-256** (hexadecimal digest). The tag changes when the encoded JSON would change.
+- **`If-None-Match` request header (optional):** If the value matches the current ETag for that resource, the server responds with **`304 Not Modified`** and an **empty** body. This avoids re-downloading unchanged documents.
+- **`If-None-Match: *`** does not produce 304 when a representation exists (normal HTTP semantics).
+
+**Compatibility:** ETag values are opaque; clients should store and resend them verbatim. Future list-ETag support, if added, will be documented separately in OpenAPI and this document.
+
+---
+
 **Playlists extension fields:**
 
 - **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
@@ -131,6 +154,7 @@ Clients should branch on **`error`** (stable) and treat **`message`** as diagnos
 ## Success status codes
 
 - **200** — OK (GET, PUT, PATCH, DELETE with body where applicable).
+- **304** — Not Modified (single-resource GET only, when `If-None-Match` matches the current `ETag`; empty body).
 - **201** — Created (POST for new playlists, groups, channels as specified per path in OpenAPI).
 
 ---

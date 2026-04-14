@@ -116,7 +116,11 @@ func (h *Handler) GetPlaylist(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	if err := writeJSONIndividualGET(c, body); err != nil {
+		h.Log.Error("get playlist: marshal response", zap.Error(err))
+		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
+		return
+	}
 }
 
 // ListPlaylistItems GET /api/v1/playlist-items.
@@ -167,7 +171,11 @@ func (h *Handler) GetPlaylistItem(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	if err := writeJSONIndividualGET(c, body); err != nil {
+		h.Log.Error("get playlist item: marshal response", zap.Error(err))
+		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
+		return
+	}
 }
 
 // ReplacePlaylist PUT /api/v1/playlists/:id.
@@ -283,7 +291,11 @@ func (h *Handler) GetPlaylistGroup(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	if err := writeJSONIndividualGET(c, body); err != nil {
+		h.Log.Error("get playlist group: marshal response", zap.Error(err))
+		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
+		return
+	}
 }
 
 // ReplacePlaylistGroup PUT /api/v1/playlist-groups/:id.
@@ -407,7 +419,11 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	if err := writeJSONIndividualGET(c, body); err != nil {
+		h.Log.Error("get channel: marshal response", zap.Error(err))
+		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
+		return
+	}
 }
 
 // ReplaceChannel PUT /api/v1/channels/:id.

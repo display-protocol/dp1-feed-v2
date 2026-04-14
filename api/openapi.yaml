@@ -171,16 +171,30 @@ paths:
     get:
       tags: [playlists]
       summary: Get playlist
-      description: Returns a single playlist by UUID or slug
+      description: |
+        Returns a single playlist by UUID or slug.
+
+        Responses include a strong `ETag` (SHA-256 of the UTF-8 JSON body). Clients may send `If-None-Match`
+        with a previously received ETag to receive 304 Not Modified when the representation is unchanged.
+        Paginated list GETs do not emit ETag in API v1.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Playlist document
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Playlist'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -312,16 +326,29 @@ paths:
     get:
       tags: [playlist-groups]
       summary: Get playlist-group
-      description: Returns a single playlist-group by UUID or slug
+      description: |
+        Returns a single playlist-group by UUID or slug.
+
+        Strong ETag and optional conditional GET (`If-None-Match` → 304) apply as for single-resource GETs;
+        list endpoints do not emit ETag in API v1.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Playlist-group document
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlaylistGroup'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -457,16 +484,28 @@ paths:
     get:
       tags: [channels]
       summary: Get channel
-      description: Returns a single channel by UUID or slug (requires extensions)
+      description: |
+        Returns a single channel by UUID or slug (requires extensions).
+
+        Strong ETag and optional `If-None-Match` (304) apply as for other single-resource GETs.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Channel document
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Channel'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '404':
           description: Channel not found or extensions disabled
 
@@ -586,7 +625,10 @@ paths:
     get:
       tags: [playlist-items]
       summary: Get playlist item
-      description: Returns a single indexed playlist item by UUID
+      description: |
+        Returns a single indexed playlist item by UUID.
+
+        Strong ETag and optional `If-None-Match` (304) apply; the playlist-items list GET does not emit ETag in API v1.
       parameters:
         - name: id
           in: path
@@ -595,13 +637,22 @@ paths:
           schema:
             type: string
             format: uuid
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Playlist item
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlaylistItem'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -712,6 +763,25 @@ components:
         type: string
         enum: [asc, desc]
         default: asc
+
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: >
+        Optional conditional GET. When it matches the ETag of the current representation, the server returns
+        304 Not Modified with an empty body. Only single-resource GETs support this (not list or registry GETs);
+        see docs/api_design.md.
+      schema:
+        type: string
+
+  headers:
+    IndividualGETETag:
+      description: >
+        Strong entity-tag for the exact UTF-8 JSON response bytes: a quoted hexadecimal SHA-256 digest.
+        Send the same value in If-None-Match for conditional GETs.
+      schema:
+        type: string
 
   schemas:
     ListResponse:

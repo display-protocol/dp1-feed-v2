@@ -492,9 +492,46 @@ func TestGetPlaylist(t *testing.T) {
 			h.GetPlaylist(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedStatus == http.StatusOK {
+				assert.NotEmpty(t, w.Header().Get("ETag"))
+			}
 			tt.checkResponse(t, w.Body.Bytes())
 		})
 	}
+}
+
+func TestGetPlaylist_IfNoneMatchNotModified(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	pl := &playlist.Playlist{DPVersion: "1.1.0", Title: "Cached"}
+	mockExec := mocks.NewMockExecutor(ctrl)
+	mockExec.EXPECT().
+		GetPlaylist(gomock.Any(), "slug-or-id").
+		Return(pl, nil).
+		Times(2)
+
+	h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	c1.Request = httptest.NewRequest(http.MethodGet, "/api/v1/playlists/slug-or-id", nil)
+	c1.Params = gin.Params{{Key: "id", Value: "slug-or-id"}}
+	h.GetPlaylist(c1)
+	require.Equal(t, http.StatusOK, w1.Code)
+	etag := w1.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/playlists/slug-or-id", nil)
+	req2.Header.Set("If-None-Match", etag)
+	c2.Request = req2
+	c2.Params = gin.Params{{Key: "id", Value: "slug-or-id"}}
+	h.GetPlaylist(c2)
+	assert.Equal(t, http.StatusNotModified, w2.Code)
+	assert.Empty(t, w2.Body.Bytes())
+	assert.Equal(t, etag, w2.Header().Get("ETag"))
 }
 
 func TestListPlaylistItems(t *testing.T) {
@@ -690,6 +727,9 @@ func TestGetPlaylistItem(t *testing.T) {
 			h.GetPlaylistItem(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedStatus == http.StatusOK {
+				assert.NotEmpty(t, w.Header().Get("ETag"))
+			}
 			tt.checkResponse(t, w.Body.Bytes())
 		})
 	}
@@ -1182,6 +1222,9 @@ func TestGetPlaylistGroup(t *testing.T) {
 			h.GetPlaylistGroup(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedStatus == http.StatusOK {
+				assert.NotEmpty(t, w.Header().Get("ETag"))
+			}
 			tt.checkResponse(t, w.Body.Bytes())
 		})
 	}
@@ -1677,6 +1720,9 @@ func TestGetChannel(t *testing.T) {
 			h.GetChannel(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedStatus == http.StatusOK {
+				assert.NotEmpty(t, w.Header().Get("ETag"))
+			}
 			tt.checkResponse(t, w.Body.Bytes())
 		})
 	}
