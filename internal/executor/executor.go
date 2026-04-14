@@ -252,6 +252,9 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	if req.DynamicQuery != nil {
 		p.DynamicQuery = req.DynamicQuery
 	}
+	if len(req.Signatures) > 0 {
+		p.Signatures = req.Signatures
+	}
 	return json.Marshal(&p)
 }
 
@@ -502,6 +505,9 @@ func (e *impl) buildPlaylistGroupDocument(req *models.PlaylistGroupCreateRequest
 	}
 	if req.CoverImage != "" {
 		g.CoverImage = req.CoverImage
+	}
+	if len(req.Signatures) > 0 {
+		g.Signatures = req.Signatures
 	}
 	return json.Marshal(&g)
 }
@@ -806,6 +812,9 @@ func (e *impl) buildChannelDocument(req *models.ChannelCreateRequest, uris []str
 	}
 	if req.CoverImage != "" {
 		ch.CoverImage = req.CoverImage
+	}
+	if len(req.Signatures) > 0 {
+		ch.Signatures = req.Signatures
 	}
 	return json.Marshal(&ch)
 }
