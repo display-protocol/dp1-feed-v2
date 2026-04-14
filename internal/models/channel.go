@@ -43,4 +43,7 @@ type ChannelUpdateRequest struct {
 	Publisher  *identity.Entity  `json:"publisher,omitempty"`
 	Summary    *string           `json:"summary,omitempty"`
 	CoverImage *string           `json:"coverImage,omitempty"`
+
+	// Trusted model: when non-empty, verify publisher signatures (merged document) then feed co-signs.
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }

@@ -38,21 +38,23 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Authentication and authorization
 
-**Two authentication paths for POST operations (create):**
+**Two authentication paths for document writes (create and update):**
 
-1. **API key authentication (ops path):** Traditional Bearer token for all write operations.
+1. **API key authentication (ops path):** Traditional Bearer token.
    - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
-   - Server generates `id`, `created`, `slug` (if omitted)
+   - On **create**, the server may generate `id`, `created`, `slug` (if omitted)
    - Server adds feed signature to the document
 
-2. **Signature-based authentication (user path):** Cryptographic signatures for POST (create) operations only.
-   - **No API key required** when valid curator/publisher signatures are provided
-   - Request must include: `id` (UUID), `created` (RFC3339, not in future), `signatures` (array of DP-1 v1.1+ multisig)
-   - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec §7.1.1 and `Signature` schema in OpenAPI)
-   - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document
+2. **Signature-based authentication (user path):** Cryptographic signatures on the request body.
+   - **No API key required** when the body includes a **non-empty** `signatures` array and verification succeeds
+   - **POST (create):** request must include `id` (UUID), `created` (RFC3339, not in future), and `signatures`, as documented on `PlaylistInput` / group / channel inputs
+   - **PUT (replace):** same input shapes as create; `signatures` must match the document after replace (stored `id`, `slug`, and document `created` are preserved by the server)
+   - **PATCH (partial update):** optional `signatures` on `PlaylistUpdateInput` / group / channel update schemas; when non-empty, signatures must verify against the **merged** document (patch fields overlaid on the stored document)
+   - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec and `Signature` schema in OpenAPI)
+   - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document used for verification
    - Server verifies signatures cryptographically (JCS canonicalization, SHA-256 payload hash, Ed25519 signature verification)
    - Server **always adds** its own feed signature regardless of authentication path
-   - **PUT/PATCH/DELETE operations still require API key** (signature-based authorization deferred)
+   - **DELETE** and **registry PUT** still require an API key only (no signature-only path)
 
 - **Compare semantics (API key):** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.

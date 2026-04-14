@@ -56,8 +56,8 @@ func APIKeyAuth(secret string, log *zap.Logger) gin.HandlerFunc {
 }
 
 // SignatureOrAPIKeyAuth accepts either API key (ops path) or valid signatures in request body (user path).
-// For POST routes only: allows requests with signatures[] in body to bypass API key requirement.
-// The executor layer verifies signatures match document curators/publisher.
+// Used for POST (create) and PUT/PATCH (replace/update) on playlists, playlist-groups, and channels:
+// requests with a non-empty signatures[] array may omit the API key; the executor verifies signatures.
 //
 // Authentication flow:
 //   - Path A (Ops): Has Authorization: Bearer header → validate API key → set AuthModeAPIKey

@@ -49,4 +49,7 @@ type PlaylistUpdateRequest struct {
 	CoverImage   *string                    `json:"coverImage,omitempty"`
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
+
+	// Trusted model: when non-empty, same semantics as create — verify curator signatures then feed co-signs.
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }

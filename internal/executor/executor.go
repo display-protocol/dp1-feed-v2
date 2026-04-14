@@ -328,6 +328,8 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 }
 
 // ReplacePlaylist replaces a playlist by id/slug (full body); id and slug come from the row; "created" in JSON follows the stored document.
+//
+// Trusted model: when req.signatures is non-empty, verifies curator signatures (same rules as create) before feed co-signing; otherwise API-key (ops) path.
 func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error) {
 	// 1) Get the existing playlist row.
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
@@ -343,6 +345,12 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	raw, err := e.buildPlaylistDocument(req, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(req.Signatures) > 0 {
+		if err := e.verifyPlaylistCuratorSignatures(raw, req.Signatures, req.Curators); err != nil {
+			return nil, fmt.Errorf("curator signature verification: %w", err)
+		}
 	}
 
 	// 3) Sign with v1.1+ multisig (feed role).
@@ -368,6 +376,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 }
 
 // UpdatePlaylist performs a partial update: merges non-nil fields from req with existing playlist, then signs, validates, and stores.
+// When req.signatures is non-empty, verifies those curator signatures over the merged document before feed co-signing.
 func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistUpdateRequest) (*playlist.Playlist, error) {
 	// 1. Fetch existing playlist once.
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
@@ -416,6 +425,9 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if req.DynamicQuery != nil {
 		mergedReq.DynamicQuery = req.DynamicQuery
 	}
+	if len(req.Signatures) > 0 {
+		mergedReq.Signatures = req.Signatures
+	}
 
 	// 3. Build the new playlist document using the existing record's id, slug, and document "created".
 	created, err := parseDocumentCreated(rec.Body.Created)
@@ -425,6 +437,12 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(mergedReq.Signatures) > 0 {
+		if err := e.verifyPlaylistCuratorSignatures(raw, mergedReq.Signatures, mergedReq.Curators); err != nil {
+			return nil, fmt.Errorf("curator signature verification: %w", err)
+		}
 	}
 
 	// 4. Sign with v1.1+ multisig (feed role).
@@ -652,6 +670,7 @@ func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string,
 }
 
 // ReplacePlaylistGroup re-resolves playlist URIs and commits an update like CreatePlaylistGroup.
+// When req.signatures is non-empty, verifies curator signatures before feed co-signing.
 func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest) (*playlistgroup.Group, error) {
 	// 1. Get the existing playlist-group row.
 	rec, err := e.store.GetPlaylistGroup(ctx, idOrSlug)
@@ -674,6 +693,12 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(req.Signatures) > 0 {
+		if err := e.verifyPlaylistGroupCuratorSignatures(raw, req.Signatures, req.Curator); err != nil {
+			return nil, fmt.Errorf("curator signature verification: %w", err)
+		}
 	}
 
 	// 4. Sign with v1.1+ multisig (feed role).
@@ -702,6 +727,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 }
 
 // UpdatePlaylistGroup performs a partial update: merges non-nil fields from req with existing group, then re-resolves URIs, re-signs, and updates.
+// When req.signatures is non-empty, verifies curator signatures over the merged document before feed co-signing.
 func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupUpdateRequest) (*playlistgroup.Group, error) {
 	// 1. Fetch existing playlist-group once.
 	rec, err := e.store.GetPlaylistGroup(ctx, idOrSlug)
@@ -738,6 +764,9 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if req.CoverImage != nil {
 		mergedReq.CoverImage = *req.CoverImage
 	}
+	if len(req.Signatures) > 0 {
+		mergedReq.Signatures = req.Signatures
+	}
 
 	// 3. Resolve playlist URIs from merged request.
 	uris := mergedReq.Playlists
@@ -754,6 +783,12 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, rec.Slug, created)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(mergedReq.Signatures) > 0 {
+		if err := e.verifyPlaylistGroupCuratorSignatures(raw, mergedReq.Signatures, mergedReq.Curator); err != nil {
+			return nil, fmt.Errorf("curator signature verification: %w", err)
+		}
 	}
 
 	// 5. Sign with v1.1+ multisig (feed role).
@@ -939,6 +974,7 @@ func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort 
 }
 
 // ReplaceChannel re-resolves playlist URIs and commits a channel update like CreateChannel.
+// When req.signatures is non-empty, verifies publisher signatures before feed co-signing.
 func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest) (*channels.Channel, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled
@@ -967,7 +1003,13 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		return nil, err
 	}
 
-	// 4. Sign with v1.1+ multisig (curator role).
+	if len(req.Signatures) > 0 {
+		if err := e.verifyChannelPublisherSignatures(raw, req.Signatures, req.Publisher); err != nil {
+			return nil, fmt.Errorf("publisher signature verification: %w", err)
+		}
+	}
+
+	// 4. Sign with v1.1+ multisig (feed role).
 	signed, err := e.dp1.SignChannel(raw, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
@@ -993,6 +1035,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 }
 
 // UpdateChannel performs a partial update: merges non-nil fields from req with existing channel, then re-resolves URIs, re-signs, and updates.
+// When req.signatures is non-empty, verifies publisher signatures over the merged document before feed co-signing.
 func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.ChannelUpdateRequest) (*channels.Channel, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled
@@ -1041,6 +1084,9 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 	if req.CoverImage != nil {
 		mergedReq.CoverImage = *req.CoverImage
 	}
+	if len(req.Signatures) > 0 {
+		mergedReq.Signatures = req.Signatures
+	}
 
 	// 3. Resolve playlist URIs from merged request.
 	uris := mergedReq.Playlists
@@ -1059,7 +1105,13 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 		return nil, err
 	}
 
-	// 5. Sign with v1.1+ multisig (curator role).
+	if len(mergedReq.Signatures) > 0 {
+		if err := e.verifyChannelPublisherSignatures(raw, mergedReq.Signatures, mergedReq.Publisher); err != nil {
+			return nil, fmt.Errorf("publisher signature verification: %w", err)
+		}
+	}
+
+	// 5. Sign with v1.1+ multisig (feed role).
 	signed, err := e.dp1.SignChannel(raw, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)

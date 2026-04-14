@@ -153,6 +153,33 @@ func TestSignatureOrAPIKeyAuth(t *testing.T) {
 			t.Errorf("expected 401, got %d", w.Code)
 		}
 	})
+
+	t.Run("put_valid_signatures_in_body", func(t *testing.T) {
+		router := gin.New()
+		called := false
+		router.PUT("/playlists/:id", SignatureOrAPIKeyAuth(secret, log), func(c *gin.Context) {
+			called = true
+			mode := GetAuthMode(c)
+			if mode != AuthModeSignature {
+				t.Errorf("expected AuthModeSignature, got %v", mode)
+			}
+			c.Status(http.StatusOK)
+		})
+
+		body := `{"dpVersion":"1.1.0","title":"t","items":[],"signatures":[{"kid":"did:key:abc","alg":"ed25519","sig":"x"}]}`
+		req := httptest.NewRequest(http.MethodPut, "/playlists/11111111-1111-1111-1111-111111111111", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if !called {
+			t.Error("handler was not called")
+		}
+	})
 }
 
 func TestAPIKeyAuth(t *testing.T) {

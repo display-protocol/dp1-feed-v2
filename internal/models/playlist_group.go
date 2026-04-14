@@ -31,4 +31,7 @@ type PlaylistGroupUpdateRequest struct {
 	Curator    *string  `json:"curator,omitempty"`
 	Summary    *string  `json:"summary,omitempty"`
 	CoverImage *string  `json:"coverImage,omitempty"`
+
+	// Trusted model: when non-empty, verify curator signatures (merged document) then feed co-signs.
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }

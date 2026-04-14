@@ -171,7 +171,6 @@ func (h *Handler) GetPlaylistItem(c *gin.Context) {
 }
 
 // ReplacePlaylist PUT /api/v1/playlists/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original curator.
 func (h *Handler) ReplacePlaylist(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistReplaceRequest
@@ -194,7 +193,6 @@ func (h *Handler) ReplacePlaylist(c *gin.Context) {
 }
 
 // UpdatePlaylist PATCH /api/v1/playlists/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original curator.
 func (h *Handler) UpdatePlaylist(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistUpdateRequest
@@ -217,7 +215,6 @@ func (h *Handler) UpdatePlaylist(c *gin.Context) {
 }
 
 // DeletePlaylist DELETE /api/v1/playlists/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original curator.
 func (h *Handler) DeletePlaylist(c *gin.Context) {
 	id := c.Param("id")
 	if err := h.Exec.DeletePlaylist(c.Request.Context(), id); err != nil {
@@ -290,7 +287,6 @@ func (h *Handler) GetPlaylistGroup(c *gin.Context) {
 }
 
 // ReplacePlaylistGroup PUT /api/v1/playlist-groups/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original curator.
 func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistGroupReplaceRequest
@@ -313,7 +309,6 @@ func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
 }
 
 // UpdatePlaylistGroup PATCH /api/v1/playlist-groups/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original curator.
 func (h *Handler) UpdatePlaylistGroup(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistGroupUpdateRequest
@@ -336,7 +331,6 @@ func (h *Handler) UpdatePlaylistGroup(c *gin.Context) {
 }
 
 // DeletePlaylistGroup DELETE /api/v1/playlist-groups/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original curator.
 func (h *Handler) DeletePlaylistGroup(c *gin.Context) {
 	id := c.Param("id")
 	if err := h.Exec.DeletePlaylistGroup(c.Request.Context(), id); err != nil {
@@ -417,7 +411,6 @@ func (h *Handler) GetChannel(c *gin.Context) {
 }
 
 // ReplaceChannel PUT /api/v1/channels/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original publisher.
 func (h *Handler) ReplaceChannel(c *gin.Context) {
 	id := c.Param("id")
 	var req models.ChannelReplaceRequest
@@ -444,7 +437,6 @@ func (h *Handler) ReplaceChannel(c *gin.Context) {
 }
 
 // UpdateChannel PATCH /api/v1/channels/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original publisher.
 func (h *Handler) UpdateChannel(c *gin.Context) {
 	id := c.Param("id")
 	var req models.ChannelUpdateRequest
@@ -471,7 +463,6 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 }
 
 // DeleteChannel DELETE /api/v1/channels/:id.
-// TODO: Trusted model - add signature-based authorization: verify signer is original publisher.
 func (h *Handler) DeleteChannel(c *gin.Context) {
 	id := c.Param("id")
 	if err := h.Exec.DeleteChannel(c.Request.Context(), id); err != nil {

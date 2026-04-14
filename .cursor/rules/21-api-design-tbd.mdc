@@ -31,8 +31,9 @@ alwaysApply: true
 
 ## Authentication
 
-- **Bearer API key** on mutating routes and registry PUT: `Authorization: Bearer <secret>` (`ApiKeyAuth`).
-- Constant-time comparison of full header value vs configured secret (`internal/httpserver/middleware.go`).
+- **Bearer API key** on all mutating routes, **or** (for POST and document PUT/PATCH on playlists, playlist-groups, channels) **signature-only** when the JSON body has a non-empty `signatures` array—see `SignatureOrAPIKeyAuth` in `internal/httpserver/middleware.go`.
+- Registry PUT and DELETE routes require API key only (`APIKeyAuth`).
+- Constant-time comparison of full header value vs configured secret when the Bearer path is used.
 - Reads public unless network-restricted; no built-in OAuth.
 
 ## Pagination, sort, filter

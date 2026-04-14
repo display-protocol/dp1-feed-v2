@@ -187,7 +187,9 @@ paths:
     put:
       tags: [playlists]
       summary: Replace playlist
-      description: Fully replaces a playlist document
+      description: >-
+        Fully replaces a playlist document. Authentication: API key, or signature-based auth when the body
+        includes a non-empty `signatures` array (same semantics as POST create).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -215,7 +217,9 @@ paths:
     patch:
       tags: [playlists]
       summary: Update playlist
-      description: Partially updates a playlist document (only provided fields are updated)
+      description: >-
+        Partially updates a playlist document (only provided fields are updated). Authentication: API key,
+        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -324,7 +328,9 @@ paths:
     put:
       tags: [playlist-groups]
       summary: Replace playlist-group
-      description: Fully replaces a playlist-group document
+      description: >-
+        Fully replaces a playlist-group document. Authentication: API key, or signature-based auth when the body
+        includes a non-empty `signatures` array (same semantics as POST create).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -352,7 +358,9 @@ paths:
     patch:
       tags: [playlist-groups]
       summary: Update playlist-group
-      description: Partially updates a playlist-group document (only provided fields are updated)
+      description: >-
+        Partially updates a playlist-group document (only provided fields are updated). Authentication: API key,
+        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -465,7 +473,9 @@ paths:
     put:
       tags: [channels]
       summary: Replace channel
-      description: Fully replaces a channel document (requires extensions)
+      description: >-
+        Fully replaces a channel document (requires extensions). Authentication: API key, or signature-based
+        auth when the body includes a non-empty `signatures` array (same semantics as POST create).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -493,7 +503,9 @@ paths:
     patch:
       tags: [channels]
       summary: Update channel
-      description: Partially updates a channel document (only provided fields are updated, requires extensions)
+      description: >-
+        Partially updates a channel document (only provided fields are updated, requires extensions).
+        Authentication: API key, or signature-based auth when `signatures` is non-empty (merged document).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -661,10 +673,10 @@ components:
       type: http
       scheme: bearer
       description: >
-        API key for write operations. POST operations also support signature-based authentication
-        as an alternative: provide id, created, and signatures fields in the request body with valid
-        curator/publisher signatures to bypass API key requirement. PUT/PATCH/DELETE operations
-        require API key authentication.
+        API key for write operations. Alternatively, omit this header when the JSON body includes a
+        non-empty `signatures` array and the server successfully verifies curator or publisher
+        signatures (POST create; PUT/PATCH replace/update on playlists, playlist-groups, and channels).
+        DELETE and registry PUT require this API key (no signature-only path).
 
   parameters:
     IdOrSlug:
@@ -800,6 +812,13 @@ components:
           type: object
         dynamicQuery:
           type: object
+        signatures:
+          type: array
+          description: >-
+            When non-empty, signature-based authentication for this request; must verify against merged
+            curators. Server always adds feed signature after verification.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistItemInput:
       type: object
@@ -934,6 +953,13 @@ components:
         coverImage:
           type: string
           format: uri
+        signatures:
+          type: array
+          description: >-
+            When non-empty, signature-based authentication; must verify against merged curator field.
+            Server always adds feed signature after verification.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistGroup:
       type: object
@@ -1032,6 +1058,13 @@ components:
         coverImage:
           type: string
           format: uri
+        signatures:
+          type: array
+          description: >-
+            When non-empty, signature-based authentication; must verify against merged publisher.
+            Server always adds feed signature after verification.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     Channel:
       type: object
