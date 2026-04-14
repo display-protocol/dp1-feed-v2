@@ -34,6 +34,7 @@ func New(cfg *config.Config, log *zap.Logger, exec executor.Executor, version st
 		r.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
 	}
 	r.Use(gin.Recovery())
+	r.Use(newCORSMiddleware(cfg))
 	r.Use(ZapLogger(log))
 
 	h := &Handler{Exec: exec, Log: log, Version: version}
