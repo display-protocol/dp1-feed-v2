@@ -152,12 +152,7 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 			return nil, err
 		}
 
-		// Generate slug if not provided
-		if req.Slug == "" {
-			slug = e.makePlaylistSlug(req, id)
-		} else {
-			slug = slugify(req.Slug)
-		}
+		slug = makeSlug(req.Slug, req.Title, id, "playlist")
 
 		// Build document with user-provided fields
 		raw, err = e.buildPlaylistDocument(req, id, slug, created)
@@ -174,7 +169,7 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 		// Server generates id, slug, created
 		id = uuid.New()
 		created = time.Now()
-		slug = e.makePlaylistSlug(req, id)
+		slug = makeSlug(req.Slug, req.Title, id, "playlist")
 
 		raw, err = e.buildPlaylistDocument(req, id, slug, created)
 		if err != nil {
@@ -258,27 +253,37 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	return json.Marshal(&p)
 }
 
-// makePlaylistSlug returns client slug if set (slugified), else title-based slug with short id suffix for uniqueness.
-func (e *impl) makePlaylistSlug(req *models.PlaylistCreateRequest, id uuid.UUID) string {
-	if s := strings.TrimSpace(req.Slug); s != "" {
-		return slugify(s)
-	}
-	base := slugify(req.Title)
-	if base == "" {
-		base = "playlist"
-	}
-	return fmt.Sprintf("%s-%s", base, id.String()[:8])
-}
-
 // slugify lowercases, replaces non-alphanumeric runs with '-', trims edges (empty → "").
 func slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
-	if s == "" {
-		return ""
-	}
 	return s
+}
+
+// shortID returns the first 8 characters of the UUID for slug generation.
+func shortID(id uuid.UUID) string {
+	return id.String()[:8]
+}
+
+// makeSlug generates a URL-friendly slug for playlists, groups, and channels.
+// Priority: 1) client-provided slug, 2) title-based slug, 3) default+id.
+func makeSlug(clientSlug, title string, id uuid.UUID, defaultName string) string {
+	// First: try using the client-provided slug
+	if clientSlug != "" {
+		slug := slugify(clientSlug)
+		if slug != "" {
+			return slug
+		}
+	}
+
+	// Second: generate from title
+	base := slugify(title)
+	if base == "" {
+		base = defaultName
+	}
+
+	return fmt.Sprintf("%s-%s", base, shortID(id))
 }
 
 // documentCreatedRFC3339Nano formats a timestamp for DP-1 JSON "created" (date-time).
@@ -327,7 +332,7 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 	return out, nextCur, nil
 }
 
-// ReplacePlaylist replaces a playlist by id/slug (full body); id and slug come from the row; "created" in JSON follows the stored document.
+// ReplacePlaylist replaces a playlist by id/slug (full body); id and document "created" follow the stored row; JSON slug comes from request slug/title + id (see makeSlug), not from rec.Slug alone.
 //
 // Trusted model: when req.signatures is non-empty, verifies curator signatures (same rules as create) before feed co-signing; otherwise API-key (ops) path.
 func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error) {
@@ -342,7 +347,8 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err != nil {
 		return nil, err
 	}
-	raw, err := e.buildPlaylistDocument(req, rec.ID, rec.Slug, created)
+	slug := makeSlug(req.Slug, req.Title, rec.ID, "playlist")
+	raw, err := e.buildPlaylistDocument(req, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -429,12 +435,13 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		mergedReq.Signatures = req.Signatures
 	}
 
-	// 3. Build the new playlist document using the existing record's id, slug, and document "created".
+	// 3. Build the new playlist document: stable id + slug from merged Slug/Title + stored "created".
 	created, err := parseDocumentCreated(rec.Body.Created)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, rec.Slug, created)
+	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "playlist")
+	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -530,32 +537,6 @@ func (e *impl) buildPlaylistGroupDocument(req *models.PlaylistGroupCreateRequest
 	return json.Marshal(&g)
 }
 
-// makeGroupSlug mirrors makeSlug for groups (optional client slug, else title- or "group"-based with id suffix).
-func (e *impl) makeGroupSlug(req *models.PlaylistGroupCreateRequest, id uuid.UUID) string {
-	if s := strings.TrimSpace(req.Slug); s != "" {
-		return slugify(s)
-	}
-	base := slugify(req.Title)
-	if base == "" {
-		base = "group"
-	}
-	return fmt.Sprintf("%s-%s", base, id.String()[:8])
-}
-
-// makeChannelSlug mirrors makeGroupSlug for channels (optional client slug, else title- or "channel"-based with id suffix).
-func (e *impl) makeChannelSlug(req *models.ChannelCreateRequest, id uuid.UUID) string {
-	if s := strings.TrimSpace(req.Slug); s != "" {
-		if got := slugify(s); got != "" {
-			return got
-		}
-	}
-	base := slugify(req.Title)
-	if base == "" {
-		base = "channel"
-	}
-	return fmt.Sprintf("%s-%s", base, id.String()[:8])
-}
-
 // CreatePlaylistGroup resolves playlist URIs (parallel fetch or local GET), signs the group document,
 // validates the signed JSON (playlist-group schema requires signatures, so unlike core playlists there is no pre-sign schema pass),
 // and commits upserted playlists, the group row, and membership in one transaction.
@@ -586,12 +567,7 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 			return nil, err
 		}
 
-		// Generate slug if not provided
-		if req.Slug == "" {
-			slug = e.makeGroupSlug(req, id)
-		} else {
-			slug = slugify(req.Slug)
-		}
+		slug = makeSlug(req.Slug, req.Title, id, "group")
 
 		// Build document with user-provided fields
 		raw, err = e.buildPlaylistGroupDocument(req, uris, id, slug, created)
@@ -606,7 +582,7 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 	} else {
 		// Path A: API key authentication (ops path)
 		id = uuid.New()
-		slug = e.makeGroupSlug(req, id)
+		slug = makeSlug(req.Slug, req.Title, id, "group")
 		created = time.Now()
 
 		raw, err = e.buildPlaylistGroupDocument(req, uris, id, slug, created)
@@ -690,7 +666,8 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err != nil {
 		return nil, err
 	}
-	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, rec.Slug, created)
+	slug := makeSlug(req.Slug, req.Title, rec.ID, "group")
+	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -775,12 +752,13 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 		return nil, err
 	}
 
-	// 4. Build the group document using the existing record's id, slug, and document "created".
+	// 4. Build the group document: stable id + slug from merged Slug/Title + stored "created".
 	created, err := parseDocumentCreated(rec.Body.Created)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, rec.Slug, created)
+	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "group")
+	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -830,7 +808,7 @@ func (e *impl) buildChannelDocument(req *models.ChannelCreateRequest, uris []str
 	}
 	ch := channels.Channel{
 		ID:        id.String(),
-		Slug:      slugify(slug),
+		Slug:      slug,
 		Title:     req.Title,
 		Version:   ver,
 		Playlists: uris,
@@ -885,12 +863,7 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 			return nil, err
 		}
 
-		// Generate slug if not provided
-		if req.Slug == "" {
-			slug = e.makeChannelSlug(req, id)
-		} else {
-			slug = slugify(req.Slug)
-		}
+		slug = makeSlug(req.Slug, req.Title, id, "channel")
 
 		// Build document with user-provided fields
 		raw, err = e.buildChannelDocument(req, uris, id, slug, created)
@@ -905,7 +878,7 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	} else {
 		// Path A: API key authentication (ops path)
 		id = uuid.New()
-		slug = e.makeChannelSlug(req, id)
+		slug = makeSlug(req.Slug, req.Title, id, "channel")
 		created = time.Now()
 
 		raw, err = e.buildChannelDocument(req, uris, id, slug, created)
@@ -998,7 +971,8 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
-	raw, err := e.buildChannelDocument(req, uris, rec.ID, rec.Slug, created)
+	slug := makeSlug(req.Slug, req.Title, rec.ID, "channel")
+	raw, err := e.buildChannelDocument(req, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
@@ -1095,12 +1069,13 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 		return nil, err
 	}
 
-	// 4. Build the channel document using the existing record's id, slug, and document "created".
+	// 4. Build the channel document: stable id + slug from merged Slug/Title + stored "created".
 	created, err := parseDocumentCreated(rec.Body.Created)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := e.buildChannelDocument(mergedReq, uris, rec.ID, rec.Slug, created)
+	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "channel")
+	raw, err := e.buildChannelDocument(mergedReq, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
