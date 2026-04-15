@@ -3,7 +3,7 @@ module github.com/display-protocol/dp1-feed-v2
 go 1.25.0
 
 require (
-	github.com/display-protocol/dp1-go v0.2.3-0.20260414033408-0a765fc94d6b
+	github.com/display-protocol/dp1-go v0.3.0
 	github.com/getsentry/sentry-go v0.29.1
 	github.com/gin-contrib/cors v1.7.7
 	github.com/gin-gonic/gin v1.12.0
