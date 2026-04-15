@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -2042,9 +2043,9 @@ func TestGetChannelRegistry(t *testing.T) {
 					{ID: pubID2, Name: "Publisher 2"},
 				}
 				chans := []store.RegistryPublisherChannel{
-					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String()},
-					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String()},
-					{PublisherID: pubID2, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String()},
+					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String(), Kind: store.RegistryChannelKindStatic},
+					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String(), Kind: store.RegistryChannelKindStatic},
+					{PublisherID: pubID2, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String(), Kind: store.RegistryChannelKindLiving},
 				}
 				m.EXPECT().
 					GetChannelRegistry(gomock.Any()).
@@ -2052,13 +2053,15 @@ func TestGetChannelRegistry(t *testing.T) {
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
-				var resp []models.RegistryItem
+				var resp models.ChannelRegistry
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Len(t, resp, 2)
-				assert.Equal(t, "Publisher 1", resp[0].Name)
-				assert.Len(t, resp[0].ChannelURLs, 2)
-				assert.Equal(t, "Publisher 2", resp[1].Name)
-				assert.Len(t, resp[1].ChannelURLs, 1)
+				assert.Len(t, resp.Publishers, 2)
+				assert.Equal(t, "Publisher 1", resp.Publishers[0].Name)
+				assert.Len(t, resp.Publishers[0].Static, 2)
+				assert.Len(t, resp.Publishers[0].Living, 0)
+				assert.Equal(t, "Publisher 2", resp.Publishers[1].Name)
+				assert.Len(t, resp.Publishers[1].Static, 0)
+				assert.Len(t, resp.Publishers[1].Living, 1)
 			},
 		},
 		{
@@ -2073,10 +2076,11 @@ func TestGetChannelRegistry(t *testing.T) {
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
-				var resp []models.RegistryItem
+				var resp models.ChannelRegistry
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Len(t, resp, 1)
-				assert.Len(t, resp[0].ChannelURLs, 0)
+				assert.Len(t, resp.Publishers, 1)
+				assert.Len(t, resp.Publishers[0].Static, 0)
+				assert.Len(t, resp.Publishers[0].Living, 0)
 			},
 		},
 		{
@@ -2122,8 +2126,10 @@ func TestGetChannelRegistry(t *testing.T) {
 
 func TestReplaceChannelRegistry(t *testing.T) {
 	validURL := "http://example.com/api/v1/channels/" + uuid.New().String()
-	validBody := models.RegistryUpdateRequest{
-		{Name: "Publisher 1", ChannelURLs: []string{validURL}},
+	validBody := models.ChannelRegistry{
+		Publishers: []models.ChannelRegistryPublisher{
+			{Name: "Publisher 1", Static: []string{validURL}, Living: []string{}},
+		},
 	}
 
 	tests := []struct {
@@ -2151,9 +2157,58 @@ func TestReplaceChannelRegistry(t *testing.T) {
 			},
 		},
 		{
-			name:           "empty registry",
-			body:           models.RegistryUpdateRequest{},
-			setupMock:      func(m *mocks.MockExecutor) {},
+			name: "success static only living key omitted",
+			body: map[string]any{
+				"publishers": []map[string]any{
+					{"name": "Publisher 1", "static": []string{validURL}},
+				},
+			},
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(_ context.Context, req models.ChannelRegistry) (int, error) {
+						require.Len(t, req.Publishers, 1)
+						assert.Nil(t, req.Publishers[0].Living)
+						require.Len(t, req.Publishers[0].Static, 1)
+						return 1, nil
+					})
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp map[string]any
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, float64(1), resp["total_channels"])
+			},
+		},
+		{
+			name: "success living only static key omitted",
+			body: map[string]any{
+				"publishers": []map[string]any{
+					{"name": "Publisher 1", "living": []string{validURL}},
+				},
+			},
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(_ context.Context, req models.ChannelRegistry) (int, error) {
+						require.Len(t, req.Publishers, 1)
+						assert.Nil(t, req.Publishers[0].Static)
+						require.Len(t, req.Publishers[0].Living, 1)
+						return 1, nil
+					})
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp map[string]any
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, float64(1), resp["total_channels"])
+			},
+		},
+		{
+			name: "empty registry",
+			body: models.ChannelRegistry{Publishers: []models.ChannelRegistryPublisher{}},
+			setupMock: func(m *mocks.MockExecutor) {
+			},
 			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body []byte) {
 				var resp ErrorResponse
@@ -2164,8 +2219,10 @@ func TestReplaceChannelRegistry(t *testing.T) {
 		},
 		{
 			name: "publisher with no channels",
-			body: models.RegistryUpdateRequest{
-				{Name: "Publisher 1", ChannelURLs: []string{}},
+			body: models.ChannelRegistry{
+				Publishers: []models.ChannelRegistryPublisher{
+					{Name: "Publisher 1", Static: []string{}, Living: []string{}},
+				},
 			},
 			setupMock:      func(m *mocks.MockExecutor) {},
 			expectedStatus: http.StatusBadRequest,
@@ -2173,14 +2230,15 @@ func TestReplaceChannelRegistry(t *testing.T) {
 				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
 				assert.Equal(t, "bad_request", resp.Error)
-				// Gin validation error from the binding tag
-				assert.Contains(t, resp.Message, "ChannelURLs")
+				assert.Contains(t, resp.Message, "static and/or living")
 			},
 		},
 		{
 			name: "invalid channel URL format",
-			body: models.RegistryUpdateRequest{
-				{Name: "Publisher 1", ChannelURLs: []string{"http://example.com/invalid"}},
+			body: models.ChannelRegistry{
+				Publishers: []models.ChannelRegistryPublisher{
+					{Name: "Publisher 1", Static: []string{"http://example.com/invalid"}, Living: []string{}},
+				},
 			},
 			setupMock:      func(m *mocks.MockExecutor) {},
 			expectedStatus: http.StatusBadRequest,

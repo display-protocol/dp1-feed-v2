@@ -1,36 +1,17 @@
 package models
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-)
-
-// RegistryPublisher represents a curated channel publisher with ordered channel URLs.
-type RegistryPublisher struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Position  int       `json:"-"` // Internal: maintains order
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+// ChannelRegistry is the GET response and PUT request body for /api/v1/registry/channels.
+// Publishers are ordered; each has separate static and living channel URL lists.
+type ChannelRegistry struct {
+	Publishers []ChannelRegistryPublisher `json:"publishers" binding:"required,dive"`
 }
 
-// RegistryPublisherChannel is a channel URL belonging to a publisher.
-type RegistryPublisherChannel struct {
-	ID          uuid.UUID `json:"id"`
-	PublisherID uuid.UUID `json:"publisher_id"`
-	ChannelURL  string    `json:"channel_url"`
-	Position    int       `json:"-"` // Internal: maintains order within publisher
-	CreatedAt   time.Time `json:"created_at"`
+// ChannelRegistryPublisher is one curated publisher with optional DID and channel URL lists.
+// On PUT, include at least one of static or living (or both); omitted keys are treated as empty.
+// At least one channel URL is required in total across static and living (validated in the handler).
+type ChannelRegistryPublisher struct {
+	Name   string   `json:"name" binding:"required,min=1,max=256"`
+	DID    string   `json:"did,omitempty" binding:"omitempty,max=2048"`
+	Static []string `json:"static"`
+	Living []string `json:"living"`
 }
-
-// RegistryItem is the API response shape: publisher name + array of channel URLs.
-// Matches the TypeScript RegistryItem schema.
-type RegistryItem struct {
-	Name        string   `json:"name" binding:"required,min=1,max=256"`
-	ChannelURLs []string `json:"channel_urls" binding:"required,min=1,max=10000,dive,url"`
-}
-
-// RegistryUpdateRequest is the PUT /api/v1/registry/channels body: array of RegistryItem.
-// Matches TypeScript CuratedRegistry schema (array of RegistryItem).
-type RegistryUpdateRequest []RegistryItem

@@ -1824,18 +1824,21 @@ func TestIntegration_Registry_ReplaceAndGet(t *testing.T) {
 			ID:          uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
 			PublisherID: pub1ID,
 			ChannelURL:  "https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    0,
 		},
 		{
 			ID:          uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
 			PublisherID: pub1ID,
 			ChannelURL:  "https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    1,
 		},
 		{
 			ID:          uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
 			PublisherID: pub2ID,
 			ChannelURL:  "https://example.com/api/v1/channels/cccccccc-cccc-cccc-cccc-cccccccccccc",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    0,
 		},
 	}
@@ -1875,6 +1878,11 @@ func TestIntegration_Registry_ReplaceAndGet(t *testing.T) {
 	if gotChans[2].PublisherID != pub2ID || gotChans[2].Position != 0 {
 		t.Errorf("channel 2: expected pub2 pos=0, got pub=%v pos=%d", gotChans[2].PublisherID, gotChans[2].Position)
 	}
+	for i, ch := range gotChans {
+		if ch.Kind != store.RegistryChannelKindStatic {
+			t.Errorf("channel %d: want kind static, got %q", i, ch.Kind)
+		}
+	}
 }
 
 func TestIntegration_Registry_ReplaceIsAtomic(t *testing.T) {
@@ -1891,6 +1899,7 @@ func TestIntegration_Registry_ReplaceIsAtomic(t *testing.T) {
 			ID:          uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
 			PublisherID: pub1ID,
 			ChannelURL:  "https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    0,
 		},
 	}
@@ -1908,6 +1917,7 @@ func TestIntegration_Registry_ReplaceIsAtomic(t *testing.T) {
 			ID:          uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
 			PublisherID: pub2ID,
 			ChannelURL:  "https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    0,
 		},
 	}

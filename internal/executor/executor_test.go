@@ -2088,12 +2088,14 @@ func TestGetChannelRegistry_success(t *testing.T) {
 			ID:          uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
 			PublisherID: pub1ID,
 			ChannelURL:  "https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    0,
 		},
 		{
 			ID:          uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
 			PublisherID: pub2ID,
 			ChannelURL:  "https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			Kind:        store.RegistryChannelKindStatic,
 			Position:    0,
 		},
 	}
@@ -2146,18 +2148,22 @@ func TestReplaceChannelRegistry_success(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
-	req := models.RegistryUpdateRequest{
-		{
-			Name: "Test Publisher",
-			ChannelURLs: []string{
-				"https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-				"https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+	req := models.ChannelRegistry{
+		Publishers: []models.ChannelRegistryPublisher{
+			{
+				Name: "Test Publisher",
+				Static: []string{
+					"https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+					"https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				},
+				Living: []string{},
 			},
-		},
-		{
-			Name: "Another Publisher",
-			ChannelURLs: []string{
-				"https://example.com/api/v1/channels/cccccccc-cccc-cccc-cccc-cccccccccccc",
+			{
+				Name: "Another Publisher",
+				Static: []string{
+					"https://example.com/api/v1/channels/cccccccc-cccc-cccc-cccc-cccccccccccc",
+				},
+				Living: []string{},
 			},
 		},
 	}
@@ -2186,11 +2192,14 @@ func TestReplaceChannelRegistry_success(t *testing.T) {
 			t.Errorf("expected 3 channels, got %d", len(chans))
 		}
 
-		// Verify first publisher has 2 channels
+		// Verify first publisher has 2 static channels
 		pub1Channels := 0
 		for _, ch := range chans {
 			if ch.PublisherID == pubs[0].ID {
 				pub1Channels++
+				if ch.Kind != store.RegistryChannelKindStatic {
+					t.Errorf("expected static kind for pub1 channel, got %q", ch.Kind)
+				}
 			}
 		}
 		if pub1Channels != 2 {
@@ -2224,9 +2233,9 @@ func TestReplaceChannelRegistry_emptyRequest(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
-	req := models.RegistryUpdateRequest{}
+	req := models.ChannelRegistry{}
 
-	// Store should still be called even with empty array (to clear registry)
+	// Store should still be called even with empty registry (to clear DB) when invoked directly.
 	mockStore.EXPECT().ReplaceChannelRegistry(
 		gomock.Any(),
 		gomock.AssignableToTypeOf([]store.RegistryPublisher{}),
@@ -2258,11 +2267,12 @@ func TestReplaceChannelRegistry_storeError(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
-	req := models.RegistryUpdateRequest{
-		{
-			Name: "Test Publisher",
-			ChannelURLs: []string{
-				"https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+	req := models.ChannelRegistry{
+		Publishers: []models.ChannelRegistryPublisher{
+			{
+				Name:   "Test Publisher",
+				Static: []string{"https://example.com/api/v1/channels/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+				Living: []string{},
 			},
 		},
 	}
@@ -2295,18 +2305,22 @@ func TestReplaceChannelRegistry_positionAssignment(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
-	req := models.RegistryUpdateRequest{
-		{
-			Name: "First",
-			ChannelURLs: []string{
-				"https://example.com/api/v1/channels/11111111-1111-1111-1111-111111111111",
-				"https://example.com/api/v1/channels/22222222-2222-2222-2222-222222222222",
+	req := models.ChannelRegistry{
+		Publishers: []models.ChannelRegistryPublisher{
+			{
+				Name: "First",
+				Static: []string{
+					"https://example.com/api/v1/channels/11111111-1111-1111-1111-111111111111",
+					"https://example.com/api/v1/channels/22222222-2222-2222-2222-222222222222",
+				},
+				Living: []string{},
 			},
-		},
-		{
-			Name: "Second",
-			ChannelURLs: []string{
-				"https://example.com/api/v1/channels/33333333-3333-3333-3333-333333333333",
+			{
+				Name: "Second",
+				Static: []string{
+					"https://example.com/api/v1/channels/33333333-3333-3333-3333-333333333333",
+				},
+				Living: []string{},
 			},
 		},
 	}

@@ -81,7 +81,7 @@ type Executor interface {
 	// GetChannelRegistry returns the curated channel registry as ordered publisher items.
 	GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error)
 	// ReplaceChannelRegistry atomically replaces the entire registry; returns total channel count.
-	ReplaceChannelRegistry(ctx context.Context, req models.RegistryUpdateRequest) (int, error)
+	ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error)
 
 	// APIInfo returns deployment metadata for GET /api/v1.
 	APIInfo(version string) map[string]any
@@ -1125,26 +1125,42 @@ func (e *impl) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublishe
 }
 
 // ReplaceChannelRegistry atomically replaces the entire registry.
-// Converts API input (array of {name, channel_urls}) to relational rows with positions.
+// Converts API input (publishers with static/living URL lists) to relational rows with positions and kind.
 // Returns total channel count for response.
-func (e *impl) ReplaceChannelRegistry(ctx context.Context, req models.RegistryUpdateRequest) (int, error) {
-	publishers := make([]store.RegistryPublisher, 0, len(req))
+func (e *impl) ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error) {
+	publishers := make([]store.RegistryPublisher, 0, len(req.Publishers))
 	channels := []store.RegistryPublisherChannel{}
 	totalChannels := 0
 
-	for pubPos, item := range req {
+	for pubPos, item := range req.Publishers {
 		pubID := uuid.New()
+		var didPtr *string
+		if d := strings.TrimSpace(item.DID); d != "" {
+			didPtr = &d
+		}
 		publishers = append(publishers, store.RegistryPublisher{
 			ID:       pubID,
 			Name:     item.Name,
+			DID:      didPtr,
 			Position: pubPos,
 		})
 
-		for chPos, url := range item.ChannelURLs {
+		for chPos, url := range item.Static {
 			channels = append(channels, store.RegistryPublisherChannel{
 				ID:          uuid.New(),
 				PublisherID: pubID,
 				ChannelURL:  url,
+				Kind:        store.RegistryChannelKindStatic,
+				Position:    chPos,
+			})
+			totalChannels++
+		}
+		for chPos, url := range item.Living {
+			channels = append(channels, store.RegistryPublisherChannel{
+				ID:          uuid.New(),
+				PublisherID: pubID,
+				ChannelURL:  url,
+				Kind:        store.RegistryChannelKindLiving,
 				Position:    chPos,
 			})
 			totalChannels++

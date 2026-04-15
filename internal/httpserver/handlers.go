@@ -5,6 +5,7 @@ package httpserver
 import (
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -502,52 +503,73 @@ func (h *Handler) GetChannelRegistry(c *gin.Context) {
 		return
 	}
 
-	// Group channels by publisher ID for efficient lookup.
-	chansByPub := make(map[string][]string)
+	// Group channel URLs by publisher ID and kind (static vs living).
+	chansByPub := make(map[string]map[string][]string)
 	for _, ch := range chans {
 		pubID := ch.PublisherID.String()
-		chansByPub[pubID] = append(chansByPub[pubID], ch.ChannelURL)
-	}
-
-	// Build response array.
-	items := make([]models.RegistryItem, 0, len(pubs))
-	for _, pub := range pubs {
-		urls := chansByPub[pub.ID.String()]
-		if urls == nil {
-			urls = []string{}
+		m := chansByPub[pubID]
+		if m == nil {
+			m = make(map[string][]string)
+			chansByPub[pubID] = m
 		}
-		items = append(items, models.RegistryItem{
-			Name:        pub.Name,
-			ChannelURLs: urls,
-		})
+		m[ch.Kind] = append(m[ch.Kind], ch.ChannelURL)
 	}
 
-	c.JSON(http.StatusOK, items)
+	items := make([]models.ChannelRegistryPublisher, 0, len(pubs))
+	for _, pub := range pubs {
+		m := chansByPub[pub.ID.String()]
+		if m == nil {
+			m = make(map[string][]string)
+		}
+		static := m[store.RegistryChannelKindStatic]
+		living := m[store.RegistryChannelKindLiving]
+		if static == nil {
+			static = []string{}
+		}
+		if living == nil {
+			living = []string{}
+		}
+		item := models.ChannelRegistryPublisher{
+			Name:   pub.Name,
+			Static: static,
+			Living: living,
+		}
+		if pub.DID != nil {
+			item.DID = *pub.DID
+		}
+		items = append(items, item)
+	}
+
+	c.JSON(http.StatusOK, models.ChannelRegistry{Publishers: items})
 }
 
 // ReplaceChannelRegistry PUT /api/v1/registry/channels.
 func (h *Handler) ReplaceChannelRegistry(c *gin.Context) {
-	var req models.RegistryUpdateRequest
+	var req models.ChannelRegistry
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 
-	// Validate: must have at least one publisher.
-	if len(req) == 0 {
+	if len(req.Publishers) == 0 {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", "registry must contain at least one publisher")
 		return
 	}
 
-	// Validate each item's channel URLs format (regex check).
-	for i, item := range req {
-		if len(item.ChannelURLs) == 0 {
-			writeError(c.Writer, http.StatusBadRequest, "bad_request", "each publisher must have at least one channel URL")
+	for i, p := range req.Publishers {
+		if len(p.Static)+len(p.Living) == 0 {
+			writeError(c.Writer, http.StatusBadRequest, "bad_request", "each publisher must have at least one channel URL in static and/or living at index "+strconv.Itoa(i))
 			return
 		}
-		for _, url := range item.ChannelURLs {
+		for _, url := range p.Static {
 			if !isValidChannelURL(url) {
-				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} at item "+string(rune(i)))
+				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} (publisher "+strconv.Itoa(i)+", static)")
+				return
+			}
+		}
+		for _, url := range p.Living {
+			if !isValidChannelURL(url) {
+				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} (publisher "+strconv.Itoa(i)+", living)")
 				return
 			}
 		}
@@ -563,7 +585,7 @@ func (h *Handler) ReplaceChannelRegistry(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success":        true,
 		"message":        "Curated registry updated successfully",
-		"items_count":    len(req),
+		"items_count":    len(req.Publishers),
 		"total_channels": totalChannels,
 	})
 }

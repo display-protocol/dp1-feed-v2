@@ -113,7 +113,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - **PATCH** — partial update (only provided fields change); server re-signs and re-validates as applicable.
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules).
 
-**Registry `PUT`:** atomically **replaces the entire** curated registry (validated array of publishers); not a merge-by-item API.
+**Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and optional ordered URL arrays **`static`** and **`living`** (channel resource URLs under this API). A publisher may include only **`static`**, only **`living`**, or both; **PUT** still requires at least one URL in total per publisher across those lists. **PUT** requires at least one publisher overall; it atomically **replaces the entire** registry (not a merge-by-item API).
 
 **Channel and extension features:** when extensions are disabled in config, channel routes return **`404`** with error code **`extensions_disabled`** (see below).
 
