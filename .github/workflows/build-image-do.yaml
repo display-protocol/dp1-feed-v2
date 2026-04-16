@@ -10,7 +10,7 @@ on:
 
 env:
   DOCR_REGISTRY: registry.digitalocean.com/feral-file
-  DOCR_REPOSITORY: app
+  DOCR_REPOSITORY: apps
 
 jobs:
   build-and-push:
