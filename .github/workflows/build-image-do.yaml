@@ -1,0 +1,88 @@
+name: Build and Push Docker Image to DOCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version suffix for the image tag (for example: 0.1.0, prod, 2026-04-02). If empty, use the commit hash."
+        required: false
+        type: string
+
+env:
+  DOCR_REGISTRY: registry.digitalocean.com/feral-file
+  DOCR_REPOSITORY: app
+
+jobs:
+  build-and-push:
+    name: Build and push image to DOCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout dp1-feed-v2
+        uses: actions/checkout@v4
+        with:
+          path: dp1-feed-v2
+
+      - name: Checkout dp1-go
+        uses: actions/checkout@v4
+        with:
+          repository: display-protocol/dp1-go
+          path: dp1-go
+
+      - name: Determine image tag
+        id: determine-tag
+        run: |
+          VERSION="${{ inputs.tag }}"
+          if [ -n "$VERSION" ]; then
+            TAG="dp1-feed-${VERSION}"
+          else
+            TAG="dp1-feed-${GITHUB_SHA::12}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Using tag: ${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_DOCR_TOKEN }}
+
+      - name: Login to DigitalOcean Container Registry
+        run: doctl registry login --expiry-seconds 1200
+
+      - name: Verify DOCR repository
+        run: |
+          doctl registry repository list-tags "${DOCR_REPOSITORY}" >/dev/null 2>&1 || true
+
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCR_REGISTRY }}/${{ env.DOCR_REPOSITORY }}
+          tags: |
+            type=raw,value=${{ steps.determine-tag.outputs.tag }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./dp1-feed-v2/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Output image tag
+        run: |
+          echo "## Built image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${DOCR_REGISTRY}/${DOCR_REPOSITORY}:${{ steps.determine-tag.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
