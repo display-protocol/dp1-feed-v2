@@ -29,6 +29,14 @@ type Config struct {
 	Logging    LoggingConfig    `yaml:"logging"`
 	Extensions ExtensionsConfig `yaml:"extensions"`
 	Playlist   PlaylistConfig   `yaml:"playlist"`
+	CORS       CORSConfig       `yaml:"cors"`
+}
+
+// CORSConfig controls browser cross-origin access (gin-contrib/cors).
+// Empty AllowOrigins, or a single "*", allows any origin (default). Otherwise only listed origins match.
+// Do not combine "*" with other origins in the same list; use either wildcard alone or an explicit list.
+type CORSConfig struct {
+	AllowOrigins []string `yaml:"allow_origins"`
 }
 
 // ServerConfig controls the HTTP listener.
@@ -158,6 +166,18 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv(envPrefix + "PUBLIC_BASE_URL"); v != "" {
 		cfg.Playlist.PublicBaseURL = strings.TrimRight(v, "/")
+	}
+	if v := os.Getenv(envPrefix + "CORS_ALLOW_ORIGINS"); v != "" {
+		var origins []string
+		for part := range strings.SplitSeq(v, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				origins = append(origins, part)
+			}
+		}
+		if len(origins) > 0 {
+			cfg.CORS.AllowOrigins = origins
+		}
 	}
 }
 

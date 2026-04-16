@@ -38,6 +38,14 @@ type ValidatorSigner interface {
 	ValidateChannel(raw []byte) (*channels.Channel, error)
 	// SignChannel signs with feed role (channels extension schema).
 	SignChannel(raw []byte, ts time.Time) ([]byte, error)
+
+	// VerifyPlaylistSignatures verifies all signatures in a signed playlist document.
+	// Returns ok=true when all signatures verify. On failure, ok=false and failed contains signature entries that did not verify.
+	VerifyPlaylistSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
+	// VerifyPlaylistGroupSignatures verifies all signatures in a signed playlist-group document.
+	VerifyPlaylistGroupSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
+	// VerifyChannelSignatures verifies all signatures in a signed channel document.
+	VerifyChannelSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
 }
 
 // Service holds the operator Ed25519 key and did:key kid used in v1.1+ multi-signature entries.
@@ -171,4 +179,20 @@ func (s *Service) SignChannel(raw []byte, ts time.Time) ([]byte, error) {
 	m["signatures"] = []playlist.Signature{sig}
 	delete(m, "signature")
 	return json.Marshal(m)
+}
+
+// VerifyPlaylistSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyPlaylistSignatures.
+// Returns ok=true when all signatures verify; ok=false with failed[] on any verification failure.
+func (s *Service) VerifyPlaylistSignatures(raw []byte) (bool, []playlist.Signature, error) {
+	return sign.VerifyPlaylistSignatures(raw)
+}
+
+// VerifyPlaylistGroupSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyPlaylistGroupSignatures.
+func (s *Service) VerifyPlaylistGroupSignatures(raw []byte) (bool, []playlist.Signature, error) {
+	return sign.VerifyPlaylistGroupSignatures(raw)
+}
+
+// VerifyChannelSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyChannelSignatures.
+func (s *Service) VerifyChannelSignatures(raw []byte) (bool, []playlist.Signature, error) {
+	return sign.VerifyChannelSignatures(raw)
 }

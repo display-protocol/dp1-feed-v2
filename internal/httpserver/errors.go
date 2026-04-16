@@ -41,7 +41,7 @@ func mapStoreError(err error) (status int, code, msg string) {
 }
 
 // mapExecutorError checks executor-specific errors, then delegates to mapStoreError for common cases.
-// Executor-specific: extensions disabled, DP-1 sign errors, DP-1 validation errors.
+// Executor-specific: extensions disabled, DP-1 sign errors, DP-1 validation errors, trusted model errors.
 // Common store errors (not_found, list limits, fallback 500) are handled by mapStoreError.
 func mapExecutorError(err error) (status int, code, msg string) {
 	if executor.IsExtensionsDisabled(err) {
@@ -52,6 +52,16 @@ func mapExecutorError(err error) (status int, code, msg string) {
 	}
 	if executor.IsDP1ValidationError(err) {
 		return http.StatusBadRequest, "validation_error", err.Error()
+	}
+	// Trusted model errors
+	if executor.IsSignatureVerificationError(err) {
+		return http.StatusBadRequest, "signature_verification_failed", err.Error()
+	}
+	if executor.IsInvalidTimestampError(err) {
+		return http.StatusBadRequest, "invalid_timestamp", err.Error()
+	}
+	if executor.IsInvalidIDError(err) {
+		return http.StatusBadRequest, "invalid_id", err.Error()
 	}
 	return mapStoreError(err)
 }

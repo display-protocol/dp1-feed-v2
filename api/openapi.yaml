@@ -171,23 +171,39 @@ paths:
     get:
       tags: [playlists]
       summary: Get playlist
-      description: Returns a single playlist by UUID or slug
+      description: |
+        Returns a single playlist by UUID or slug.
+
+        Responses include a strong `ETag` (SHA-256 of the UTF-8 JSON body). Clients may send `If-None-Match`
+        with a previously received ETag to receive 304 Not Modified when the representation is unchanged.
+        Paginated list GETs do not emit ETag in API v1.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Playlist document
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Playlist'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '404':
           $ref: '#/components/responses/NotFound'
 
     put:
       tags: [playlists]
       summary: Replace playlist
-      description: Fully replaces a playlist document
+      description: >-
+        Fully replaces a playlist document. Authentication: API key, or signature-based auth when the body
+        includes a non-empty `signatures` array (same semantics as POST create).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -215,7 +231,9 @@ paths:
     patch:
       tags: [playlists]
       summary: Update playlist
-      description: Partially updates a playlist document (only provided fields are updated)
+      description: >-
+        Partially updates a playlist document (only provided fields are updated). Authentication: API key,
+        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -308,23 +326,38 @@ paths:
     get:
       tags: [playlist-groups]
       summary: Get playlist-group
-      description: Returns a single playlist-group by UUID or slug
+      description: |
+        Returns a single playlist-group by UUID or slug.
+
+        Strong ETag and optional conditional GET (`If-None-Match` → 304) apply as for single-resource GETs;
+        list endpoints do not emit ETag in API v1.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Playlist-group document
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlaylistGroup'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '404':
           $ref: '#/components/responses/NotFound'
 
     put:
       tags: [playlist-groups]
       summary: Replace playlist-group
-      description: Fully replaces a playlist-group document
+      description: >-
+        Fully replaces a playlist-group document. Authentication: API key, or signature-based auth when the body
+        includes a non-empty `signatures` array (same semantics as POST create).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -352,7 +385,9 @@ paths:
     patch:
       tags: [playlist-groups]
       summary: Update playlist-group
-      description: Partially updates a playlist-group document (only provided fields are updated)
+      description: >-
+        Partially updates a playlist-group document (only provided fields are updated). Authentication: API key,
+        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -449,23 +484,37 @@ paths:
     get:
       tags: [channels]
       summary: Get channel
-      description: Returns a single channel by UUID or slug (requires extensions)
+      description: |
+        Returns a single channel by UUID or slug (requires extensions).
+
+        Strong ETag and optional `If-None-Match` (304) apply as for other single-resource GETs.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Channel document
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Channel'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '404':
           description: Channel not found or extensions disabled
 
     put:
       tags: [channels]
       summary: Replace channel
-      description: Fully replaces a channel document (requires extensions)
+      description: >-
+        Fully replaces a channel document (requires extensions). Authentication: API key, or signature-based
+        auth when the body includes a non-empty `signatures` array (same semantics as POST create).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -493,7 +542,9 @@ paths:
     patch:
       tags: [channels]
       summary: Update channel
-      description: Partially updates a channel document (only provided fields are updated, requires extensions)
+      description: >-
+        Partially updates a channel document (only provided fields are updated, requires extensions).
+        Authentication: API key, or signature-based auth when `signatures` is non-empty (merged document).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -574,7 +625,10 @@ paths:
     get:
       tags: [playlist-items]
       summary: Get playlist item
-      description: Returns a single indexed playlist item by UUID
+      description: |
+        Returns a single indexed playlist item by UUID.
+
+        Strong ETag and optional `If-None-Match` (304) apply; the playlist-items list GET does not emit ETag in API v1.
       parameters:
         - name: id
           in: path
@@ -583,13 +637,22 @@ paths:
           schema:
             type: string
             format: uuid
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Playlist item
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlaylistItem'
+        '304':
+          description: Not Modified — If-None-Match matched the current ETag; response body is empty
+          headers:
+            ETag:
+              $ref: '#/components/headers/IndividualGETETag'
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -599,16 +662,14 @@ paths:
     get:
       tags: [registry]
       summary: Get curated channel registry
-      description: Returns an ordered list of publishers with their channel URLs
+      description: Returns an ordered list of publishers, each with optional DID and separate static vs living channel URL lists
       responses:
         '200':
           description: Curated registry
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/RegistryItem'
+                $ref: '#/components/schemas/ChannelRegistry'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -623,11 +684,7 @@ paths:
         content:
           application/json:
             schema:
-              type: array
-              minItems: 1
-              maxItems: 1000
-              items:
-                $ref: '#/components/schemas/RegistryItem'
+              $ref: '#/components/schemas/ChannelRegistry'
       responses:
         '200':
           description: Registry updated successfully
@@ -660,7 +717,11 @@ components:
     ApiKeyAuth:
       type: http
       scheme: bearer
-      description: API key for write operations
+      description: >
+        API key for write operations. Alternatively, omit this header when the JSON body includes a
+        non-empty `signatures` array and the server successfully verifies curator or publisher
+        signatures (POST create; PUT/PATCH replace/update on playlists, playlist-groups, and channels).
+        DELETE and registry PUT require this API key (no signature-only path).
 
   parameters:
     IdOrSlug:
@@ -696,6 +757,25 @@ components:
         type: string
         enum: [asc, desc]
         default: asc
+
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: >
+        Optional conditional GET. When it matches the ETag of the current representation, the server returns
+        304 Not Modified with an empty body. Only single-resource GETs support this (not list or registry GETs);
+        see docs/api_design.md.
+      schema:
+        type: string
+
+  headers:
+    IndividualGETETag:
+      description: >
+        Strong entity-tag for the exact UTF-8 JSON response bytes: a quoted hexadecimal SHA-256 digest.
+        Send the same value in If-None-Match for conditional GETs.
+      schema:
+        type: string
 
   schemas:
     ListResponse:
@@ -745,6 +825,26 @@ components:
           type: object
         dynamicQuery:
           type: object
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Optional. User-provided UUID for signature-based authentication.
+            When provided with valid curator signatures, bypasses API key requirement.
+        created:
+          type: string
+          format: date-time
+          description: >-
+            Optional. User-provided RFC3339 timestamp for signature-based authentication.
+            Must not be in the future. Required when using signature-based authentication.
+        signatures:
+          type: array
+          description: >-
+            Optional. Array of cryptographic signatures for signature-based authentication.
+            When provided with valid curator signatures matching curators[], bypasses API key requirement.
+            Server always adds its feed signature regardless of authentication path.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistUpdateInput:
       type: object
@@ -761,6 +861,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PlaylistItemInput'
+        note:
+          $ref: '#/components/schemas/Note'
         curators:
           type: array
           items:
@@ -774,6 +876,13 @@ components:
           type: object
         dynamicQuery:
           type: object
+        signatures:
+          type: array
+          description: >-
+            When non-empty, signature-based authentication for this request; must verify against merged
+            curators. Server always adds feed signature after verification.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistItemInput:
       type: object
@@ -799,6 +908,8 @@ components:
           type: object
         provenance:
           type: object
+        note:
+          $ref: '#/components/schemas/Note'
 
     Playlist:
       type: object
@@ -865,6 +976,26 @@ components:
         coverImage:
           type: string
           format: uri
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Optional. User-provided UUID for signature-based authentication.
+            When provided with valid curator signatures, bypasses API key requirement.
+        created:
+          type: string
+          format: date-time
+          description: >-
+            Optional. User-provided RFC3339 timestamp for signature-based authentication.
+            Must not be in the future. Required when using signature-based authentication.
+        signatures:
+          type: array
+          description: >-
+            Optional. Array of cryptographic signatures for signature-based authentication.
+            When provided with valid curator signature matching curator field, bypasses API key requirement.
+            Server always adds its feed signature regardless of authentication path.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistGroupUpdateInput:
       type: object
@@ -886,6 +1017,13 @@ components:
         coverImage:
           type: string
           format: uri
+        signatures:
+          type: array
+          description: >-
+            When non-empty, signature-based authentication; must verify against merged curator field.
+            Server always adds feed signature after verification.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     PlaylistGroup:
       type: object
@@ -937,6 +1075,26 @@ components:
         coverImage:
           type: string
           format: uri
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Optional. User-provided UUID for signature-based authentication.
+            When provided with valid publisher signatures, bypasses API key requirement.
+        created:
+          type: string
+          format: date-time
+          description: >-
+            Optional. User-provided RFC3339 timestamp for signature-based authentication.
+            Must not be in the future. Required when using signature-based authentication.
+        signatures:
+          type: array
+          description: >-
+            Optional. Array of cryptographic signatures for signature-based authentication.
+            When provided with valid publisher signature matching publisher field, bypasses API key requirement.
+            Server always adds its feed signature regardless of authentication path.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     ChannelUpdateInput:
       type: object
@@ -964,6 +1122,13 @@ components:
         coverImage:
           type: string
           format: uri
+        signatures:
+          type: array
+          description: >-
+            When non-empty, signature-based authentication; must verify against merged publisher.
+            Server always adds feed signature after verification.
+          items:
+            $ref: '#/components/schemas/Signature'
 
     Channel:
       type: object
@@ -984,26 +1149,52 @@ components:
             type: string
         # Additional fields...
 
-    RegistryItem:
+    ChannelRegistry:
+      type: object
+      required:
+        - publishers
+      properties:
+        publishers:
+          type: array
+          minItems: 0
+          maxItems: 1000
+          description: Ordered publishers (GET may be empty; PUT requires at least one publisher)
+          items:
+            $ref: '#/components/schemas/ChannelRegistryPublisher'
+
+    ChannelRegistryPublisher:
       type: object
       required:
         - name
-        - channel_urls
       properties:
         name:
           type: string
           minLength: 1
           maxLength: 256
-          description: Publisher name
-        channel_urls:
+          description: Publisher name (unique within the registry)
+        did:
+          type: string
+          maxLength: 2048
+          description: Optional publisher DID
+        static:
           type: array
-          minItems: 1
           maxItems: 10000
           items:
             type: string
             format: uri
             pattern: '\/api\/v1\/channels\/[0-9a-f-]{36}$'
-          description: Array of channel URLs
+          description: Ordered static channel URLs (optional key; omit if none)
+        living:
+          type: array
+          maxItems: 10000
+          items:
+            type: string
+            format: uri
+            pattern: '\/api\/v1\/channels\/[0-9a-f-]{36}$'
+          description: Ordered living channel URLs (optional key; omit if none)
+      description: >
+        Include at least one channel URL in total across static and/or living (each property is optional,
+        but both cannot be absent or empty).
 
     ErrorResponse:
       type: object
@@ -1018,16 +1209,84 @@ components:
           type: string
           description: Human-readable error message
 
+    Signature:
+      type: object
+      description: DP-1 v1.1+ multisig signature (see DP-1 spec §7.1.1)
+      required:
+        - alg
+        - kid
+        - ts
+        - payload_hash
+        - role
+        - sig
+      properties:
+        alg:
+          type: string
+          description: Signature algorithm
+          example: "ed25519"
+        kid:
+          type: string
+          description: DID key identifier (e.g., did:key:z6Mk...)
+          example: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        ts:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp when signature was created
+          example: "2025-06-01T12:00:00Z"
+        payload_hash:
+          type: string
+          description: SHA-256 hash of the canonicalized JSON payload (JCS)
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        role:
+          type: string
+          description: Role of the signer
+          enum: ["curator", "feed", "agent", "institution", "licensor", "publisher"]
+          example: "curator"
+        sig:
+          type: string
+          description: Base64-encoded signature
+          example: "dGVzdC1zaWduYXR1cmU="
+
+    Note:
+      type: object
+      description: Text note with optional display duration (playlists extension)
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          description: Note content
+          example: "This is a note about the playlist or item"
+        duration:
+          type: number
+          format: float
+          description: Display duration in seconds (defaults to 20 when omitted)
+          example: 15.0
+
   responses:
     BadRequest:
-      description: Bad request (validation error)
+      description: Bad request (validation error, or signature verification failure)
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error: bad_request
-            message: Invalid input
+          examples:
+            validation:
+              value:
+                error: bad_request
+                message: Invalid input
+            invalid_timestamp:
+              value:
+                error: invalid_timestamp
+                message: Timestamp cannot be in the future
+            invalid_id:
+              value:
+                error: invalid_id
+                message: ID must be a valid UUID
+            signature_verification_failed:
+              value:
+                error: signature_verification_failed
+                message: Signature cryptographic verification failed
 
     Unauthorized:
       description: Missing or invalid API key
