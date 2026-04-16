@@ -23,12 +23,12 @@ jobs:
 
     steps:
       - name: Checkout dp1-feed-v2
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: dp1-feed-v2
 
       - name: Checkout dp1-go
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: display-protocol/dp1-go
           path: dp1-go
@@ -69,7 +69,7 @@ jobs:
             type=raw,value=${{ steps.determine-tag.outputs.tag }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./dp1-feed-v2/Dockerfile
