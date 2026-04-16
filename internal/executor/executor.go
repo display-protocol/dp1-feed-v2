@@ -402,6 +402,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		CoverImage:   existing.CoverImage,
 		Defaults:     existing.Defaults,
 		DynamicQuery: existing.DynamicQuery,
+		Note:         existing.Note,
 	}
 
 	if req.DPVersion != nil {
@@ -430,6 +431,9 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	}
 	if req.DynamicQuery != nil {
 		mergedReq.DynamicQuery = req.DynamicQuery
+	}
+	if req.Note != nil {
+		mergedReq.Note = req.Note
 	}
 	if len(req.Signatures) > 0 {
 		mergedReq.Signatures = req.Signatures

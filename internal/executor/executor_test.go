@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -15,6 +16,7 @@ import (
 	dp1 "github.com/display-protocol/dp1-go"
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
+	dp1playlists "github.com/display-protocol/dp1-go/extension/playlists"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/display-protocol/dp1-go/sign"
@@ -530,6 +532,66 @@ func TestPlaylist_replaceAndUpdate_parseDocumentCreatedFails(t *testing.T) {
 				t.Fatalf("expected parse document created error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestUpdatePlaylist_preservesPlaylistLevelNote(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
+	noteText := "playlist-level note preserved across PATCH"
+	itemID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	existingBody := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Old Title",
+		Slug:      "old-slug",
+		Created:   created.UTC().Format(time.RFC3339Nano),
+		Items:     []playlist.PlaylistItem{{ID: itemID.String(), Source: "https://old.example/item1"}},
+		Note:      &dp1playlists.Note{Text: noteText},
+	}
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "old-slug").Return(&store.PlaylistRecord{
+		ID:        id,
+		Slug:      "old-slug",
+		Body:      existingBody,
+		CreatedAt: created,
+	}, nil)
+
+	var preSign []byte
+	signed := []byte(`{"dpVersion":"1.1.0"}`)
+	parsed := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Updated Title",
+		Slug:      "old-slug",
+		Created:   existingBody.Created,
+		Items:     existingBody.Items,
+		Note:      existingBody.Note,
+	}
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, ts time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	newTitle := "Updated Title"
+	req := &models.PlaylistUpdateRequest{Title: &newTitle}
+	_, err := e.UpdatePlaylist(context.Background(), "old-slug", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if check.Note == nil || check.Note.Text != noteText {
+		t.Fatalf("pre-sign document should keep playlist note: got %+v", check.Note)
 	}
 }
 
