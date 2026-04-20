@@ -26,17 +26,17 @@ type ValidatorSigner interface {
 	ValidatePlaylist(raw []byte) (*playlist.Playlist, error)
 	// ValidatePlaylistWithExtension validates core plus the playlists registry extension overlay and returns the parsed document.
 	ValidatePlaylistWithExtension(raw []byte) (*playlist.Playlist, error)
-	// SignPlaylist attaches a signatures[] entry (Ed25519, feed role) and strips legacy single-signature fields.
+	// SignPlaylist appends a v1.1+ feed signature (Ed25519): any existing entry with the same Kid as the feed key is replaced; other signatures are preserved. Strips legacy top-level "signature".
 	SignPlaylist(raw []byte, ts time.Time) ([]byte, error)
 
 	// ValidatePlaylistGroup validates a signed playlist-group document and returns the parsed document (dp1-go ParseAndValidatePlaylistGroup).
 	ValidatePlaylistGroup(raw []byte) (*playlistgroup.Group, error)
-	// SignPlaylistGroup signs with feed role (DP-1 playlist-group schema).
+	// SignPlaylistGroup appends or replaces-by-Kid the feed signature; preserves other signatures; strips legacy "signature".
 	SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error)
 
 	// ValidateChannel validates a signed channels extension document and returns the parsed document (dp1-go ParseAndValidateChannel).
 	ValidateChannel(raw []byte) (*channels.Channel, error)
-	// SignChannel signs with feed role (channels extension schema).
+	// SignChannel appends or replaces-by-Kid the feed signature; preserves other signatures; strips legacy "signature".
 	SignChannel(raw []byte, ts time.Time) ([]byte, error)
 
 	// VerifyPlaylistSignatures verifies all signatures in a signed playlist document.
@@ -85,6 +85,27 @@ func New(signingKeyHex, kid string) (*Service, error) {
 	return &Service{priv: priv, kid: kid}, nil
 }
 
+// mergeSignaturesReplacingSameKid builds the post-sign "signatures" array: drop every entry in raw
+// whose Kid matches newSig (typically prior feed signatures), keep all others in order, then append newSig.
+// Raw JSON's legacy top-level "signature" is ignored here; callers delete it from the document map.
+func mergeSignaturesReplacingSameKid(raw []byte, newSig playlist.Signature) ([]playlist.Signature, error) {
+	var doc struct {
+		Signatures []playlist.Signature `json:"signatures"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("signatures merge: %w", err)
+	}
+	out := make([]playlist.Signature, 0, len(doc.Signatures)+1)
+	for _, s := range doc.Signatures {
+		if s.Kid == newSig.Kid {
+			continue
+		}
+		out = append(out, s)
+	}
+	out = append(out, newSig)
+	return out, nil
+}
+
 // ValidatePlaylist validates core playlist JSON via dp1-go and returns the typed document.
 func (s *Service) ValidatePlaylist(raw []byte) (*playlist.Playlist, error) {
 	p, err := dp1.ParseAndValidatePlaylist(raw)
@@ -109,18 +130,22 @@ func (s *Service) ValidatePlaylistWithExtension(raw []byte) (*playlist.Playlist,
 	return p, nil
 }
 
-// SignPlaylist signs the document with a v1.1+ multi-signature entry (feed role). Raw JSON must omit top-level signature fields per §7.1.
+// SignPlaylist signs the document with a v1.1+ multi-signature entry (feed role). Preserves non-feed
+// signatures on raw; replaces any prior signature whose Kid matches the feed key.
 func (s *Service) SignPlaylist(raw []byte, ts time.Time) ([]byte, error) {
 	sig, err := sign.SignMultiEd25519(raw, s.priv, playlist.RoleFeed, ts.UTC().Format(time.RFC3339))
 	if err != nil {
 		return nil, err
 	}
-	// Re-hydrate as map so we attach signatures[] and strip legacy top-level signature in one marshal round-trip.
+	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
+	if err != nil {
+		return nil, err
+	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, err
 	}
-	m["signatures"] = []playlist.Signature{sig}
+	m["signatures"] = merged
 	delete(m, "signature")
 	return json.Marshal(m)
 }
@@ -143,12 +168,15 @@ func (s *Service) SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
+	if err != nil {
+		return nil, err
+	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, err
 	}
-	// Same map round-trip as SignPlaylist: multi-sig array + drop legacy signature.
-	m["signatures"] = []playlist.Signature{sig}
+	m["signatures"] = merged
 	delete(m, "signature")
 	return json.Marshal(m)
 }
@@ -171,12 +199,15 @@ func (s *Service) SignChannel(raw []byte, ts time.Time) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
+	if err != nil {
+		return nil, err
+	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, err
 	}
-	// Same map round-trip as SignPlaylist: multi-sig array + drop legacy signature.
-	m["signatures"] = []playlist.Signature{sig}
+	m["signatures"] = merged
 	delete(m, "signature")
 	return json.Marshal(m)
 }
