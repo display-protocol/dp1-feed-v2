@@ -4,6 +4,10 @@
 #
 # Commit 763e64a introduced README curl examples and example signing-key hex that
 # match generic/curl-auth rules; those values are intentional dev placeholders.
+#
+# DP-1 / OpenAPI examples use did:key DIDs (kid). The default generic-api-key rule
+# captures only the multibase fragment after "key:" (Secret does not include "did:"),
+# so a line-based allowlist is required — not a regex on Secret alone.
 
 title = "dp1-feed-v2 gitleaks"
 
@@ -17,4 +21,15 @@ regexes = [
 	'''^your-api-key$''',
 	# Example Ed25519 seed placeholder (64 hex chars) in config examples and tests.
 	'''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
+]
+
+# Append to the built-in generic-api-key allowlists (see gitleaks README: allowlists merge on extend).
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Lines containing did:key — public DIDs, not API keys (Secret is often only the z… fragment)"
+regexTarget = "line"
+regexes = [
+	'''did:key:''',
 ]

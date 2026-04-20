@@ -26,6 +26,11 @@ logging:
 extensions:
   enabled: true
 
+# Browser CORS. Omit or use allow_origins: ["*"] for any origin (default). Override list with DP1_FEED_CORS_ALLOW_ORIGINS (comma-separated).
+cors:
+  allow_origins:
+    - "*"
+
 playlist:
   fetch_timeout: 30s
   fetch_max_body_bytes: 4194304

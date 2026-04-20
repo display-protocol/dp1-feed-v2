@@ -44,6 +44,152 @@ func minimalSignedPlaylistV11(t *testing.T) []byte {
 
 const testSeedHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+func TestVerifyPlaylistSignatures(t *testing.T) {
+	t.Parallel()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := sign.Ed25519DIDKey(priv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := New(testSeedHex, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_signature", func(t *testing.T) {
+		t.Parallel()
+		signed := minimalSignedPlaylistV11(t)
+		ok, failed, err := svc.VerifyPlaylistSignatures(signed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok=true, got failed: %v", failed)
+		}
+		if len(failed) != 0 {
+			t.Fatalf("expected no failed signatures, got: %v", failed)
+		}
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := svc.VerifyPlaylistSignatures([]byte(`{invalid`))
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+
+	t.Run("no_signatures", func(t *testing.T) {
+		t.Parallel()
+		pl := playlist.Playlist{
+			DPVersion: "1.1.0",
+			Title:     "Test",
+			Items:     []playlist.PlaylistItem{{Source: "https://example.com"}},
+		}
+		raw, _ := json.Marshal(pl)
+		_, _, err := svc.VerifyPlaylistSignatures(raw)
+		if err == nil || !errors.Is(err, sign.ErrNoSignatures) {
+			t.Fatalf("expected ErrNoSignatures, got: %v", err)
+		}
+	})
+}
+
+func TestVerifyPlaylistGroupSignatures(t *testing.T) {
+	t.Parallel()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := sign.Ed25519DIDKey(priv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := New(testSeedHex, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_signature", func(t *testing.T) {
+		t.Parallel()
+		pg := map[string]any{
+			"dpVersion": "1.1.0",
+			"title":     "Test Group",
+			"playlists": []string{"https://example.com/pl/1"},
+		}
+		raw, _ := json.Marshal(pg)
+		sig, _ := sign.SignMultiEd25519(raw, priv, "curator", "2025-06-01T12:00:00Z")
+		pg["signatures"] = []any{sig}
+		signed, _ := json.Marshal(pg)
+
+		ok, failed, err := svc.VerifyPlaylistGroupSignatures(signed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok=true, got failed: %v", failed)
+		}
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := svc.VerifyPlaylistGroupSignatures([]byte(`{invalid`))
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
+func TestVerifyChannelSignatures(t *testing.T) {
+	t.Parallel()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := sign.Ed25519DIDKey(priv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := New(testSeedHex, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_signature", func(t *testing.T) {
+		t.Parallel()
+		ch := map[string]any{
+			"title":     "Test Channel",
+			"version":   "1.0.0",
+			"playlists": []string{"https://example.com/pl/1"},
+		}
+		raw, _ := json.Marshal(ch)
+		sig, _ := sign.SignMultiEd25519(raw, priv, "publisher", "2025-06-01T12:00:00Z")
+		ch["signatures"] = []any{sig}
+		signed, _ := json.Marshal(ch)
+
+		ok, failed, err := svc.VerifyChannelSignatures(signed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok=true, got failed: %v", failed)
+		}
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := svc.VerifyChannelSignatures([]byte(`{invalid`))
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
 func TestEd25519PrivateKeyFromHex(t *testing.T) {
 	t.Parallel()
 	seed, err := hex.DecodeString(testSeedHex)

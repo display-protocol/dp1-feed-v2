@@ -18,11 +18,18 @@ type PlaylistCreateRequest struct {
 	Slug      string                  `json:"slug,omitempty"`
 	Items     []playlist.PlaylistItem `json:"items" binding:"required"`
 
+	Note         *dp1playlists.Note         `json:"note,omitempty"`
 	Curators     []identity.Entity          `json:"curators,omitempty"`
 	Summary      string                     `json:"summary,omitempty"`
 	CoverImage   string                     `json:"coverImage,omitempty"`
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
+
+	// Trusted model fields: user-provided id, created timestamp, and curator signatures.
+	// When signatures are present and valid, API key authentication is bypassed.
+	ID         *string              `json:"id,omitempty"`
+	Created    *string              `json:"created,omitempty"`
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }
 
 // PlaylistReplaceRequest is the JSON body for PUT /api/v1/playlists/{id} (full replacement, same shape as create).
@@ -36,9 +43,13 @@ type PlaylistUpdateRequest struct {
 	Slug      *string                 `json:"slug,omitempty"`
 	Items     []playlist.PlaylistItem `json:"items,omitempty"`
 
+	Note         *dp1playlists.Note         `json:"note,omitempty"`
 	Curators     []identity.Entity          `json:"curators,omitempty"`
 	Summary      *string                    `json:"summary,omitempty"`
 	CoverImage   *string                    `json:"coverImage,omitempty"`
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
+
+	// Trusted model: when non-empty, same semantics as create — verify curator signatures then feed co-signs.
+	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }

@@ -3,6 +3,7 @@ package pg
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1155,18 +1156,21 @@ func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string) error {
 }
 
 // GetChannelRegistry implements store.Store.
-// Returns ordered publishers and their channel URLs.
+// Returns ordered publishers and their channel URLs (ordered by publisher position, then kind static before living, then URL position).
 func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
 	const (
 		pubQuery = `
-			SELECT id, name, position, created_at, updated_at
+			SELECT id, name, position, did, created_at, updated_at
 			FROM registry_publishers
 			ORDER BY position ASC
 		`
 		chanQuery = `
-			SELECT id, publisher_id, channel_url, position, created_at
-			FROM registry_publisher_channels
-			ORDER BY publisher_id, position ASC
+			SELECT c.id, c.publisher_id, c.channel_url, c.kind, c.position, c.created_at
+			FROM registry_publisher_channels c
+			INNER JOIN registry_publishers p ON p.id = c.publisher_id
+			ORDER BY p.position ASC,
+				CASE c.kind WHEN 'static' THEN 0 ELSE 1 END,
+				c.position ASC
 		`
 	)
 
@@ -1179,8 +1183,13 @@ func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublish
 
 	for rows.Next() {
 		var p store.RegistryPublisher
-		if err := rows.Scan(&p.ID, &p.Name, &p.Position, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		var did sql.NullString
+		if err := rows.Scan(&p.ID, &p.Name, &p.Position, &did, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, nil, fmt.Errorf("scan registry publisher: %w", err)
+		}
+		if did.Valid {
+			s := did.String
+			p.DID = &s
 		}
 		pubs = append(pubs, p)
 	}
@@ -1197,7 +1206,7 @@ func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublish
 
 	for rows2.Next() {
 		var c store.RegistryPublisherChannel
-		if err := rows2.Scan(&c.ID, &c.PublisherID, &c.ChannelURL, &c.Position, &c.CreatedAt); err != nil {
+		if err := rows2.Scan(&c.ID, &c.PublisherID, &c.ChannelURL, &c.Kind, &c.Position, &c.CreatedAt); err != nil {
 			return nil, nil, fmt.Errorf("scan registry channel: %w", err)
 		}
 		chans = append(chans, c)
@@ -1229,22 +1238,26 @@ func (s *Store) ReplaceChannelRegistry(ctx context.Context, publishers []store.R
 
 	// Insert publishers.
 	const pubInsert = `
-		INSERT INTO registry_publishers (id, name, position, created_at, updated_at)
-		VALUES ($1, $2, $3, now(), now())
+		INSERT INTO registry_publishers (id, name, position, did, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, now(), now())
 	`
 	for _, p := range publishers {
-		if _, err := tx.Exec(ctx, pubInsert, p.ID, p.Name, p.Position); err != nil {
+		var didArg any
+		if p.DID != nil && *p.DID != "" {
+			didArg = *p.DID
+		}
+		if _, err := tx.Exec(ctx, pubInsert, p.ID, p.Name, p.Position, didArg); err != nil {
 			return fmt.Errorf("replace registry: insert publisher %q: %w", p.Name, err)
 		}
 	}
 
 	// Insert channels.
 	const chanInsert = `
-		INSERT INTO registry_publisher_channels (id, publisher_id, channel_url, position, created_at)
-		VALUES ($1, $2, $3, $4, now())
+		INSERT INTO registry_publisher_channels (id, publisher_id, channel_url, kind, position, created_at)
+		VALUES ($1, $2, $3, $4, $5, now())
 	`
 	for _, c := range channels {
-		if _, err := tx.Exec(ctx, chanInsert, c.ID, c.PublisherID, c.ChannelURL, c.Position); err != nil {
+		if _, err := tx.Exec(ctx, chanInsert, c.ID, c.PublisherID, c.ChannelURL, c.Kind, c.Position); err != nil {
 			return fmt.Errorf("replace registry: insert channel %q: %w", c.ChannelURL, err)
 		}
 	}

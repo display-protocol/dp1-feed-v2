@@ -32,10 +32,54 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ---
 
+## ETag and conditional GET (single resources)
+
+**Scope (API v1):** Strong **ETag** support applies only to **GET** of a **single** resource by path:
+
+- `GET /api/v1/playlists/{id}`
+- `GET /api/v1/playlist-groups/{id}`
+- `GET /api/v1/channels/{id}` (when extensions are enabled)
+- `GET /api/v1/playlist-items/{id}`
+
+**Not in scope for v1:** Paginated **list** GETs (`/playlists`, `/playlist-groups`, `/channels`, `/playlist-items`), **`GET /api/v1/registry/channels`**, and metadata endpoints (`/health`, **`GET /api/v1`**) do **not** send `ETag`. Clients should not rely on conditional requests for those routes until explicitly documented in a future revision.
+
+**Semantics:**
+
+- **`ETag` response header:** Strong entity-tag over the **exact UTF-8 JSON bytes** of the response body: quoted **SHA-256** (hexadecimal digest). The tag changes when the encoded JSON would change.
+- **`If-None-Match` request header (optional):** If the value matches the current ETag for that resource, the server responds with **`304 Not Modified`** and an **empty** body. This avoids re-downloading unchanged documents.
+- **`If-None-Match: *`** does not produce 304 when a representation exists (normal HTTP semantics).
+
+**Compatibility:** ETag values are opaque; clients should store and resend them verbatim. Future list-ETag support, if added, will be documented separately in OpenAPI and this document.
+
+---
+
+**Playlists extension fields:**
+
+- **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
+
+---
+
 ## Authentication and authorization
 
-- **Write operations** (POST, PUT, PATCH, DELETE on documents; **`PUT /api/v1/registry/channels`**) require **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI).
-- **Compare semantics:** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
+**Two authentication paths for document writes (create and update):**
+
+1. **API key authentication (ops path):** Traditional Bearer token.
+   - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
+   - On **create**, the server may generate `id`, `created`, `slug` (if omitted)
+   - Server adds feed signature to the document
+
+2. **Signature-based authentication (user path):** Cryptographic signatures on the request body.
+   - **No API key required** when the body includes a **non-empty** `signatures` array and verification succeeds
+   - **POST (create):** request must include `id` (UUID), `created` (RFC3339, not in future), and `signatures`, as documented on `PlaylistInput` / group / channel inputs
+   - **PUT (replace):** same input shapes as create; `signatures` must match the document after replace (stored `id`, `slug`, and document `created` are preserved by the server)
+   - **PATCH (partial update):** optional `signatures` on `PlaylistUpdateInput` / group / channel update schemas; when non-empty, signatures must verify against the **merged** document (patch fields overlaid on the stored document)
+   - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec and `Signature` schema in OpenAPI)
+   - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document used for verification
+   - Server verifies signatures cryptographically (JCS canonicalization, SHA-256 payload hash, Ed25519 signature verification)
+   - Server **always adds** its own feed signature regardless of authentication path
+   - **DELETE** and **registry PUT** still require an API key only (no signature-only path)
+
+- **Compare semantics (API key):** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
 - **Per-user or OAuth** is out of scope for this service; front with a gateway if needed.
 
@@ -69,7 +113,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - **PATCH** — partial update (only provided fields change); server re-signs and re-validates as applicable.
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules).
 
-**Registry `PUT`:** atomically **replaces the entire** curated registry (validated array of publishers); not a merge-by-item API.
+**Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and optional ordered URL arrays **`static`** and **`living`** (channel resource URLs under this API). A publisher may include only **`static`**, only **`living`**, or both; **PUT** still requires at least one URL in total per publisher across those lists. **PUT** requires at least one publisher overall; it atomically **replaces the entire** registry (not a merge-by-item API).
 
 **Channel and extension features:** when extensions are disabled in config, channel routes return **`404`** with error code **`extensions_disabled`** (see below).
 
@@ -93,7 +137,10 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
-| **401** | `unauthorized` | Missing or wrong API key on protected routes. |
+| **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |
+| **400** | `invalid_timestamp` | User-provided `created` timestamp is in the future (`IsInvalidTimestampError`). |
+| **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
+| **401** | `unauthorized` | Missing or wrong API key on protected routes, or missing authentication (neither API key nor valid signatures). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
@@ -107,6 +154,7 @@ Clients should branch on **`error`** (stable) and treat **`message`** as diagnos
 ## Success status codes
 
 - **200** — OK (GET, PUT, PATCH, DELETE with body where applicable).
+- **304** — Not Modified (single-resource GET only, when `If-None-Match` matches the current `ETag`; empty body).
 - **201** — Created (POST for new playlists, groups, channels as specified per path in OpenAPI).
 
 ---

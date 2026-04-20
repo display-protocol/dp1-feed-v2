@@ -44,20 +44,28 @@ type ChannelRecord struct {
 	UpdatedAt time.Time
 }
 
-// RegistryPublisher is a curated channel publisher with ordered channel URLs.
+// Registry channel URL kinds (registry_publisher_channels.kind).
+const (
+	RegistryChannelKindStatic = "static"
+	RegistryChannelKindLiving = "living"
+)
+
+// RegistryPublisher is a curated channel publisher with ordered channel URLs per kind.
 type RegistryPublisher struct {
 	ID        uuid.UUID
 	Name      string
+	DID       *string // Optional DID; nil when unset in the database.
 	Position  int
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
-// RegistryPublisherChannel is a channel URL belonging to a publisher.
+// RegistryPublisherChannel is a channel URL belonging to a publisher (static or living list).
 type RegistryPublisherChannel struct {
 	ID          uuid.UUID
 	PublisherID uuid.UUID
 	ChannelURL  string
+	Kind        string // RegistryChannelKindStatic or RegistryChannelKindLiving.
 	Position    int
 	CreatedAt   time.Time
 }

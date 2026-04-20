@@ -105,6 +105,55 @@ func TestLoad_envOverrides(t *testing.T) {
 	}
 }
 
+func TestLoad_corsAllowOriginsEnv(t *testing.T) {
+	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
+	t.Setenv("DP1_FEED_API_KEY", "k")
+	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_CORS_ALLOW_ORIGINS", " https://app.example.com , https://other.example.com ")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.CORS.AllowOrigins) != 2 {
+		t.Fatalf("CORS allow_origins: got %#v", cfg.CORS.AllowOrigins)
+	}
+	if cfg.CORS.AllowOrigins[0] != "https://app.example.com" || cfg.CORS.AllowOrigins[1] != "https://other.example.com" {
+		t.Fatalf("CORS allow_origins mismatch: %#v", cfg.CORS.AllowOrigins)
+	}
+}
+
+func TestLoad_corsAllowOriginsFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := strings.TrimSpace(`
+database:
+  url: postgres://user:pass@localhost:5432/db?sslmode=disable
+auth:
+  api_key: integration-test-key
+cors:
+  allow_origins:
+    - "https://alpha.example"
+    - "https://bravo.example"
+playlist:
+  signing_key_hex: "` + testSeedHex + `"
+`)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.CORS.AllowOrigins) != 2 {
+		t.Fatalf("expected 2 origins, got %#v", cfg.CORS.AllowOrigins)
+	}
+	if cfg.CORS.AllowOrigins[0] != "https://alpha.example" || cfg.CORS.AllowOrigins[1] != "https://bravo.example" {
+		t.Fatalf("CORS allow_origins mismatch: %#v", cfg.CORS.AllowOrigins)
+	}
+}
+
 func TestLoad_serverPort_invalidEnvIgnored(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
 	t.Setenv("DP1_FEED_API_KEY", "k")

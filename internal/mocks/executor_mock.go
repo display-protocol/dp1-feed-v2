@@ -304,7 +304,7 @@ func (mr *MockExecutorMockRecorder) ReplaceChannel(ctx, idOrSlug, req any) *gomo
 }
 
 // ReplaceChannelRegistry mocks base method.
-func (m *MockExecutor) ReplaceChannelRegistry(ctx context.Context, req models.RegistryUpdateRequest) (int, error) {
+func (m *MockExecutor) ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReplaceChannelRegistry", ctx, req)
 	ret0, _ := ret[0].(int)
