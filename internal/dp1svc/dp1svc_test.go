@@ -366,3 +366,160 @@ func TestService_SignPlaylist(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestService_SignPlaylist_preservesNonFeedSignatures(t *testing.T) {
+	t.Parallel()
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := minimalSignedPlaylistV11(t)
+	ts := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
+	signed, err := s.SignPlaylist(raw, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ok, failed, err := s.VerifyPlaylistSignatures(signed)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected all signatures valid, failed=%v", failed)
+	}
+
+	var out playlist.Playlist
+	if err := json.Unmarshal(signed, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Signatures) != 2 {
+		t.Fatalf("want 2 signatures (curator + feed), got %d: %+v", len(out.Signatures), out.Signatures)
+	}
+
+	// Re-signing replaces only the feed kid; curator entry remains.
+	ts2 := ts.Add(time.Hour)
+	signedAgain, err := s.SignPlaylist(signed, ts2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, failed, err = s.VerifyPlaylistSignatures(signedAgain)
+	if err != nil {
+		t.Fatalf("verify after re-sign: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected all valid after re-sign, failed=%v", failed)
+	}
+	if err := json.Unmarshal(signedAgain, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Signatures) != 2 {
+		t.Fatalf("want 2 signatures after re-sign, got %d", len(out.Signatures))
+	}
+}
+
+func TestService_SignPlaylistGroup_preservesNonFeedSignatures(t *testing.T) {
+	t.Parallel()
+	_, curatorPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pg := map[string]any{
+		"dpVersion": "1.1.0",
+		"title":     "G",
+		"playlists": []string{"https://example.com/pl/1"},
+	}
+	raw, err := json.Marshal(pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	curSig, err := sign.SignMultiEd25519(raw, curatorPriv, "curator", "2025-06-01T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg["signatures"] = []playlist.Signature{curSig}
+	raw, err = json.Marshal(pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
+	signed, err := s.SignPlaylistGroup(raw, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, failed, err := s.VerifyPlaylistGroupSignatures(signed)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok, failed=%v", failed)
+	}
+	var env struct {
+		Signatures []playlist.Signature `json:"signatures"`
+	}
+	if err := json.Unmarshal(signed, &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Signatures) != 2 {
+		t.Fatalf("want 2 signatures, got %d", len(env.Signatures))
+	}
+}
+
+func TestService_SignChannel_preservesNonFeedSignatures(t *testing.T) {
+	t.Parallel()
+	_, pubPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ch := map[string]any{
+		"title":     "C",
+		"version":   "1.0.0",
+		"playlists": []string{"https://example.com/pl/1"},
+	}
+	raw, err := json.Marshal(ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubSig, err := sign.SignMultiEd25519(raw, pubPriv, "publisher", "2025-06-01T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch["signatures"] = []playlist.Signature{pubSig}
+	raw, err = json.Marshal(ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
+	signed, err := s.SignChannel(raw, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, failed, err := s.VerifyChannelSignatures(signed)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok, failed=%v", failed)
+	}
+	var env struct {
+		Signatures []playlist.Signature `json:"signatures"`
+	}
+	if err := json.Unmarshal(signed, &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Signatures) != 2 {
+		t.Fatalf("want 2 signatures, got %d", len(env.Signatures))
+	}
+}
