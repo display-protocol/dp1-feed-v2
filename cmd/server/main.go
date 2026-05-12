@@ -23,7 +23,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/store/pg"
 )
 
-const version = "0.1.0"
+const version = "1.0.0"
 
 func main() {
 	configPath := flag.String("config", "config/config.yaml", "path to YAML config")
