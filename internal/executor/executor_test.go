@@ -181,6 +181,73 @@ func TestCreatePlaylist_storeError(t *testing.T) {
 	}
 }
 
+func TestCreatePlaylist_optionalCreate_respectsProvidedID(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	wantID := uuid.MustParse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+	idStr := wantID.String()
+	req := validCreateReq()
+	req.ID = &idStr
+
+	signed := []byte(`{"dpVersion":"1.1.0","title":"x","items":[{"source":"https://x"}]}`)
+	parsed := mustDecodePlaylist(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), wantID, gomock.Any(), &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreatePlaylist_optionalCreate_invalidID(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	bad := "not-a-uuid"
+	req := validCreateReq()
+	req.ID = &bad
+
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	_, err := e.CreatePlaylist(context.Background(), req)
+	if !executor.IsInvalidIDError(err) {
+		t.Fatalf("want invalid id error, got %v", err)
+	}
+}
+
+func TestCreatePlaylist_optionalCreate_futureCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	future := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	req := validCreateReq()
+	req.Created = &future
+
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	_, err := e.CreatePlaylist(context.Background(), req)
+	if !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid timestamp error, got %v", err)
+	}
+}
+
+func TestCreatePlaylist_optionalCreate_invalidCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	bad := "Tuesday"
+	req := validCreateReq()
+	req.Created = &bad
+
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	_, err := e.CreatePlaylist(context.Background(), req)
+	if !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid timestamp error, got %v", err)
+	}
+}
+
 func TestGetPlaylist(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -868,6 +935,44 @@ func TestCreatePlaylistGroup_success_localResolve(t *testing.T) {
 	}
 }
 
+func TestCreatePlaylistGroup_optionalCreate_respectsProvidedID(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	plID := uuid.MustParse("22222222-2222-4222-a222-222222222222")
+	plBody := []byte(`{"id":"22222222-2222-4222-a222-222222222222","slug":"pl-one","title":"P"}`)
+	plDoc := mustDecodePlaylist(t, plBody)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl-one").Return(&store.PlaylistRecord{
+		ID:   plID,
+		Slug: "pl-one",
+		Body: plDoc,
+	}, nil)
+
+	wantGroupID := uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+	idStr := wantGroupID.String()
+	req := validGroupCreateReq(localPlaylistRef("pl-one"))
+	req.ID = &idStr
+
+	signed := []byte(`{"kind":"signed-group-ops-id"}`)
+	wantGroup := mustDecodeGroup(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&wantGroup, nil),
+	)
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+		if in.ID != wantGroupID {
+			t.Fatalf("want group id %v, got %v", wantGroupID, in.ID)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	if _, err := e.CreatePlaylistGroup(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCreatePlaylistGroup_emptyPlaylists(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -1527,6 +1632,42 @@ func TestCreateChannel_success(t *testing.T) {
 	}
 	if out == nil || !reflect.DeepEqual(*out, wantCh) {
 		t.Fatal("response mismatch")
+	}
+}
+
+func TestCreateChannel_optionalCreate_respectsProvidedID(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	plID := uuid.MustParse("88888888-8888-4888-a888-888888888888")
+	plBody := []byte(`{"id":"88888888-8888-4888-a888-888888888888","slug":"pl-ch"}`)
+	plDoc := mustDecodePlaylist(t, plBody)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl-ch").Return(&store.PlaylistRecord{
+		ID: plID, Slug: "pl-ch", Body: plDoc,
+	}, nil)
+
+	wantChID := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	idStr := wantChID.String()
+	req := validChannelCreateReq("My Channel", localPlaylistRef("pl-ch"))
+	req.ID = &idStr
+
+	signed := []byte(`{"kind":"signed-channel-ops-id"}`)
+	wantCh := mustDecodeChannel(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
+	)
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
+		if in.ID != wantChID {
+			t.Fatalf("want channel id %v, got %v", wantChID, in.ID)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	if _, err := e.CreateChannel(context.Background(), req); err != nil {
+		t.Fatal(err)
 	}
 }
 

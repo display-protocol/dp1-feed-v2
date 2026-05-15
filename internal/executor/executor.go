@@ -129,8 +129,9 @@ var (
 // Validation runs only after signing so the payload includes signatures (or legacy signature) as required by the schema.
 //
 // Trusted model: Accepts either API key (ops) or cryptographic signatures (user) authentication.
-// - API key path: server generates id, slug, created; signs with feed role
-// - Signature path: user provides id, slug, created, signatures[]; server verifies curator signatures and adds feed signature
+//   - API key path: optional client id and created (validated when present); missing fields get server defaults
+//     (new UUID, current time). Slug is derived via makeSlug (client slug/title + id). Feed signs last.
+//   - Signature path: user provides id, created, signatures[]; server verifies curator signatures and adds feed signature
 func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*playlist.Playlist, error) {
 	var id uuid.UUID
 	var slug string
@@ -166,9 +167,14 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 		}
 	} else {
 		// Path A: API key authentication (ops path)
-		// Server generates id, slug, created
-		id = uuid.New()
-		created = time.Now()
+		id, err = resolveOptionalCreateID(req.ID)
+		if err != nil {
+			return nil, err
+		}
+		created, err = resolveOptionalCreateCreated(req.Created)
+		if err != nil {
+			return nil, err
+		}
 		slug = makeSlug(req.Slug, req.Title, id, "playlist")
 
 		raw, err = e.buildPlaylistDocument(req, id, slug, created)
@@ -585,9 +591,15 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 		}
 	} else {
 		// Path A: API key authentication (ops path)
-		id = uuid.New()
+		id, err = resolveOptionalCreateID(req.ID)
+		if err != nil {
+			return nil, err
+		}
+		created, err = resolveOptionalCreateCreated(req.Created)
+		if err != nil {
+			return nil, err
+		}
 		slug = makeSlug(req.Slug, req.Title, id, "group")
-		created = time.Now()
 
 		raw, err = e.buildPlaylistGroupDocument(req, uris, id, slug, created)
 		if err != nil {
@@ -881,9 +893,15 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 		}
 	} else {
 		// Path A: API key authentication (ops path)
-		id = uuid.New()
+		id, err = resolveOptionalCreateID(req.ID)
+		if err != nil {
+			return nil, err
+		}
+		created, err = resolveOptionalCreateCreated(req.Created)
+		if err != nil {
+			return nil, err
+		}
 		slug = makeSlug(req.Slug, req.Title, id, "channel")
-		created = time.Now()
 
 		raw, err = e.buildChannelDocument(req, uris, id, slug, created)
 		if err != nil {
@@ -1268,6 +1286,29 @@ func parseUserProvidedCreated(createdStr *string) (time.Time, error) {
 		return time.Time{}, ErrInvalidTimestamp
 	}
 	return t, nil
+}
+
+// resolveOptionalCreateID interprets an optional JSON "id" for creates: absent or blank → new UUID;
+// otherwise parses the trimmed string as a UUID (same validity rules as trusted-model id fields).
+func resolveOptionalCreateID(idStr *string) (uuid.UUID, error) {
+	if idStr == nil || strings.TrimSpace(*idStr) == "" {
+		return uuid.New(), nil
+	}
+	id, err := uuid.Parse(strings.TrimSpace(*idStr))
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("%w: %w", ErrInvalidID, err)
+	}
+	return id, nil
+}
+
+// resolveOptionalCreateCreated interprets an optional JSON "created" for creates: absent or blank → now (UTC semantics via callers);
+// otherwise parses RFC3339 and rejects future timestamps via [parseUserProvidedCreated].
+func resolveOptionalCreateCreated(createdStr *string) (time.Time, error) {
+	if createdStr == nil || strings.TrimSpace(*createdStr) == "" {
+		return time.Now(), nil
+	}
+	s := strings.TrimSpace(*createdStr)
+	return parseUserProvidedCreated(&s)
 }
 
 // verifyPlaylistCuratorSignatures verifies that at least one signature in sigs matches a curator key.

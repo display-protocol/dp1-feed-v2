@@ -65,7 +65,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 1. **API key authentication (ops path):** Traditional Bearer token.
    - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
-   - On **create**, the server may generate `id`, `created`, `slug` (if omitted)
+   - On **create**, when **`id`** or **`created`** are omitted, the server assigns a new UUID and the current time respectively; when provided, values are validated (UUID shape; **`created`** RFC3339 and not in the future) and stored. **`slug`** continues to follow **`makeSlug`** rules (optional client slug, else derived from title + short id).
    - Server adds feed signature to the document
 
 2. **Signature-based authentication (user path):** Cryptographic signatures on the request body.

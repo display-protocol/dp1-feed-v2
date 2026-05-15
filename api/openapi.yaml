@@ -829,14 +829,15 @@ components:
           type: string
           format: uuid
           description: >-
-            Optional. User-provided UUID for signature-based authentication.
-            When provided with valid curator signatures, bypasses API key requirement.
+            Optional on API-key creates (server generates when omitted). Required with signatures[]
+            for signature-based authentication. When provided with valid curator signatures matching curators[],
+            bypasses API key requirement.
         created:
           type: string
           format: date-time
           description: >-
-            Optional. User-provided RFC3339 timestamp for signature-based authentication.
-            Must not be in the future. Required when using signature-based authentication.
+            Optional on API-key creates (server uses current time when omitted). Required with signatures[]
+            for signature-based authentication. RFC3339; must not be in the future when provided.
         signatures:
           type: array
           description: >-
@@ -980,14 +981,15 @@ components:
           type: string
           format: uuid
           description: >-
-            Optional. User-provided UUID for signature-based authentication.
-            When provided with valid curator signatures, bypasses API key requirement.
+            Optional on API-key creates (server generates when omitted). Required with signatures[]
+            for signature-based authentication. When provided with valid curator signatures,
+            bypasses API key requirement.
         created:
           type: string
           format: date-time
           description: >-
-            Optional. User-provided RFC3339 timestamp for signature-based authentication.
-            Must not be in the future. Required when using signature-based authentication.
+            Optional on API-key creates (server uses current time when omitted). Required with signatures[]
+            for signature-based authentication. RFC3339; must not be in the future when provided.
         signatures:
           type: array
           description: >-
@@ -1079,14 +1081,15 @@ components:
           type: string
           format: uuid
           description: >-
-            Optional. User-provided UUID for signature-based authentication.
-            When provided with valid publisher signatures, bypasses API key requirement.
+            Optional on API-key creates (server generates when omitted). Required with signatures[]
+            for signature-based authentication. When provided with valid publisher signatures,
+            bypasses API key requirement.
         created:
           type: string
           format: date-time
           description: >-
-            Optional. User-provided RFC3339 timestamp for signature-based authentication.
-            Must not be in the future. Required when using signature-based authentication.
+            Optional on API-key creates (server uses current time when omitted). Required with signatures[]
+            for signature-based authentication. RFC3339; must not be in the future when provided.
         signatures:
           type: array
           description: >-
