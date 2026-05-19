@@ -213,9 +213,18 @@ The `.env` file contains all necessary environment variables for Docker deployme
 ```bash
 make test          # Run all tests
 make lint          # Run linters
-make build         # Build the binary
-make docker-build  # Build Docker image
+make build         # Build the binary (bin/server, no Docker)
 make check         # Run tests and linters
+
+# Docker Compose (see README § Docker)
+make up            # Build images + start all services (detached)
+make down          # Stop all services
+make run           # Start API only (existing image, no build)
+make stop          # Stop API only
+make log           # Follow API container logs
+make clean         # Stop all, remove volumes/networks, delete bin/
+make up-infra      # PostgreSQL only (for local go run)
+make down-infra    # Stop PostgreSQL only
 ```
 
 ## API Development
@@ -249,7 +258,7 @@ export DP1_FEED_LOG_LEVEL=debug
 Make sure `dp1-go` is cloned next to this repo. The `go.mod` uses a `replace` directive to reference it locally.
 
 **"connection refused" to PostgreSQL**  
-Check that PostgreSQL is running and the connection string in your config is correct.
+For Docker: `make up-infra` or `make up`. For local `go run`: ensure Postgres is running and `database.url` in `config/config.yaml` points at `localhost`.
 
 **"unauthorized" API responses**  
 Verify your `Authorization: Bearer <api-key>` header matches the `auth.api_key` in your config.

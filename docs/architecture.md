@@ -124,8 +124,13 @@ go run ./cmd/server -config config/config.yaml
 
 ```bash
 cp config/.env.example config/.env  # customize if needed
-docker compose up --build
+make up       # build + start all services (detached)
+make log      # API logs
+make down     # stop all services
+make clean    # teardown volumes/networks + bin/
 ```
+
+API only after a prior `make up` build: `make run` / `make stop`. Infra only: `make up-infra` / `make down-infra`. Equivalent: `docker compose up -d --build`.
 
 ### Production binary
 

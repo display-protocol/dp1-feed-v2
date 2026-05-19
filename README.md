@@ -32,7 +32,7 @@ Built with Go, Gin, and PostgreSQL. No complex auth, no message queues—just st
    createdb dp1_feed
    ```
 
-   Or use Docker Compose (see below).
+   Or use Docker: `make up` (see [Docker](#docker) below).
 
 2. **Configure the server**
 
@@ -91,7 +91,26 @@ Prefer containers? We've got you covered.
 2. **Start the services**
 
    ```bash
-   docker compose up --build
+   make up       # build + start all services (detached)
+   make log      # follow API logs
+   make down     # stop all services
+   make clean    # stop, remove volumes/networks, delete bin/
+   ```
+
+   API only (existing image; postgres starts via compose `depends_on` if needed):
+
+   ```bash
+   make run
+   make stop
+   ```
+
+   Equivalent to `make up`: `docker compose up -d --build`.
+
+   Infra only (e.g. local `go run` against `config/config.yaml`):
+
+   ```bash
+   make up-infra
+   make down-infra
    ```
 
 This starts both PostgreSQL and the feed server. The API will be available at `http://localhost:8787`.

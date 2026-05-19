@@ -62,6 +62,8 @@ If work is large or vague and no feature spec or decision record exists, do not 
 5. Run `scripts/agent-helpers/post-implementation-checks`.
 6. Only then consider the task complete.
 
+**Running the stack locally (Docker):** `make up` (build + all services), `make run` / `make stop` (API only, no rebuild), `make up-infra` / `make down-infra` (Postgres only). See `make help`, `README.md`, and `DEVELOPMENT.md`.
+
 ## Rule references
 - `.cursor/rules/01-master-design.mdc`
 - `.cursor/rules/10-go-coding-standards.mdc`

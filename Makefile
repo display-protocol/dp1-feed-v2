@@ -17,13 +17,17 @@ help:
 	@echo "  make check             - lint + test (no Docker)"
 	@echo "  make generate          - go generate ./... (mocks)"
 	@echo "  make build             - build API server to bin/server"
-	@echo "  make run               - go run server (config + migrations)"
+	@echo "  make up-infra          - start PostgreSQL (docker compose)"
+	@echo "  make down-infra        - stop PostgreSQL only"
+	@echo "  make up                - build and start all compose services"
+	@echo "  make down              - stop all compose services"
+	@echo "  make run               - start API container only (no build)"
+	@echo "  make stop              - stop API container only"
+	@echo "  make log               - follow API container logs"
 	@echo "  make fmt               - go fmt ./..."
 	@echo "  make vet               - go vet ./..."
 	@echo "  make tidy              - go mod tidy"
-	@echo "  make docker-up         - docker compose up -d postgres"
-	@echo "  make docker-down       - docker compose down"
-	@echo "  make clean             - remove bin/"
+	@echo "  make clean             - stop services, remove volumes/networks, delete bin/"
 	@echo ""
 	@echo "GitHub Actions (local with act):"
 	@echo "  make act-lint          - run lint workflow locally"
@@ -32,6 +36,7 @@ help:
 	@echo "  make act-list          - list all available workflows"
 	@echo "  make act-clean         - clean up act containers, volumes, and artifacts"
 
+COMPOSE     ?= docker compose
 CONFIG      ?= config/config.yaml
 MIGRATIONS  ?= db/migrations
 BIN_DIR     ?= bin
@@ -100,9 +105,29 @@ build:
 	mkdir -p $(BIN_DIR)
 	go build -o $(SERVER_BIN) ./cmd/server
 
-.PHONY: run
+.PHONY: up-infra down-infra up down run stop log
+up-infra:
+	$(COMPOSE) up -d --wait postgres
+
+down-infra:
+	$(COMPOSE) stop postgres
+
+# Build images and start all services (detached).
+up:
+	$(COMPOSE) up -d --build
+
+down:
+	$(COMPOSE) stop
+
+# Start API from existing image (no build). Postgres starts via depends_on when needed.
 run:
-	go run ./cmd/server -config $(CONFIG) -migrations $(MIGRATIONS)
+	$(COMPOSE) up -d api
+
+stop:
+	$(COMPOSE) stop api
+
+log:
+	$(COMPOSE) logs -f api
 
 .PHONY: fmt
 fmt:
@@ -116,16 +141,9 @@ vet:
 tidy:
 	go mod tidy
 
-.PHONY: docker-up
-docker-up:
-	docker compose up -d postgres
-
-.PHONY: docker-down
-docker-down:
-	docker compose down
-
 .PHONY: clean
-clean:
+clean: down
+	$(COMPOSE) down -v --remove-orphans
 	rm -rf $(BIN_DIR)
 
 # =============================================================================
