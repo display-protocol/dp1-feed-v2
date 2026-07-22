@@ -348,9 +348,41 @@ func TestService_ValidatePlaylistWithExtension(t *testing.T) {
 			t.Fatalf("item1 displayAt: %q", pl.Items[1].DisplayAt)
 		}
 	})
+
+	// §3.5.2: date-only YYYY-MM-DD is not an accepted displayAt wire form.
+	t.Run("date_only_displayAt_rejected", func(t *testing.T) {
+		t.Parallel()
+		raw := signedPlaylistWithDisplayAt(t, "2026-07-21")
+		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
+			t.Fatal("expected validation error for date-only displayAt")
+		}
+	})
+
+	t.Run("compact_offset_displayAt_rejected", func(t *testing.T) {
+		t.Parallel()
+		raw := signedPlaylistWithDisplayAt(t, "2026-07-21T00:00:00+0700")
+		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
+			t.Fatal("expected validation error for compact-offset displayAt")
+		}
+	})
 }
 
 func signedDailyPlaylistWithDisplayAt(t *testing.T) []byte {
+	t.Helper()
+	return signedPlaylistWithItems(t, []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+		{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
+	})
+}
+
+func signedPlaylistWithDisplayAt(t *testing.T, displayAt string) []byte {
+	t.Helper()
+	return signedPlaylistWithItems(t, []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", DisplayAt: displayAt},
+	})
+}
+
+func signedPlaylistWithItems(t *testing.T, items []playlist.PlaylistItem) []byte {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -360,10 +392,7 @@ func signedDailyPlaylistWithDisplayAt(t *testing.T) []byte {
 		DPVersion: "1.1.0",
 		Title:     "Daily",
 		Schedule:  &dp1playlists.Schedule{ByDisplayAt: true},
-		Items: []playlist.PlaylistItem{
-			{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
-			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
-		},
+		Items:     items,
 	}
 	raw, err := json.Marshal(pl)
 	if err != nil {

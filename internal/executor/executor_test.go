@@ -663,7 +663,7 @@ func TestUpdatePlaylist_preservesPlaylistLevelNote(t *testing.T) {
 }
 
 // TestCreatePlaylist_preservesScheduleAndDisplayAt ensures Daily-style playlists keep
-// schedule.byDisplayAt and per-item displayAt on the signed document (not stripped).
+// schedule.byDisplayAt and per-item displayAt on the signed document and store argument.
 func TestCreatePlaylist_preservesScheduleAndDisplayAt(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -683,7 +683,18 @@ func TestCreatePlaylist_preservesScheduleAndDisplayAt(t *testing.T) {
 
 	var preSign []byte
 	signed := []byte(`{"dpVersion":"1.1.0","title":"Daily"}`)
-	parsed := mustDecodePlaylist(t, signed)
+	// Validate mock returns the scheduling fields so CreatePlaylist store arg proves they survive
+	// the write path (not only the pre-sign capture).
+	parsed := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Schedule:  &dp1playlists.Schedule{ByDisplayAt: true},
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
+			{Source: "https://cdn.example.com/intro.html"},
+		},
+	}
 	gomock.InOrder(
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
 			preSign = append([]byte(nil), raw...)
@@ -691,7 +702,22 @@ func TestCreatePlaylist_preservesScheduleAndDisplayAt(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, body *playlist.Playlist) error {
+			if body.Schedule == nil || !body.Schedule.ByDisplayAt {
+				t.Fatalf("store body schedule: %+v", body.Schedule)
+			}
+			if len(body.Items) != 3 {
+				t.Fatalf("store body items: want 3, got %d", len(body.Items))
+			}
+			if body.Items[0].DisplayAt != "2026-07-21T00:00:00" || body.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
+				t.Fatalf("store body displayAt: %+v", body.Items)
+			}
+			if body.Items[2].DisplayAt != "" {
+				t.Fatalf("evergreen store item should omit displayAt, got %q", body.Items[2].DisplayAt)
+			}
+			return nil
+		})
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
@@ -752,6 +778,52 @@ func TestCreatePlaylist_withoutSchedule_omitsSchedule(t *testing.T) {
 	}
 	if len(check.Items) != 1 || check.Items[0].DisplayAt != "" {
 		t.Fatalf("non-Daily items must omit displayAt, got %+v", check.Items)
+	}
+}
+
+// TestCreatePlaylist_extensionsDisabled_stripsScheduleAndDisplayAt ensures core-only feeds
+// do not persist Playlist Extension scheduling fields (core schema would not validate them).
+func TestCreatePlaylist_extensionsDisabled_stripsScheduleAndDisplayAt(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	req := &models.PlaylistCreateRequest{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Schedule:  &dp1playlists.Schedule{ByDisplayAt: true},
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: "not-a-date"},
+		},
+	}
+
+	var preSign []byte
+	signed := []byte(`{"dpVersion":"1.1.0"}`)
+	parsed := mustDecodePlaylist(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if check.Schedule != nil {
+		t.Fatalf("extensions off must strip schedule, got %+v", check.Schedule)
+	}
+	if len(check.Items) != 1 || check.Items[0].DisplayAt != "" {
+		t.Fatalf("extensions off must strip displayAt, got %+v", check.Items)
 	}
 }
 
@@ -1047,6 +1119,62 @@ func TestIsExtensionsDisabled(t *testing.T) {
 	}
 	if executor.IsExtensionsDisabled(errors.New("other")) {
 		t.Fatal("expected false")
+	}
+}
+
+// stubFetcher returns a fixed remote playlist body for group/channel ingest tests.
+type stubFetcher struct {
+	body []byte
+	err  error
+}
+
+func (s stubFetcher) FetchPlaylist(_ context.Context, _ string) ([]byte, error) {
+	return s.body, s.err
+}
+
+// TestCreatePlaylistGroup_extensionsDisabled_stripsIngestedScheduleAndDisplayAt ensures remote
+// ingest under core-only validation does not persist unvalidated §3.5 scheduling fields.
+func TestCreatePlaylistGroup_extensionsDisabled_stripsIngestedScheduleAndDisplayAt(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	plID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	remoteRaw := []byte(`{"dpVersion":"1.1.0","id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"remote-daily","title":"Daily"}`)
+	parsedRemote := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        plID.String(),
+		Slug:      "remote-daily",
+		Title:     "Daily",
+		Schedule:  &dp1playlists.Schedule{ByDisplayAt: true},
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: "not-a-date"},
+		},
+	}
+	signed := []byte(`{"kind":"signed-group"}`)
+	wantGroup := mustDecodeGroup(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().ValidatePlaylist(remoteRaw).Return(&parsedRemote, nil),
+		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&wantGroup, nil),
+	)
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+		if len(in.Playlists) != 1 {
+			t.Fatalf("ingested playlists: want 1, got %d", len(in.Playlists))
+		}
+		body := in.Playlists[0].Body
+		if body.Schedule != nil {
+			t.Fatalf("extensions off must strip ingested schedule, got %+v", body.Schedule)
+		}
+		if len(body.Items) != 1 || body.Items[0].DisplayAt != "" {
+			t.Fatalf("extensions off must strip ingested displayAt, got %+v", body.Items)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, stubFetcher{body: remoteRaw}, testPublicBase)
+	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/daily.json")); err != nil {
+		t.Fatal(err)
 	}
 }
 
