@@ -56,6 +56,8 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 **Playlists extension fields:**
 
 - **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
+- **`schedule`** — optional playlist-level scheduling object. When `schedule.byDisplayAt` is `true`, the device control layer filters items to an active set using each item’s `displayAt` before playback (Playlist Extension §3.5). When `schedule` is absent or `byDisplayAt` is false, core behavior applies (play all items). This feed stores and returns the fields; it does not compute the active set.
+- **`displayAt`** — optional ISO 8601 date or datetime on a playlist item (same level as `source`, not inside `display`). Without timezone (e.g. `2026-07-21T00:00:00`) means device-local time; with `Z` or an offset means absolute/global sync. Ignored for playback filtering unless `schedule.byDisplayAt` is `true`. Typical for Daily-style playlists that grow by one item per day.
 
 ---
 

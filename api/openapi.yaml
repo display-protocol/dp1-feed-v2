@@ -823,6 +823,10 @@ components:
           format: uri
         defaults:
           type: object
+        note:
+          $ref: '#/components/schemas/Note'
+        schedule:
+          $ref: '#/components/schemas/PlaylistSchedule'
         dynamicQuery:
           type: object
         id:
@@ -864,6 +868,8 @@ components:
             $ref: '#/components/schemas/PlaylistItemInput'
         note:
           $ref: '#/components/schemas/Note'
+        schedule:
+          $ref: '#/components/schemas/PlaylistSchedule'
         curators:
           type: array
           items:
@@ -911,6 +917,13 @@ components:
           type: object
         note:
           $ref: '#/components/schemas/Note'
+        displayAt:
+          type: string
+          description: >-
+            Optional ISO 8601 date or datetime for Playlist Extension displayAt scheduling (§3.5.2).
+            Without timezone (e.g. 2026-07-21T00:00:00) means device-local time; with Z or offset means
+            absolute/global sync. Ignored for playback filtering unless playlist schedule.byDisplayAt is true.
+          example: "2026-07-21T00:00:00"
 
     Playlist:
       type: object
@@ -929,6 +942,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PlaylistItem'
+        note:
+          $ref: '#/components/schemas/Note'
+        schedule:
+          $ref: '#/components/schemas/PlaylistSchedule'
         signatures:
           type: array
           description: v1.1+ multisig array
@@ -953,6 +970,13 @@ components:
           format: date-time
         duration:
           type: number
+        note:
+          $ref: '#/components/schemas/Note'
+        displayAt:
+          type: string
+          description: >-
+            Optional ISO 8601 date or datetime for Playlist Extension displayAt scheduling (§3.5.2).
+          example: "2026-07-21T00:00:00"
         # Additional fields...
 
     PlaylistGroupInput:
@@ -1265,6 +1289,20 @@ components:
           format: float
           description: Display duration in seconds (defaults to 20 when omitted)
           example: 15.0
+
+    PlaylistSchedule:
+      type: object
+      description: >-
+        Playlist-level scheduling controls (DP-1 Playlist Extension §3.5). When byDisplayAt is true,
+        the device control layer filters items to an active set using each item's displayAt before
+        playback. When absent or byDisplayAt is false, core behavior applies (play all items).
+      properties:
+        byDisplayAt:
+          type: boolean
+          description: >-
+            When true, filter playlist items to the active set for the current time using displayAt.
+            When false or omitted, play all items and ignore displayAt for filtering.
+          example: true
 
   responses:
     BadRequest:
