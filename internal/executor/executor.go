@@ -241,6 +241,11 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	if req.Note != nil {
 		p.Note = req.Note
 	}
+	// schedule.byDisplayAt opts the device control layer into displayAt active-set filtering
+	// (Playlist Extension §3.5). Absent schedule keeps core playback behavior.
+	if req.Schedule != nil {
+		p.Schedule = req.Schedule
+	}
 	if req.Summary != "" {
 		p.Summary = req.Summary
 	}
@@ -409,6 +414,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		Defaults:     existing.Defaults,
 		DynamicQuery: existing.DynamicQuery,
 		Note:         existing.Note,
+		Schedule:     existing.Schedule,
 	}
 
 	if req.DPVersion != nil {
@@ -440,6 +446,9 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	}
 	if req.Note != nil {
 		mergedReq.Note = req.Note
+	}
+	if req.Schedule != nil {
+		mergedReq.Schedule = req.Schedule
 	}
 	if len(req.Signatures) > 0 {
 		mergedReq.Signatures = req.Signatures
