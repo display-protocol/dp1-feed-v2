@@ -10,7 +10,6 @@ import (
 	"time"
 
 	dp1 "github.com/display-protocol/dp1-go"
-	dp1playlists "github.com/display-protocol/dp1-go/extension/playlists"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/sign"
 )
@@ -328,86 +327,6 @@ func TestService_ValidatePlaylistWithExtension(t *testing.T) {
 		}
 	})
 
-	t.Run("schedule_and_displayAt", func(t *testing.T) {
-		t.Parallel()
-		raw := signedDailyPlaylistWithDisplayAt(t)
-		pl, err := s.ValidatePlaylistWithExtension(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if pl.Schedule == nil || !pl.Schedule.ByDisplayAt {
-			t.Fatalf("expected schedule.byDisplayAt=true, got %+v", pl.Schedule)
-		}
-		if len(pl.Items) != 2 {
-			t.Fatalf("items: want 2, got %d", len(pl.Items))
-		}
-		if pl.Items[0].DisplayAt != "2026-07-21T00:00:00" {
-			t.Fatalf("item0 displayAt: %q", pl.Items[0].DisplayAt)
-		}
-		if pl.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
-			t.Fatalf("item1 displayAt: %q", pl.Items[1].DisplayAt)
-		}
-	})
-
-	// §3.5.2: date-only YYYY-MM-DD is not an accepted displayAt wire form.
-	t.Run("date_only_displayAt_rejected", func(t *testing.T) {
-		t.Parallel()
-		raw := signedPlaylistWithDisplayAt(t, "2026-07-21")
-		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
-			t.Fatal("expected validation error for date-only displayAt")
-		}
-	})
-
-	t.Run("compact_offset_displayAt_rejected", func(t *testing.T) {
-		t.Parallel()
-		raw := signedPlaylistWithDisplayAt(t, "2026-07-21T00:00:00+0700")
-		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
-			t.Fatal("expected validation error for compact-offset displayAt")
-		}
-	})
-}
-
-func signedDailyPlaylistWithDisplayAt(t *testing.T) []byte {
-	t.Helper()
-	return signedPlaylistWithItems(t, []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
-		{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
-	})
-}
-
-func signedPlaylistWithDisplayAt(t *testing.T, displayAt string) []byte {
-	t.Helper()
-	return signedPlaylistWithItems(t, []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", DisplayAt: displayAt},
-	})
-}
-
-func signedPlaylistWithItems(t *testing.T, items []playlist.PlaylistItem) []byte {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pl := playlist.Playlist{
-		DPVersion: "1.1.0",
-		Title:     "Daily",
-		Schedule:  &dp1playlists.Schedule{ByDisplayAt: true},
-		Items:     items,
-	}
-	raw, err := json.Marshal(pl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig, err := sign.SignMultiEd25519(raw, priv, playlist.RoleCurator, "2025-06-01T12:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pl.Signatures = []playlist.Signature{sig}
-	out, err := json.Marshal(pl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
 }
 
 func TestService_SignPlaylist(t *testing.T) {

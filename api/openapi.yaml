@@ -825,8 +825,6 @@ components:
           type: object
         note:
           $ref: '#/components/schemas/Note'
-        schedule:
-          $ref: '#/components/schemas/PlaylistSchedule'
         dynamicQuery:
           type: object
         id:
@@ -868,8 +866,6 @@ components:
             $ref: '#/components/schemas/PlaylistItemInput'
         note:
           $ref: '#/components/schemas/Note'
-        schedule:
-          $ref: '#/components/schemas/PlaylistSchedule'
         curators:
           type: array
           items:
@@ -917,16 +913,6 @@ components:
           type: object
         note:
           $ref: '#/components/schemas/Note'
-        displayAt:
-          type: string
-          description: >-
-            Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
-            Accepted forms: local datetime with seconds and no timezone (2026-07-21T00:00:00, display-locale
-            local), or absolute RFC 3339 date-time with Z or colon offset (e.g. +07:00). Date-only
-            (YYYY-MM-DD) and compact offset without colon are not accepted. Ignored for playback filtering
-            unless playlist schedule.byDisplayAt is true. Validated by the DP-1 playlists extension schema
-            when extensions are enabled; omitted from the signed document when extensions are disabled.
-          example: "2026-07-21T00:00:00"
 
     Playlist:
       type: object
@@ -947,8 +933,6 @@ components:
             $ref: '#/components/schemas/PlaylistItem'
         note:
           $ref: '#/components/schemas/Note'
-        schedule:
-          $ref: '#/components/schemas/PlaylistSchedule'
         signatures:
           type: array
           description: v1.1+ multisig array
@@ -975,13 +959,6 @@ components:
           type: number
         note:
           $ref: '#/components/schemas/Note'
-        displayAt:
-          type: string
-          description: >-
-            Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
-            Same accepted forms as PlaylistItemInput.displayAt (local datetime or RFC 3339 date-time with
-            Z/colon offset; date-only not accepted).
-          example: "2026-07-21T00:00:00"
         # Additional fields...
 
     PlaylistGroupInput:
@@ -1294,22 +1271,6 @@ components:
           format: float
           description: Display duration in seconds (defaults to 20 when omitted)
           example: 15.0
-
-    PlaylistSchedule:
-      type: object
-      description: >-
-        Playlist-level scheduling controls (DP-1 Playlist Extension §3.5). When byDisplayAt is true,
-        playback includes only eligible items: the current release (latest past displayAt instant) plus
-        items without displayAt. When absent or byDisplayAt is false, core behavior applies (play all
-        items). Persisted only when extensions are enabled; omitted from the signed document otherwise.
-        This feed stores the fields; it does not compute eligibility.
-      properties:
-        byDisplayAt:
-          type: boolean
-          description: >-
-            When true, playback MUST include only eligible items per Playlist Extension §3.5.3.
-            When false or omitted, play all items and ignore displayAt for filtering.
-          example: true
 
   responses:
     BadRequest:

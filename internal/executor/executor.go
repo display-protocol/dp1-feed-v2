@@ -207,68 +207,11 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 }
 
 // parseValidatedPlaylist runs dp1-go ParseAndValidate for core or core+extension, returning the typed playlist.
-// When extensions are off, strip schedule/displayAt after core validation: the core schema allows additional
-// properties, so feed-authored validate-then-persist paths would otherwise store unvalidated scheduling data.
 func (e *impl) parseValidatedPlaylist(raw []byte) (*playlist.Playlist, error) {
-	var (
-		pl  *playlist.Playlist
-		err error
-	)
-	if e.extensionsEnabled {
-		pl, err = e.dp1.ValidatePlaylistWithExtension(raw)
-	} else {
-		pl, err = e.dp1.ValidatePlaylist(raw)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !e.extensionsEnabled {
-		stripPlaylistScheduling(pl)
-	}
-	return pl, nil
-}
-
-// parseValidatedRemotePlaylist validates third-party playlist JSON fetched during group/channel ingest.
-// Core-only feeds must not mutate remote signed documents after validation: stripping extension fields would
-// leave signatures attached to a different payload. Feed-authored create/replace/update paths strip before signing.
-func (e *impl) parseValidatedRemotePlaylist(raw []byte) (*playlist.Playlist, error) {
 	if e.extensionsEnabled {
 		return e.dp1.ValidatePlaylistWithExtension(raw)
 	}
-	pl, err := e.dp1.ValidatePlaylist(raw)
-	if err != nil {
-		return nil, err
-	}
-	if hasPlaylistScheduling(pl) {
-		return nil, fmt.Errorf("playlist extension scheduling fields require extensions enabled")
-	}
-	return pl, nil
-}
-
-func hasPlaylistScheduling(p *playlist.Playlist) bool {
-	if p == nil {
-		return false
-	}
-	if p.Schedule != nil {
-		return true
-	}
-	for _, item := range p.Items {
-		if item.DisplayAt != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// stripPlaylistScheduling clears Playlist Extension §3.5 fields so core-only deployments never persist them.
-func stripPlaylistScheduling(p *playlist.Playlist) {
-	if p == nil {
-		return
-	}
-	p.Schedule = nil
-	for i := range p.Items {
-		p.Items[i].DisplayAt = ""
-	}
+	return e.dp1.ValidatePlaylist(raw)
 }
 
 // buildPlaylistDocument maps API input into a playlist.Playlist and marshals JSON.
@@ -282,12 +225,6 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	for i := range items {
 		if strings.TrimSpace(items[i].ID) == "" {
 			items[i].ID = uuid.New().String()
-		}
-		// displayAt is Playlist Extension §3.5.2. When extensions are off we validate with the
-		// core schema only (additionalProperties allowed), so persist would skip format checks.
-		// Drop the field here so core-only deployments cannot store unvalidated scheduling data.
-		if !e.extensionsEnabled {
-			items[i].DisplayAt = ""
 		}
 	}
 	p := playlist.Playlist{
@@ -303,12 +240,6 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	}
 	if req.Note != nil {
 		p.Note = req.Note
-	}
-	// schedule.byDisplayAt opts playback into displayAt eligibility filtering (Playlist Extension §3.5).
-	// Absent schedule keeps core playback behavior. Same as displayAt: only copy when extensions are
-	// enabled so core-only feeds never persist unvalidated schedule.
-	if e.extensionsEnabled && req.Schedule != nil {
-		p.Schedule = req.Schedule
 	}
 	if req.Summary != "" {
 		p.Summary = req.Summary
@@ -478,7 +409,6 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		Defaults:     existing.Defaults,
 		DynamicQuery: existing.DynamicQuery,
 		Note:         existing.Note,
-		Schedule:     existing.Schedule,
 	}
 
 	if req.DPVersion != nil {
@@ -510,9 +440,6 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	}
 	if req.Note != nil {
 		mergedReq.Note = req.Note
-	}
-	if req.Schedule != nil {
-		mergedReq.Schedule = req.Schedule
 	}
 	if len(req.Signatures) > 0 {
 		mergedReq.Signatures = req.Signatures
