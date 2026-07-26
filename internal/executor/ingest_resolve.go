@@ -64,12 +64,12 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		return store.IngestedPlaylist{}, fmt.Errorf("external playlist %q: fetcher is not configured (set playlist.fetch_* and use absolute URLs)", uri)
 	}
 
-	// Remote: GET body, validate with same rules as operator-authored playlists, then read id/slug from parsed playlist.
+	// Remote: GET body, validate without mutating third-party signed payloads, then read id/slug from parsed playlist.
 	body, err := e.fetch.FetchPlaylist(ctx, uri)
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("fetch %q: %w", uri, err)
 	}
-	p, err := e.parseValidatedPlaylist(body)
+	p, err := e.parseValidatedRemotePlaylist(body)
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
 	}

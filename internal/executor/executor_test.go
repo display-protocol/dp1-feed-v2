@@ -1132,49 +1132,59 @@ func (s stubFetcher) FetchPlaylist(_ context.Context, _ string) ([]byte, error) 
 	return s.body, s.err
 }
 
-// TestCreatePlaylistGroup_extensionsDisabled_stripsIngestedScheduleAndDisplayAt ensures remote
-// ingest under core-only validation does not persist unvalidated §3.5 scheduling fields.
-func TestCreatePlaylistGroup_extensionsDisabled_stripsIngestedScheduleAndDisplayAt(t *testing.T) {
+// TestCreatePlaylistGroup_extensionsDisabled_rejectsIngestedScheduleAndDisplayAt ensures core-only
+// ingest does not mutate third-party signed documents after validation, which would invalidate signatures.
+func TestCreatePlaylistGroup_extensionsDisabled_rejectsIngestedScheduleAndDisplayAt(t *testing.T) {
 	t.Parallel()
-	ctrl := gomock.NewController(t)
-	mockStore := mocks.NewMockStore(ctrl)
-	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
-	plID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-	remoteRaw := []byte(`{"dpVersion":"1.1.0","id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"remote-daily","title":"Daily"}`)
-	parsedRemote := playlist.Playlist{
-		DPVersion: "1.1.0",
-		ID:        plID.String(),
-		Slug:      "remote-daily",
-		Title:     "Daily",
-		Schedule:  &dp1playlists.Schedule{ByDisplayAt: true},
-		Items: []playlist.PlaylistItem{
-			{Source: "https://cdn.example.com/day1.html", DisplayAt: "not-a-date"},
+	tests := map[string]playlist.Playlist{
+		"schedule_and_displayAt": {
+			Schedule: &dp1playlists.Schedule{ByDisplayAt: true},
+			Items: []playlist.PlaylistItem{
+				{Source: "https://cdn.example.com/day1.html", DisplayAt: "not-a-date"},
+			},
+		},
+		"whitespace_displayAt": {
+			Items: []playlist.PlaylistItem{
+				{Source: "https://cdn.example.com/day1.html", DisplayAt: "   "},
+			},
 		},
 	}
-	signed := []byte(`{"kind":"signed-group"}`)
-	wantGroup := mustDecodeGroup(t, signed)
-	gomock.InOrder(
-		mockDP1.EXPECT().ValidatePlaylist(remoteRaw).Return(&parsedRemote, nil),
-		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
-		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&wantGroup, nil),
-	)
-	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
-		if len(in.Playlists) != 1 {
-			t.Fatalf("ingested playlists: want 1, got %d", len(in.Playlists))
-		}
-		body := in.Playlists[0].Body
-		if body.Schedule != nil {
-			t.Fatalf("extensions off must strip ingested schedule, got %+v", body.Schedule)
-		}
-		if len(body.Items) != 1 || body.Items[0].DisplayAt != "" {
-			t.Fatalf("extensions off must strip ingested displayAt, got %+v", body.Items)
-		}
-	}).Return(nil)
 
-	e := executor.New(mockStore, mockDP1, false, stubFetcher{body: remoteRaw}, testPublicBase)
-	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/daily.json")); err != nil {
-		t.Fatal(err)
+	for name, parsedRemote := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+			plID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			remoteRaw := []byte(`{"dpVersion":"1.1.0","id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"remote-daily","title":"Daily"}`)
+			parsedRemote.DPVersion = "1.1.0"
+			parsedRemote.ID = plID.String()
+			parsedRemote.Slug = "remote-daily"
+			parsedRemote.Title = "Daily"
+			parsedRemote.Signatures = []playlist.Signature{
+				{
+					Alg:         "ed25519",
+					Kid:         "did:key:zRemote",
+					Ts:          "2026-07-21T00:00:00Z",
+					PayloadHash: "sha256:remote",
+					Role:        playlist.RoleCurator,
+					Sig:         "remote-signature",
+				},
+			}
+			mockDP1.EXPECT().ValidatePlaylist(remoteRaw).Return(&parsedRemote, nil)
+
+			e := executor.New(mockStore, mockDP1, false, stubFetcher{body: remoteRaw}, testPublicBase)
+			_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/daily.json"))
+			if err == nil {
+				t.Fatal("expected extension scheduling rejection")
+			}
+			if !strings.Contains(err.Error(), "extensions enabled") {
+				t.Fatalf("expected extensions-enabled error, got %v", err)
+			}
+		})
 	}
 }
 
