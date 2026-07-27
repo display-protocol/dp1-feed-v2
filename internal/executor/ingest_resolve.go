@@ -57,9 +57,6 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		if err != nil {
 			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
 		}
-		if err := e.rejectDisplayAtWhenExtensionsDisabled(rec.Body); err != nil {
-			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
-		}
 		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Body: rec.Body}, nil
 	}
 
@@ -78,9 +75,6 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	}
 	if p == nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: nil parsed document", uri)
-	}
-	if err := e.rejectDisplayAtWhenExtensionsDisabled(*p); err != nil {
-		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
 	}
 	id, err := uuid.Parse(strings.TrimSpace(p.ID))
 	if err != nil {

@@ -917,10 +917,11 @@ components:
           type: string
           description: >-
             Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
-            Accepted forms: local datetime with seconds and no timezone (2026-07-21T00:00:00, display-locale
-            local), or absolute RFC 3339 date-time with Z or colon offset (e.g. +07:00). Date-only
-            (YYYY-MM-DD) and compact offset without colon are not accepted. Stored as item metadata;
-            this feed does not compute playback eligibility.
+            When playlist extension validation is enabled, accepted forms are local datetime with seconds
+            and no timezone (2026-07-21T00:00:00, display-locale local), or absolute RFC 3339 date-time
+            with Z or colon offset (e.g. +07:00). Date-only (YYYY-MM-DD) and compact offset without
+            colon are not accepted by that extension validator. Stored as item metadata; this feed does
+            not compute playback eligibility.
           example: "2026-07-21T00:00:00"
 
     Playlist:
@@ -972,8 +973,7 @@ components:
           type: string
           description: >-
             Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
-            Same accepted forms as PlaylistItemInput.displayAt (local datetime or RFC 3339 date-time with
-            Z/colon offset; date-only not accepted).
+            Under playlist extension validation, same accepted forms as PlaylistItemInput.displayAt.
           example: "2026-07-21T00:00:00"
         # Additional fields...
 

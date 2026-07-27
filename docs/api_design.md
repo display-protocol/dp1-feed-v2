@@ -56,7 +56,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 **Playlists extension fields:**
 
 - **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
-- **`displayAt`** — optional ISO 8601 datetime on a playlist item (same level as `source`, not inside `display`). Accepted wire forms per §3.5.2: local datetime with seconds and no timezone (`2026-07-21T00:00:00`, display-locale local), or absolute RFC 3339 date-time with `Z`/colon offset. Date-only (`YYYY-MM-DD`) and compact offset without colon are **not** accepted. This feed stores and returns the item metadata; it does not compute playback eligibility. Playlist writes and group/channel ingest containing `displayAt` fail with `validation_error` when playlist extensions are disabled for the deployment.
+- **`displayAt`** — optional ISO 8601 datetime on a playlist item (same level as `source`, not inside `display`). Under playlist extension validation, accepted wire forms per §3.5.2 are local datetime with seconds and no timezone (`2026-07-21T00:00:00`, display-locale local), or absolute RFC 3339 date-time with `Z`/colon offset. Date-only (`YYYY-MM-DD`) and compact offset without colon are **not** accepted by that extension validator. This feed stores and returns the item metadata; it does not compute playback eligibility.
 
 ---
 

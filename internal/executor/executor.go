@@ -214,18 +214,6 @@ func (e *impl) parseValidatedPlaylist(raw []byte) (*playlist.Playlist, error) {
 	return e.dp1.ValidatePlaylist(raw)
 }
 
-func (e *impl) rejectDisplayAtWhenExtensionsDisabled(p playlist.Playlist) error {
-	if e.extensionsEnabled {
-		return nil
-	}
-	for i, item := range p.Items {
-		if item.DisplayAt != nil {
-			return fmt.Errorf("%w: playlist item %d displayAt requires extensions", dp1.ErrValidation, i)
-		}
-	}
-	return nil
-}
-
 // buildPlaylistDocument maps API input into a playlist.Playlist and marshals JSON.
 // On create, pass the signing time. On replace/update, pass the timestamp parsed from the stored body JSON "created" (not playlists.created_at).
 func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.UUID, slug string, createdAt time.Time) ([]byte, error) {
@@ -267,9 +255,6 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	}
 	if len(req.Signatures) > 0 {
 		p.Signatures = req.Signatures
-	}
-	if err := e.rejectDisplayAtWhenExtensionsDisabled(p); err != nil {
-		return nil, err
 	}
 	return json.Marshal(&p)
 }

@@ -73,14 +73,6 @@ func displayAtValue(item playlist.PlaylistItem) string {
 	return *item.DisplayAt
 }
 
-type staticPlaylistFetcher struct {
-	body []byte
-}
-
-func (f staticPlaylistFetcher) FetchPlaylist(context.Context, string) ([]byte, error) {
-	return f.body, nil
-}
-
 func TestAPIInfo(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -217,34 +209,6 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	}
 	if check.Items[2].DisplayAt != nil {
 		t.Fatalf("evergreen item should omit displayAt, got %v", check.Items[2].DisplayAt)
-	}
-}
-
-func TestCreatePlaylist_rejectsItemDisplayAtWhenExtensionsDisabled(t *testing.T) {
-	t.Parallel()
-	ctrl := gomock.NewController(t)
-	tests := []struct {
-		name      string
-		displayAt string
-	}{
-		{name: "timestamp", displayAt: "2026-07-21T00:00:00"},
-		{name: "whitespace", displayAt: "   "},
-		{name: "empty", displayAt: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := validCreateReq()
-			req.Items = []playlist.PlaylistItem{
-				{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr(tt.displayAt)},
-			}
-
-			e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-			_, err := e.CreatePlaylist(context.Background(), req)
-			if !executor.IsDP1ValidationError(err) {
-				t.Fatalf("want validation error, got %v", err)
-			}
-		})
 	}
 }
 
@@ -1183,53 +1147,6 @@ func TestCreatePlaylistGroup_externalURINoFetcher(t *testing.T) {
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
 	if err == nil || !strings.Contains(err.Error(), "fetcher is not configured") {
 		t.Fatalf("got %v", err)
-	}
-}
-
-func TestCreatePlaylistGroup_rejectsRemoteDisplayAtWhenExtensionsDisabled(t *testing.T) {
-	t.Parallel()
-	ctrl := gomock.NewController(t)
-	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
-	raw := []byte(`{"id":"44444444-4444-4444-4444-444444444444","slug":"remote","title":"Remote","items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
-	parsed := mustDecodePlaylist(t, raw)
-	mockDP1.EXPECT().ValidatePlaylist(raw).Return(&parsed, nil)
-
-	e := executor.New(
-		mocks.NewMockStore(ctrl),
-		mockDP1,
-		false,
-		staticPlaylistFetcher{body: raw},
-		testPublicBase,
-	)
-	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
-	if !executor.IsDP1ValidationError(err) {
-		t.Fatalf("want validation error, got %v", err)
-	}
-}
-
-func TestCreatePlaylistGroup_rejectsLocalDisplayAtWhenExtensionsDisabled(t *testing.T) {
-	t.Parallel()
-	ctrl := gomock.NewController(t)
-	mockStore := mocks.NewMockStore(ctrl)
-	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
-	body := playlist.Playlist{
-		ID:    id.String(),
-		Slug:  "local-daily",
-		Title: "Local Daily",
-		Items: []playlist.PlaylistItem{
-			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
-		},
-	}
-	mockStore.EXPECT().GetPlaylist(gomock.Any(), "local-daily").Return(&store.PlaylistRecord{
-		ID:   id,
-		Slug: "local-daily",
-		Body: body,
-	}, nil)
-
-	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
-	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("local-daily")))
-	if !executor.IsDP1ValidationError(err) {
-		t.Fatalf("want validation error, got %v", err)
 	}
 }
 
