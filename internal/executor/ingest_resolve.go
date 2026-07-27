@@ -57,7 +57,7 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		if err != nil {
 			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
 		}
-		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Body: sanitizePlaylist(rec.Body)}, nil
+		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Body: rec.Body}, nil
 	}
 
 	if e.fetch == nil {
@@ -76,6 +76,9 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	if p == nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: nil parsed document", uri)
 	}
+	if err := e.rejectDisplayAtWhenExtensionsDisabled(*p); err != nil {
+		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
+	}
 	id, err := uuid.Parse(strings.TrimSpace(p.ID))
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: id: %w", uri, err)
@@ -86,7 +89,7 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	} else {
 		slug = slugify(slug)
 	}
-	return store.IngestedPlaylist{ID: id, Slug: slug, Body: sanitizePlaylist(*p)}, nil
+	return store.IngestedPlaylist{ID: id, Slug: slug, Body: *p}, nil
 }
 
 // resolvePlaylistURIs resolves every URI in uris. The returned slice has the same length and order

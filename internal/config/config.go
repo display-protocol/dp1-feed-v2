@@ -122,7 +122,7 @@ func defaultConfig() *Config {
 			IdleTimeout:  120 * time.Second,
 		},
 		Database: DatabaseConfig{
-			URL:             "postgres://postgres:postgres@localhost:5432/dp1_feed?sslmode=disable",
+			URL:             "postgres://postgres:postgres@localhost:5432/dp1_feed?sslmode=disable", // #nosec G101 -- local development default; production config comes from YAML/env.
 			MaxConns:        16,
 			MinConns:        2,
 			MaxConnLifetime: time.Hour,

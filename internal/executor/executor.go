@@ -214,6 +214,18 @@ func (e *impl) parseValidatedPlaylist(raw []byte) (*playlist.Playlist, error) {
 	return e.dp1.ValidatePlaylist(raw)
 }
 
+func (e *impl) rejectDisplayAtWhenExtensionsDisabled(p playlist.Playlist) error {
+	if e.extensionsEnabled {
+		return nil
+	}
+	for i, item := range p.Items {
+		if item.DisplayAt != "" {
+			return fmt.Errorf("%w: playlist item %d displayAt requires extensions", dp1.ErrValidation, i)
+		}
+	}
+	return nil
+}
+
 // buildPlaylistDocument maps API input into a playlist.Playlist and marshals JSON.
 // On create, pass the signing time. On replace/update, pass the timestamp parsed from the stored body JSON "created" (not playlists.created_at).
 func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.UUID, slug string, createdAt time.Time) ([]byte, error) {
@@ -255,6 +267,9 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	}
 	if len(req.Signatures) > 0 {
 		p.Signatures = req.Signatures
+	}
+	if err := e.rejectDisplayAtWhenExtensionsDisabled(p); err != nil {
+		return nil, err
 	}
 	return json.Marshal(&p)
 }
@@ -306,21 +321,13 @@ func parseDocumentCreated(s string) (time.Time, error) {
 	return t, nil
 }
 
-// sanitizePlaylist removes playlist-level scheduling metadata that dp1-go can still parse
-// from external or previously stored documents. Item-level displayAt remains supported.
-func sanitizePlaylist(p playlist.Playlist) playlist.Playlist {
-	p.Schedule = nil
-	return p
-}
-
 // GetPlaylist returns the stored playlist document for id or slug.
 func (e *impl) GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Playlist, error) {
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
 	}
-	body := sanitizePlaylist(rec.Body)
-	return &body, nil
+	return &rec.Body, nil
 }
 
 // ListPlaylists returns one page of stored playlist documents.
@@ -341,7 +348,7 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 	}
 	out := make([]playlist.Playlist, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, sanitizePlaylist(r.Body))
+		out = append(out, r.Body)
 	}
 	return out, nextCur, nil
 }
