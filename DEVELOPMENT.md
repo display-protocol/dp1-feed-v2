@@ -12,11 +12,13 @@ Welcome! This guide helps you understand and contribute to DP-1 Feed.
    git clone https://github.com/your-org/dp1-feed-v2.git
    cd dp1-feed-v2
 
-   # Clone dp1-go next to this repo (required for local development)
+   # Optional: clone dp1-go next to this repo only if you need a local `replace` for dp1-go edits
    cd ..
    git clone https://github.com/display-protocol/dp1-go.git
    cd dp1-feed-v2
    ```
+
+   Default builds (including Docker Compose) resolve `dp1-go` from the version in `go.mod`.
 
 2. **Install Go dependencies**
 
@@ -255,7 +257,7 @@ export DP1_FEED_LOG_LEVEL=debug
 ### Common Issues
 
 **"cannot find package dp1-go"**  
-Make sure `dp1-go` is cloned next to this repo. The `go.mod` uses a `replace` directive to reference it locally.
+Default builds resolve `dp1-go` from the version in `go.mod` (module proxy / GitHub). For local edits to `dp1-go`, clone it next to this repo and add a `replace` directive in `go.mod` pointing at `../dp1-go`.
 
 **"connection refused" to PostgreSQL**  
 For Docker: `make up-infra` or `make up`. For local `go run`: ensure Postgres is running and `database.url` in `config/config.yaml` points at `localhost`.

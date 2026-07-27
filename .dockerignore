@@ -1,0 +1,18 @@
+# Keep the build context small and avoid leaking local secrets into the image.
+.git
+.github
+.cursor
+bin
+cov.html
+coverage*
+*.md
+!README.md
+config/.env
+config/config.yaml
+**/testdata
+**/*_test.go
+**/mocks
+scripts
+prompts
+PLANS.md
+AGENTS.md

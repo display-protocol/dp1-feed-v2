@@ -17,8 +17,8 @@ services:
 
   api:
     build:
-      context: ..
-      dockerfile: dp1-feed-v2/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8787:8787"
     env_file:

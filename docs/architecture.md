@@ -132,6 +132,8 @@ make clean    # teardown volumes/networks + bin/
 
 API only after a prior `make up` build: `make run` / `make stop`. Infra only: `make up-infra` / `make down-infra`. Equivalent: `docker compose up -d --build`.
 
+Compose builds the API image from this repository root (`Dockerfile` context `.`). `dp1-go` is pulled via `go.mod`; no sibling-directory layout or symlink is required.
+
 ### Production binary
 
 ```bash
