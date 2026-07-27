@@ -130,6 +130,83 @@ func TestCreatePlaylist_success_extensionValidation(t *testing.T) {
 	}
 }
 
+func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	req := &models.PlaylistCreateRequest{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
+			{Source: "https://cdn.example.com/intro.html"},
+		},
+	}
+
+	var preSign []byte
+	signed := []byte(`{"dpVersion":"1.1.0","title":"Daily"}`)
+	parsed := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
+			{Source: "https://cdn.example.com/intro.html"},
+		},
+	}
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, body *playlist.Playlist) error {
+			if body.Schedule != nil {
+				t.Fatalf("playlist schedule should not be set by item displayAt: %+v", body.Schedule)
+			}
+			if len(body.Items) != 3 {
+				t.Fatalf("store body items: want 3, got %d", len(body.Items))
+			}
+			if body.Items[0].DisplayAt != "2026-07-21T00:00:00" || body.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
+				t.Fatalf("store body displayAt: %+v", body.Items)
+			}
+			if body.Items[2].DisplayAt != "" {
+				t.Fatalf("evergreen store item should omit displayAt, got %q", body.Items[2].DisplayAt)
+			}
+			return nil
+		})
+
+	e := executor.New(mockStore, mockDP1, true, nil, "")
+	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if check.Schedule != nil {
+		t.Fatalf("playlist schedule should not be emitted, got %+v", check.Schedule)
+	}
+	if len(check.Items) != 3 {
+		t.Fatalf("items: want 3, got %d", len(check.Items))
+	}
+	if check.Items[0].DisplayAt != "2026-07-21T00:00:00" {
+		t.Fatalf("item0 displayAt: got %q", check.Items[0].DisplayAt)
+	}
+	if check.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
+		t.Fatalf("item1 displayAt: got %q", check.Items[1].DisplayAt)
+	}
+	if check.Items[2].DisplayAt != "" {
+		t.Fatalf("evergreen item should omit displayAt, got %q", check.Items[2].DisplayAt)
+	}
+}
+
 func TestCreatePlaylist_signError(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -659,6 +736,67 @@ func TestUpdatePlaylist_preservesPlaylistLevelNote(t *testing.T) {
 	}
 	if check.Note == nil || check.Note.Text != noteText {
 		t.Fatalf("pre-sign document should keep playlist note: got %+v", check.Note)
+	}
+}
+
+func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
+	itemID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+	existingBody := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Slug:      "daily",
+		Created:   created.UTC().Format(time.RFC3339Nano),
+		Items: []playlist.PlaylistItem{
+			{ID: itemID.String(), Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+		},
+	}
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
+		ID:        id,
+		Slug:      "daily",
+		Body:      existingBody,
+		CreatedAt: created,
+	}, nil)
+
+	var preSign []byte
+	signed := []byte(`{"dpVersion":"1.1.0"}`)
+	parsed := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily Updated",
+		Slug:      "daily",
+		Created:   existingBody.Created,
+		Items:     existingBody.Items,
+	}
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, "")
+	newTitle := "Daily Updated"
+	if _, err := e.UpdatePlaylist(context.Background(), "daily", &models.PlaylistUpdateRequest{Title: &newTitle}); err != nil {
+		t.Fatal(err)
+	}
+
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if check.Schedule != nil {
+		t.Fatalf("playlist schedule should not be emitted, got %+v", check.Schedule)
+	}
+	if len(check.Items) != 1 || check.Items[0].DisplayAt != "2026-07-21T00:00:00" {
+		t.Fatalf("PATCH should keep item displayAt, got %+v", check.Items)
 	}
 }
 
