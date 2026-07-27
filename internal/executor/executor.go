@@ -211,26 +211,7 @@ func (e *impl) parseValidatedPlaylist(raw []byte) (*playlist.Playlist, error) {
 	if e.extensionsEnabled {
 		return e.dp1.ValidatePlaylistWithExtension(raw)
 	}
-	pl, err := e.dp1.ValidatePlaylist(raw)
-	if err != nil {
-		return nil, err
-	}
-	if err := rejectDisplayAtWhenExtensionsDisabled(pl); err != nil {
-		return nil, err
-	}
-	return pl, nil
-}
-
-func rejectDisplayAtWhenExtensionsDisabled(pl *playlist.Playlist) error {
-	if pl == nil {
-		return nil
-	}
-	for i, item := range pl.Items {
-		if item.DisplayAt != nil && strings.TrimSpace(*item.DisplayAt) != "" {
-			return fmt.Errorf("%w: playlist item %d displayAt requires extensions enabled", dp1.ErrValidation, i)
-		}
-	}
-	return nil
+	return e.dp1.ValidatePlaylist(raw)
 }
 
 // buildPlaylistDocument maps API input into a playlist.Playlist and marshals JSON.

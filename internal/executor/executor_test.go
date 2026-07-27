@@ -212,9 +212,10 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	}
 }
 
-func TestCreatePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
+func TestCreatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	req := validCreateReq()
@@ -227,11 +228,15 @@ func TestCreatePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
 
-	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, nil, "")
-	_, err := e.CreatePlaylist(context.Background(), req)
-	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
-		t.Fatalf("expected displayAt validation error, got %v", err)
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	out, err := e.CreatePlaylist(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
+		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
 }
 
@@ -650,7 +655,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 	}
 }
 
-func TestReplacePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
+func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
@@ -674,11 +679,15 @@ func TestReplacePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	_, err := e.ReplacePlaylist(context.Background(), "daily", req)
-	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
-		t.Fatalf("expected displayAt validation error, got %v", err)
+	out, err := e.ReplacePlaylist(context.Background(), "daily", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
+		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
 }
 
@@ -871,7 +880,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 	}
 }
 
-func TestUpdatePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
+func TestUpdatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
@@ -899,14 +908,18 @@ func TestUpdatePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
 
 	items := []playlist.PlaylistItem{
 		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 	}
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	_, err := e.UpdatePlaylist(context.Background(), "daily", &models.PlaylistUpdateRequest{Items: items})
-	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
-		t.Fatalf("expected displayAt validation error, got %v", err)
+	out, err := e.UpdatePlaylist(context.Background(), "daily", &models.PlaylistUpdateRequest{Items: items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
+		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
 }
 
@@ -1257,10 +1270,11 @@ func TestCreatePlaylistGroup_localPlaylistNotFound(t *testing.T) {
 	}
 }
 
-func TestCreatePlaylistGroup_rejectsLocalDisplayAtWhenExtensionsDisabled(t *testing.T) {
+func TestCreatePlaylistGroup_preservesLocalDisplayAtWithCoreValidation(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
@@ -1275,11 +1289,21 @@ func TestCreatePlaylistGroup_rejectsLocalDisplayAtWhenExtensionsDisabled(t *test
 			},
 		},
 	}, nil)
+	signed := []byte(`{"signed":true}`)
+	parsedGroup := mustDecodeGroup(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
+	)
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+		if len(in.Playlists) != 1 || displayAtValue(in.Playlists[0].Body.Items[0]) != "2026-07-21T00:00:00" {
+			t.Fatalf("expected local displayAt to be preserved, got %+v", in.Playlists)
+		}
+	}).Return(nil)
 
-	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
-	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("daily")))
-	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "local playlist") || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
-		t.Fatalf("expected local displayAt validation error, got %v", err)
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("daily"))); err != nil {
+		t.Fatal(err)
 	}
 }
 
