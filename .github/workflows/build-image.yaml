@@ -30,12 +30,6 @@ jobs:
         with:
           path: dp1-feed-v2
 
-      - name: Checkout dp1-go
-        uses: actions/checkout@v5
-        with:
-          repository: display-protocol/dp1-go
-          path: dp1-go
-
       - name: Determine image tag
         id: determine-tag
         run: |
@@ -74,7 +68,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./dp1-feed-v2
           file: ./dp1-feed-v2/Dockerfile
           platforms: linux/amd64
           push: true

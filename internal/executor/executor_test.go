@@ -144,6 +144,7 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
 			{Source: "https://cdn.example.com/intro.html"},
 		},
+		Schedule: &dp1playlists.Schedule{ByDisplayAt: true},
 	}
 
 	var preSign []byte
@@ -156,6 +157,7 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
 			{Source: "https://cdn.example.com/intro.html"},
 		},
+		Schedule: &dp1playlists.Schedule{ByDisplayAt: true},
 	}
 	gomock.InOrder(
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
@@ -166,8 +168,8 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	)
 	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, body *playlist.Playlist) error {
-			if body.Schedule != nil {
-				t.Fatalf("playlist schedule should not be set by item displayAt: %+v", body.Schedule)
+			if body.Schedule == nil || !body.Schedule.ByDisplayAt {
+				t.Fatalf("store body schedule: %+v", body.Schedule)
 			}
 			if len(body.Items) != 3 {
 				t.Fatalf("store body items: want 3, got %d", len(body.Items))
@@ -190,8 +192,8 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	if err := json.Unmarshal(preSign, &check); err != nil {
 		t.Fatalf("pre-sign JSON: %v", err)
 	}
-	if check.Schedule != nil {
-		t.Fatalf("playlist schedule should not be emitted, got %+v", check.Schedule)
+	if check.Schedule == nil || !check.Schedule.ByDisplayAt {
+		t.Fatalf("pre-sign schedule: %+v", check.Schedule)
 	}
 	if len(check.Items) != 3 {
 		t.Fatalf("items: want 3, got %d", len(check.Items))
@@ -547,23 +549,35 @@ func TestReplacePlaylist_success(t *testing.T) {
 		Body: mustDecodePlaylist(t, existing),
 	}, nil)
 
+	var preSign []byte
 	signed := []byte(`{"replaced":true}`)
 	parsed := mustDecodePlaylist(t, signed)
 	gomock.InOrder(
-		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
-		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
 	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(nil)
 
-	e := executor.New(mockStore, mockDP1, false, nil, "")
+	e := executor.New(mockStore, mockDP1, true, nil, "")
 	req := validCreateReq()
 	req.Title = "New title"
+	req.Schedule = &dp1playlists.Schedule{ByDisplayAt: true}
 	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out == nil || !reflect.DeepEqual(*out, parsed) {
 		t.Fatalf("out mismatch")
+	}
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if check.Schedule == nil || !check.Schedule.ByDisplayAt {
+		t.Fatalf("replace should keep schedule.byDisplayAt, got %+v", check.Schedule)
 	}
 }
 
@@ -756,6 +770,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 		Items: []playlist.PlaylistItem{
 			{ID: itemID.String(), Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
 		},
+		Schedule: &dp1playlists.Schedule{ByDisplayAt: true},
 	}
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
 		ID:        id,
@@ -772,6 +787,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 		Slug:      "daily",
 		Created:   existingBody.Created,
 		Items:     existingBody.Items,
+		Schedule:  existingBody.Schedule,
 	}
 	gomock.InOrder(
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
@@ -792,8 +808,8 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 	if err := json.Unmarshal(preSign, &check); err != nil {
 		t.Fatalf("pre-sign JSON: %v", err)
 	}
-	if check.Schedule != nil {
-		t.Fatalf("playlist schedule should not be emitted, got %+v", check.Schedule)
+	if check.Schedule == nil || !check.Schedule.ByDisplayAt {
+		t.Fatalf("PATCH should keep schedule.byDisplayAt, got %+v", check.Schedule)
 	}
 	if len(check.Items) != 1 || check.Items[0].DisplayAt != "2026-07-21T00:00:00" {
 		t.Fatalf("PATCH should keep item displayAt, got %+v", check.Items)

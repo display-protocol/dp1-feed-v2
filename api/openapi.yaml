@@ -825,15 +825,8 @@ components:
           type: object
         note:
           $ref: '#/components/schemas/Note'
-        displayAt:
-          type: string
-          description: >-
-            Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
-            Accepted forms: local datetime with seconds and no timezone (2026-07-21T00:00:00, display-locale
-            local), or absolute RFC 3339 date-time with Z or colon offset (e.g. +07:00). Date-only
-            (YYYY-MM-DD) and compact offset without colon are not accepted. Stored as item metadata;
-            this feed does not compute playback eligibility.
-          example: "2026-07-21T00:00:00"
+        schedule:
+          $ref: '#/components/schemas/Schedule'
         dynamicQuery:
           type: object
         id:
@@ -875,6 +868,8 @@ components:
             $ref: '#/components/schemas/PlaylistItemInput'
         note:
           $ref: '#/components/schemas/Note'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
         curators:
           type: array
           items:
@@ -922,6 +917,15 @@ components:
           type: object
         note:
           $ref: '#/components/schemas/Note'
+        displayAt:
+          type: string
+          description: >-
+            Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
+            Accepted forms: local datetime with seconds and no timezone (2026-07-21T00:00:00, display-locale
+            local), or absolute RFC 3339 date-time with Z or colon offset (e.g. +07:00). Date-only
+            (YYYY-MM-DD) and compact offset without colon are not accepted. Stored as item metadata;
+            this feed does not compute playback eligibility.
+          example: "2026-07-21T00:00:00"
 
     Playlist:
       type: object
@@ -942,6 +946,8 @@ components:
             $ref: '#/components/schemas/PlaylistItem'
         note:
           $ref: '#/components/schemas/Note'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
         signatures:
           type: array
           description: v1.1+ multisig array
@@ -1287,6 +1293,18 @@ components:
           format: float
           description: Display duration in seconds (defaults to 20 when omitted)
           example: 15.0
+
+    Schedule:
+      type: object
+      description: Playlist-level scheduling controls for the playlists extension
+      properties:
+        byDisplayAt:
+          type: boolean
+          description: >-
+            When true, display control layers filter playlist items to the active set for the
+            current time using item-level displayAt. This feed stores and returns the setting;
+            it does not compute playback eligibility.
+          example: true
 
   responses:
     BadRequest:
