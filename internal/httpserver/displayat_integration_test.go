@@ -39,8 +39,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "displayAt integration setup: %v\n", err)
 		os.Exit(1)
 	}
-	defer displayAtTestProvider.Close()
-	os.Exit(m.Run())
+	code := m.Run()
+	displayAtTestProvider.Close()
+	os.Exit(code)
 }
 
 func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
