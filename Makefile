@@ -11,7 +11,7 @@ help:
 	@echo "  make lint              - golangci-lint (see .golangci.yml) + markdownlint-cli2 on *.md"
 	@echo "  make lint-fix          - golangci-lint run --fix (format + safe fixes)"
 	@echo "  make test              - unit tests (all packages, -race)"
-	@echo "  make test-integration  - store contract tests (Docker + -tags=integration)"
+	@echo "  make test-integration  - integration tests (Docker + -tags=integration)"
 	@echo "  make test-coverage     - unit + integration tests with merged coverage"
 	@echo "  make verify            - lint + test + test-integration (full local gate)"
 	@echo "  make check             - lint + test (no Docker)"
@@ -60,7 +60,7 @@ test:
 
 .PHONY: test-integration
 test-integration:
-	go test -tags=integration -count=1 -v ./internal/store/...
+	go test -tags=integration -count=1 -v ./internal/store/... ./internal/httpserver
 
 .PHONY: test-coverage
 test-coverage:
@@ -77,8 +77,8 @@ test-coverage:
 	@go test -tags=integration -count=1 -timeout=10m \
 		-coverprofile=coverage-integration.out \
 		-covermode=atomic \
-		-coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg \
-		./internal/store/
+		-coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg,github.com/display-protocol/dp1-feed-v2/internal/httpserver,github.com/display-protocol/dp1-feed-v2/internal/executor \
+		./internal/store/ ./internal/httpserver
 	@echo ""
 	@echo "Merging coverage profiles..."
 	@echo "mode: atomic" > coverage-merged.out
