@@ -62,6 +62,17 @@ func mustDecodeChannel(t *testing.T, raw []byte) channels.Channel {
 	return mustDecodeJSON[channels.Channel](t, raw, "channel")
 }
 
+func stringPtr(s string) *string {
+	return &s
+}
+
+func displayAtValue(item playlist.PlaylistItem) string {
+	if item.DisplayAt == nil {
+		return ""
+	}
+	return *item.DisplayAt
+}
+
 type staticPlaylistFetcher struct {
 	body []byte
 }
@@ -148,8 +159,8 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 		DPVersion: "1.1.0",
 		Title:     "Daily",
 		Items: []playlist.PlaylistItem{
-			{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
-			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+			{Source: "https://cdn.example.com/day2.html", DisplayAt: stringPtr("2026-07-22T00:00:00Z")},
 			{Source: "https://cdn.example.com/intro.html"},
 		},
 	}
@@ -160,8 +171,8 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 		DPVersion: "1.1.0",
 		Title:     "Daily",
 		Items: []playlist.PlaylistItem{
-			{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
-			{Source: "https://cdn.example.com/day2.html", DisplayAt: "2026-07-22T00:00:00Z"},
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+			{Source: "https://cdn.example.com/day2.html", DisplayAt: stringPtr("2026-07-22T00:00:00Z")},
 			{Source: "https://cdn.example.com/intro.html"},
 		},
 	}
@@ -177,11 +188,11 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 			if len(body.Items) != 3 {
 				t.Fatalf("store body items: want 3, got %d", len(body.Items))
 			}
-			if body.Items[0].DisplayAt != "2026-07-21T00:00:00" || body.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
+			if displayAtValue(body.Items[0]) != "2026-07-21T00:00:00" || displayAtValue(body.Items[1]) != "2026-07-22T00:00:00Z" {
 				t.Fatalf("store body displayAt: %+v", body.Items)
 			}
-			if body.Items[2].DisplayAt != "" {
-				t.Fatalf("evergreen store item should omit displayAt, got %q", body.Items[2].DisplayAt)
+			if body.Items[2].DisplayAt != nil {
+				t.Fatalf("evergreen store item should omit displayAt, got %v", body.Items[2].DisplayAt)
 			}
 			return nil
 		})
@@ -198,14 +209,14 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	if len(check.Items) != 3 {
 		t.Fatalf("items: want 3, got %d", len(check.Items))
 	}
-	if check.Items[0].DisplayAt != "2026-07-21T00:00:00" {
-		t.Fatalf("item0 displayAt: got %q", check.Items[0].DisplayAt)
+	if displayAtValue(check.Items[0]) != "2026-07-21T00:00:00" {
+		t.Fatalf("item0 displayAt: got %v", check.Items[0].DisplayAt)
 	}
-	if check.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
-		t.Fatalf("item1 displayAt: got %q", check.Items[1].DisplayAt)
+	if displayAtValue(check.Items[1]) != "2026-07-22T00:00:00Z" {
+		t.Fatalf("item1 displayAt: got %v", check.Items[1].DisplayAt)
 	}
-	if check.Items[2].DisplayAt != "" {
-		t.Fatalf("evergreen item should omit displayAt, got %q", check.Items[2].DisplayAt)
+	if check.Items[2].DisplayAt != nil {
+		t.Fatalf("evergreen item should omit displayAt, got %v", check.Items[2].DisplayAt)
 	}
 }
 
@@ -218,13 +229,14 @@ func TestCreatePlaylist_rejectsItemDisplayAtWhenExtensionsDisabled(t *testing.T)
 	}{
 		{name: "timestamp", displayAt: "2026-07-21T00:00:00"},
 		{name: "whitespace", displayAt: "   "},
+		{name: "empty", displayAt: ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := validCreateReq()
 			req.Items = []playlist.PlaylistItem{
-				{Source: "https://cdn.example.com/day1.html", DisplayAt: tt.displayAt},
+				{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr(tt.displayAt)},
 			}
 
 			e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
@@ -592,7 +604,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 	req := validCreateReq()
 	req.Title = "New title"
 	req.Items = []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 	}
 	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
 	if err != nil {
@@ -605,7 +617,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 	if err := json.Unmarshal(preSign, &check); err != nil {
 		t.Fatalf("pre-sign JSON: %v", err)
 	}
-	if len(check.Items) != 1 || check.Items[0].DisplayAt != "2026-07-21T00:00:00" {
+	if len(check.Items) != 1 || displayAtValue(check.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("replace should keep item displayAt, got %+v", check.Items)
 	}
 }
@@ -797,7 +809,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 		Slug:      "daily",
 		Created:   created.UTC().Format(time.RFC3339Nano),
 		Items: []playlist.PlaylistItem{
-			{ID: itemID.String(), Source: "https://cdn.example.com/day1.html", DisplayAt: "2026-07-21T00:00:00"},
+			{ID: itemID.String(), Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 		},
 	}
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
@@ -835,7 +847,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 	if err := json.Unmarshal(preSign, &check); err != nil {
 		t.Fatalf("pre-sign JSON: %v", err)
 	}
-	if len(check.Items) != 1 || check.Items[0].DisplayAt != "2026-07-21T00:00:00" {
+	if len(check.Items) != 1 || displayAtValue(check.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("PATCH should keep item displayAt, got %+v", check.Items)
 	}
 }
@@ -1190,6 +1202,32 @@ func TestCreatePlaylistGroup_rejectsRemoteDisplayAtWhenExtensionsDisabled(t *tes
 		testPublicBase,
 	)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
+	if !executor.IsDP1ValidationError(err) {
+		t.Fatalf("want validation error, got %v", err)
+	}
+}
+
+func TestCreatePlaylistGroup_rejectsLocalDisplayAtWhenExtensionsDisabled(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	body := playlist.Playlist{
+		ID:    id.String(),
+		Slug:  "local-daily",
+		Title: "Local Daily",
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+		},
+	}
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "local-daily").Return(&store.PlaylistRecord{
+		ID:   id,
+		Slug: "local-daily",
+		Body: body,
+	}, nil)
+
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("local-daily")))
 	if !executor.IsDP1ValidationError(err) {
 		t.Fatalf("want validation error, got %v", err)
 	}

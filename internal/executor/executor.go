@@ -219,7 +219,7 @@ func (e *impl) rejectDisplayAtWhenExtensionsDisabled(p playlist.Playlist) error 
 		return nil
 	}
 	for i, item := range p.Items {
-		if item.DisplayAt != "" {
+		if item.DisplayAt != nil {
 			return fmt.Errorf("%w: playlist item %d displayAt requires extensions", dp1.ErrValidation, i)
 		}
 	}

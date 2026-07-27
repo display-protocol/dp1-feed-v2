@@ -57,6 +57,9 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		if err != nil {
 			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
 		}
+		if err := e.rejectDisplayAtWhenExtensionsDisabled(rec.Body); err != nil {
+			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
+		}
 		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Body: rec.Body}, nil
 	}
 
