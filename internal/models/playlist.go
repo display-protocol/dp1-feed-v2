@@ -19,7 +19,6 @@ type PlaylistCreateRequest struct {
 	Items     []playlist.PlaylistItem `json:"items" binding:"required"`
 
 	Note         *dp1playlists.Note         `json:"note,omitempty"`
-	Schedule     *dp1playlists.Schedule     `json:"schedule,omitempty"`
 	Curators     []identity.Entity          `json:"curators,omitempty"`
 	Summary      string                     `json:"summary,omitempty"`
 	CoverImage   string                     `json:"coverImage,omitempty"`
@@ -45,7 +44,6 @@ type PlaylistUpdateRequest struct {
 	Items     []playlist.PlaylistItem `json:"items,omitempty"`
 
 	Note         *dp1playlists.Note         `json:"note,omitempty"`
-	Schedule     *dp1playlists.Schedule     `json:"schedule,omitempty"`
 	Curators     []identity.Entity          `json:"curators,omitempty"`
 	Summary      *string                    `json:"summary,omitempty"`
 	CoverImage   *string                    `json:"coverImage,omitempty"`

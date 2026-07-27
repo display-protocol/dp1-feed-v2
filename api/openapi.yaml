@@ -825,8 +825,6 @@ components:
           type: object
         note:
           $ref: '#/components/schemas/Note'
-        schedule:
-          $ref: '#/components/schemas/Schedule'
         dynamicQuery:
           type: object
         id:
@@ -868,8 +866,6 @@ components:
             $ref: '#/components/schemas/PlaylistItemInput'
         note:
           $ref: '#/components/schemas/Note'
-        schedule:
-          $ref: '#/components/schemas/Schedule'
         curators:
           type: array
           items:
@@ -946,8 +942,6 @@ components:
             $ref: '#/components/schemas/PlaylistItem'
         note:
           $ref: '#/components/schemas/Note'
-        schedule:
-          $ref: '#/components/schemas/Schedule'
         signatures:
           type: array
           description: v1.1+ multisig array
@@ -1293,18 +1287,6 @@ components:
           format: float
           description: Display duration in seconds (defaults to 20 when omitted)
           example: 15.0
-
-    Schedule:
-      type: object
-      description: Playlist-level scheduling controls for the playlists extension
-      properties:
-        byDisplayAt:
-          type: boolean
-          description: >-
-            When true, display control layers filter playlist items to the active set for the
-            current time using item-level displayAt. This feed stores and returns the setting;
-            it does not compute playback eligibility.
-          example: true
 
   responses:
     BadRequest:

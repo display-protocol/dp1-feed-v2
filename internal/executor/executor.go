@@ -241,9 +241,6 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	if req.Note != nil {
 		p.Note = req.Note
 	}
-	if req.Schedule != nil {
-		p.Schedule = req.Schedule
-	}
 	if req.Summary != "" {
 		p.Summary = req.Summary
 	}
@@ -309,13 +306,21 @@ func parseDocumentCreated(s string) (time.Time, error) {
 	return t, nil
 }
 
+// sanitizePlaylist removes playlist-level scheduling metadata that dp1-go can still parse
+// from external or previously stored documents. Item-level displayAt remains supported.
+func sanitizePlaylist(p playlist.Playlist) playlist.Playlist {
+	p.Schedule = nil
+	return p
+}
+
 // GetPlaylist returns the stored playlist document for id or slug.
 func (e *impl) GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Playlist, error) {
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
 	}
-	return &rec.Body, nil
+	body := sanitizePlaylist(rec.Body)
+	return &body, nil
 }
 
 // ListPlaylists returns one page of stored playlist documents.
@@ -336,7 +341,7 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 	}
 	out := make([]playlist.Playlist, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, r.Body)
+		out = append(out, sanitizePlaylist(r.Body))
 	}
 	return out, nextCur, nil
 }
@@ -412,7 +417,6 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 		Defaults:     existing.Defaults,
 		DynamicQuery: existing.DynamicQuery,
 		Note:         existing.Note,
-		Schedule:     existing.Schedule,
 	}
 
 	if req.DPVersion != nil {
@@ -444,9 +448,6 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	}
 	if req.Note != nil {
 		mergedReq.Note = req.Note
-	}
-	if req.Schedule != nil {
-		mergedReq.Schedule = req.Schedule
 	}
 	if len(req.Signatures) > 0 {
 		mergedReq.Signatures = req.Signatures
