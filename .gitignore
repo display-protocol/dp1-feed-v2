@@ -37,5 +37,5 @@ config.yaml
 # .idea/
 # .vscode/
 
-# Local-only GHCR workflow (self-contained Dockerfile build; do not commit)
+# Local-only GHCR workflow.
 .github/workflows/build-local-image.yaml

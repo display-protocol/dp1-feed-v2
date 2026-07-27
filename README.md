@@ -115,8 +115,6 @@ Prefer containers? We've got you covered.
 
 This starts both PostgreSQL and the feed server. The API will be available at `http://localhost:8787`.
 
-The Compose build uses this repo as the Docker context (`Dockerfile` + `docker-compose.yml`); `dp1-go` is resolved from `go.mod` during the image build.
-
 Configuration is loaded from `config/.env`. The default values work for local development, but you should change the API key and generate a new signing key for production:
 
 ```bash
