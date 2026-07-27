@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,7 +36,8 @@ func TestMain(m *testing.M) {
 	var err error
 	displayAtTestProvider, err = pgtest.NewProvider(ctx)
 	if err != nil {
-		os.Exit(0)
+		fmt.Fprintf(os.Stderr, "displayAt integration setup: %v\n", err)
+		os.Exit(1)
 	}
 	defer displayAtTestProvider.Close()
 	os.Exit(m.Run())

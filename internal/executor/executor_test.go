@@ -212,6 +212,29 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	}
 }
 
+func TestCreatePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	req := validCreateReq()
+	req.Items = []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+	}
+	signed := []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
+	parsed := mustDecodePlaylist(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+
+	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, nil, "")
+	_, err := e.CreatePlaylist(context.Background(), req)
+	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
+		t.Fatalf("expected displayAt validation error, got %v", err)
+	}
+}
+
 func TestCreatePlaylist_signError(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -627,6 +650,38 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 	}
 }
 
+func TestReplacePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"daily","title":"Old","created":"2020-01-02T03:04:05Z","items":[{"source":"https://old"}]}`)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
+		ID:   id,
+		Slug: "daily",
+		Body: mustDecodePlaylist(t, existing),
+	}, nil)
+
+	req := validCreateReq()
+	req.Items = []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+	}
+	signed := []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
+	parsed := mustDecodePlaylist(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	_, err := e.ReplacePlaylist(context.Background(), "daily", req)
+	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
+		t.Fatalf("expected displayAt validation error, got %v", err)
+	}
+}
+
 func TestReplacePlaylist_notFound(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -813,6 +868,45 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 	}
 	if len(check.Items) != 1 || displayAtValue(check.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("PATCH should keep item displayAt, got %+v", check.Items)
+	}
+}
+
+func TestUpdatePlaylist_rejectsDisplayAtWhenExtensionsDisabled(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
+	existingBody := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Slug:      "daily",
+		Created:   created.UTC().Format(time.RFC3339Nano),
+		Items:     []playlist.PlaylistItem{{Source: "https://cdn.example.com/old.html"}},
+	}
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
+		ID:        id,
+		Slug:      "daily",
+		Body:      existingBody,
+		CreatedAt: created,
+	}, nil)
+
+	signed := []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
+	parsed := mustDecodePlaylist(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+
+	items := []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+	}
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	_, err := e.UpdatePlaylist(context.Background(), "daily", &models.PlaylistUpdateRequest{Items: items})
+	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
+		t.Fatalf("expected displayAt validation error, got %v", err)
 	}
 }
 
@@ -1160,6 +1254,32 @@ func TestCreatePlaylistGroup_localPlaylistNotFound(t *testing.T) {
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("missing")))
 	if err == nil || !strings.Contains(err.Error(), "local playlist") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCreatePlaylistGroup_rejectsLocalDisplayAtWhenExtensionsDisabled(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+
+	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
+		ID:   plID,
+		Slug: "daily",
+		Body: playlist.Playlist{
+			ID:    plID.String(),
+			Slug:  "daily",
+			Title: "Daily",
+			Items: []playlist.PlaylistItem{
+				{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+			},
+		},
+	}, nil)
+
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("daily")))
+	if !executor.IsDP1ValidationError(err) || !strings.Contains(err.Error(), "local playlist") || !strings.Contains(err.Error(), "displayAt requires extensions enabled") {
+		t.Fatalf("expected local displayAt validation error, got %v", err)
 	}
 }
 
