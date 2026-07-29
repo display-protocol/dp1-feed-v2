@@ -15,7 +15,7 @@ Apply this rule whenever the request is a large feature, major API change, archi
 1. Read `PLANS.md`.
 2. Read `.cursor/rules/01-master-design.mdc`.
 3. Read `.cursor/rules/20-architecture.mdc`.
-4. Read `.cursor/rules/21-api-design.mdc`.
+4. Read `.cursor/rules/21-api-design-tbd.mdc`.
 5. Summarize the current implementation and unresolved owner decisions.
 6. Produce a feature plan before implementation.
 7. Then implement and verify.

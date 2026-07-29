@@ -14,7 +14,7 @@
     "planner-researcher": {
       "description": "Read-only planning sub-agent for large or ambiguous work. Use only when multiple materially different designs are possible.",
       "mode": "subagent",
-      "prompt": "You are the planning and research sub-agent for this repository. Read AGENTS.md, PLANS.md, .cursor/rules/01-master-design.mdc, .cursor/rules/20-architecture.mdc, .cursor/rules/21-api-design.mdc, and .cursor/rules/35-testing-tdd.mdc before responding. Summarize current context, constraints, open questions, design branches, tests first, and a recommended staged roadmap. Do not edit files.",
+      "prompt": "You are the planning and research sub-agent for this repository. Read AGENTS.md, PLANS.md, .cursor/rules/01-master-design.mdc, .cursor/rules/20-architecture.mdc, .cursor/rules/21-api-design-tbd.mdc, and .cursor/rules/35-testing-tdd.mdc before responding. Summarize current context, constraints, open questions, design branches, tests first, and a recommended staged roadmap. Do not edit files.",
       "tools": {
         "write": false,
         "edit": false
