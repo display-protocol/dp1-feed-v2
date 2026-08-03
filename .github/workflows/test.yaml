@@ -11,16 +11,14 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/test.yaml'
+  # No paths filter on pull_request: "Unit tests" and "Integration tests" are
+  # required checks on main, and a path-filtered workflow never reports on a
+  # docs-only PR — the PR then blocks forever on checks that cannot run
+  # (see PR #8, which needed an admin merge). Pushes keep the filter.
   pull_request:
     branches:
       - main
       - develop
-    paths:
-      - '**/*.go'
-      - '*.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/test.yaml'
 
 permissions:
   contents: read
