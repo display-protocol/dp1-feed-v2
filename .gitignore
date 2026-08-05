@@ -36,3 +36,6 @@ config.yaml
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local-only GHCR workflow.
+.github/workflows/build-local-image.yaml

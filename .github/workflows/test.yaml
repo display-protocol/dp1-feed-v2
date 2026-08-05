@@ -94,8 +94,8 @@ jobs:
             -tags=integration \
             -coverprofile=coverage-integration.out \
             -covermode=atomic \
-            -coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg \
-            ./internal/store/
+            -coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg,github.com/display-protocol/dp1-feed-v2/internal/httpserver,github.com/display-protocol/dp1-feed-v2/internal/executor \
+            ./internal/store/ ./internal/httpserver
 
       - name: Display integration coverage summary
         run: go tool cover -func=coverage-integration.out | tail -20

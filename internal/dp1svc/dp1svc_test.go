@@ -326,6 +326,79 @@ func TestService_ValidatePlaylistWithExtension(t *testing.T) {
 			t.Fatalf("parsed title: %q", pl.Title)
 		}
 	})
+
+	t.Run("item_displayAt_ok", func(t *testing.T) {
+		t.Parallel()
+		raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+			{Source: "https://cdn.example.com/day2.html", DisplayAt: stringPtr("2026-07-22T00:00:00Z")},
+		})
+		pl, err := s.ValidatePlaylistWithExtension(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pl.Items) != 2 {
+			t.Fatalf("items: want 2, got %d", len(pl.Items))
+		}
+		if pl.Items[0].DisplayAt == nil || *pl.Items[0].DisplayAt != "2026-07-21T00:00:00" {
+			t.Fatalf("item0 displayAt: %v", pl.Items[0].DisplayAt)
+		}
+		if pl.Items[1].DisplayAt == nil || *pl.Items[1].DisplayAt != "2026-07-22T00:00:00Z" {
+			t.Fatalf("item1 displayAt: %v", pl.Items[1].DisplayAt)
+		}
+	})
+
+	t.Run("date_only_displayAt_rejected", func(t *testing.T) {
+		t.Parallel()
+		raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21")},
+		})
+		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
+			t.Fatal("expected validation error for date-only displayAt")
+		}
+	})
+
+	t.Run("compact_offset_displayAt_rejected", func(t *testing.T) {
+		t.Parallel()
+		raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00+0700")},
+		})
+		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
+			t.Fatal("expected validation error for compact-offset displayAt")
+		}
+	})
+
+}
+
+func stringPtr(s string) *string {
+	return &s
+}
+
+func signedPlaylistWithItems(t *testing.T, items []playlist.PlaylistItem) []byte {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Items:     items,
+	}
+	raw, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sign.SignMultiEd25519(raw, priv, playlist.RoleCurator, "2025-06-01T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl.Signatures = []playlist.Signature{sig}
+	out, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestService_SignPlaylist(t *testing.T) {
