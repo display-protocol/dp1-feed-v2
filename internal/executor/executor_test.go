@@ -73,6 +73,24 @@ func displayAtValue(item playlist.PlaylistItem) string {
 	return *item.DisplayAt
 }
 
+// inlineManifestJSON is a minimal DP-1 Ref Manifest carried on an item (playlists extension
+// §3.6). The present-but-empty artist id is deliberate: it is the field a decode/re-encode
+// round trip would drop, and the bytes are covered by the playlist signature.
+func inlineManifestJSON(id string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"refVersion":"1.0.0","id":%q,"created":"2026-08-01T00:00:00Z","locale":"en","metadata":{"title":"Work","artists":[{"id":"","name":"Artist"}],"thumbnails":{"small":{"uri":"https://cdn.example.com/thumb.png"}}}}`, id))
+}
+
+// assertInlineManifest compares raw JSON as bytes rather than semantically: up to the point the
+// executor hands the document to the signer it only marshals the item struct, so the manifest
+// the client sent must still be byte-identical. Signing and storage normalize member order
+// later; nothing before them has any reason to touch these bytes.
+func assertInlineManifest(t *testing.T, label string, item playlist.PlaylistItem, want json.RawMessage) {
+	t.Helper()
+	if string(item.InlineManifest) != string(want) {
+		t.Fatalf("%s: inlineManifest=%s want %s", label, item.InlineManifest, want)
+	}
+}
+
 func TestAPIInfo(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -237,6 +255,49 @@ func TestCreatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 	}
 	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("expected displayAt to be preserved, got %+v", out)
+	}
+}
+
+func TestCreatePlaylist_preservesItemInlineManifest(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	manifest := inlineManifestJSON("manifest-1")
+	req := validCreateReq()
+	req.Items = []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", InlineManifest: manifest},
+		{Source: "https://cdn.example.com/day2.html"},
+	}
+
+	var preSign []byte
+	signed := []byte(`{"dpVersion":"1.1.0","title":"Test playlist"}`)
+	parsed := playlist.Playlist{DPVersion: "1.1.0", Title: "Test playlist", Items: req.Items}
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, "")
+	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if len(check.Items) != 2 {
+		t.Fatalf("items: want 2, got %d", len(check.Items))
+	}
+	assertInlineManifest(t, "pre-sign document", check.Items[0], manifest)
+	if len(check.Items[1].InlineManifest) != 0 {
+		t.Fatalf("item without inlineManifest should omit it, got %s", check.Items[1].InlineManifest)
 	}
 }
 
@@ -921,6 +982,68 @@ func TestUpdatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
+}
+
+// A PATCH that does not send items[] rebuilds the document from the stored one, so the stored
+// inlineManifest bytes are re-marshaled and re-signed. They must come through untouched or the
+// new feed signature covers a different manifest than the one the curator signed over.
+func TestUpdatePlaylist_preservesItemInlineManifest(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
+	manifest := inlineManifestJSON("manifest-1")
+	existingBody := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Slug:      "daily",
+		Created:   created.UTC().Format(time.RFC3339Nano),
+		Items: []playlist.PlaylistItem{
+			{ID: "cccccccc-cccc-cccc-cccc-cccccccccccc", Source: "https://cdn.example.com/day1.html", InlineManifest: manifest},
+		},
+	}
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
+		ID:        id,
+		Slug:      "daily",
+		Body:      existingBody,
+		CreatedAt: created,
+	}, nil)
+
+	var preSign []byte
+	signed := []byte(`{"dpVersion":"1.1.0"}`)
+	parsed := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily Updated",
+		Slug:      "daily",
+		Created:   existingBody.Created,
+		Items:     existingBody.Items,
+	}
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
+			preSign = append([]byte(nil), raw...)
+			return signed, nil
+		}),
+		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, "")
+	newTitle := "Daily Updated"
+	if _, err := e.UpdatePlaylist(context.Background(), "daily", &models.PlaylistUpdateRequest{Title: &newTitle}); err != nil {
+		t.Fatal(err)
+	}
+
+	var check playlist.Playlist
+	if err := json.Unmarshal(preSign, &check); err != nil {
+		t.Fatalf("pre-sign JSON: %v", err)
+	}
+	if len(check.Items) != 1 {
+		t.Fatalf("items: want 1, got %d", len(check.Items))
+	}
+	assertInlineManifest(t, "PATCH pre-sign document", check.Items[0], manifest)
 }
 
 func TestUpdatePlaylist_success_partialFields(t *testing.T) {
