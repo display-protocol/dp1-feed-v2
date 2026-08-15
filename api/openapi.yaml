@@ -924,46 +924,26 @@ components:
             not compute playback eligibility.
           example: "2026-07-21T00:00:00"
         inlineManifest:
-          $ref: '#/components/schemas/InlineManifest'
-
-    InlineManifest:
-      type: object
-      description: >-
-        A complete DP-1 Ref Manifest carried on the item instead of behind `ref` (Playlist Extension
-        §3.6). When playlist extension validation is enabled it is checked against the ref-manifest
-        schema and a malformed manifest fails the request with 400; with extensions off the core
-        schema does not describe the field and it is stored unchecked. Every member of the manifest
-        is preserved, including present-but-empty ones, but not its exact bytes: signing and JSONB
-        storage normalize key order, whitespace, and number spelling. JCS re-sorts keys before
-        hashing so signatures are unaffected, but clients must not byte-hash the returned blob. The
-        feed does not fetch `ref`, merge the two, or apply the §3.6 precedence (a fetched `ref`
-        manifest wins over the inline copy) — players resolve that. The manifest is part of the
-        signed payload with no `refHash` counterpart, so editing it invalidates existing signatures.
-        No inbound body limit applies, but `playlist.fetch_max_body_bytes` (default 4 MiB) caps
-        playlists this feed fetches when ingesting a group or channel by URL.
-      required:
-        - refVersion
-        - id
-        - created
-        - locale
-      properties:
-        refVersion:
-          type: string
-          example: "1.0.0"
-        id:
-          type: string
-        created:
-          type: string
-          format: date-time
-        locale:
-          type: string
-          example: "en"
-        metadata:
           type: object
-        controls:
-          type: object
-        i18n:
-          type: object
+          description: >-
+            Optional complete DP-1 Ref Manifest carried on the item instead of behind `ref` (Playlist
+            Extension §3.6). Its shape is the DP-1 ref-manifest schema and is deliberately not
+            restated here, so this document cannot drift from a schema it does not own (that schema
+            changed in dp1-go v0.6.0, when thumbnail `w`/`h` became optional).
+            When playlist extension validation is enabled the manifest is validated against that
+            schema — which requires `refVersion`, `id`, `created`, and `locale` — and a malformed one
+            fails the request with 400. With extensions off the deployment does not implement the
+            extension: the core schema does not describe this field, core DP-1 tolerates unknown
+            ones, and the manifest is stored and returned unchecked.
+            Every member is preserved, including present-but-empty ones, but not the exact bytes:
+            signing and JSONB storage normalize key order, whitespace, and number spelling. JCS
+            re-sorts keys before hashing so signatures are unaffected, but clients must not byte-hash
+            the returned blob. This feed does not fetch `ref`, merge the two, or apply the §3.6
+            precedence (a fetched `ref` manifest wins over the inline copy) — players resolve that.
+            The manifest is part of the signed payload with no `refHash` counterpart, so editing it
+            invalidates existing signatures. No inbound body limit applies, but
+            `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed fetches when
+            ingesting a group or channel by URL.
 
     Playlist:
       type: object
@@ -1017,7 +997,10 @@ components:
             Under playlist extension validation, same accepted forms as PlaylistItemInput.displayAt.
           example: "2026-07-21T00:00:00"
         inlineManifest:
-          $ref: '#/components/schemas/InlineManifest'
+          type: object
+          description: >-
+            Optional complete DP-1 Ref Manifest carried on the item (Playlist Extension §3.6).
+            Same shape, validation, and handling as PlaylistItemInput.inlineManifest.
         # Additional fields...
 
     PlaylistGroupInput:
