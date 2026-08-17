@@ -22,6 +22,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/config"
 	"github.com/display-protocol/dp1-feed-v2/internal/dp1svc"
 	"github.com/display-protocol/dp1-feed-v2/internal/executor"
+	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 	"github.com/display-protocol/dp1-feed-v2/internal/store/pg/pgtest"
 )
@@ -47,29 +48,23 @@ func TestMain(m *testing.M) {
 }
 
 // newIntegrationServer builds a server backed by the shared Postgres provider with extensions
-// enabled, and registers the per-test database cleanup.
+// enabled, and registers the per-test database cleanup. It has no fetcher, so playlist URIs must
+// resolve locally; use newIntegrationServerWithFetcher to exercise remote resolution.
 func newIntegrationServer(t *testing.T) *Server {
+	t.Helper()
+	return newIntegrationServerWithFetcher(t, nil)
+}
+
+// newIntegrationServerWithFetcher is newIntegrationServer plus an HTTP fetcher, which is what
+// splits local from remote ingest: resolveOnePlaylistRef only fetches URIs outside publicBaseURL,
+// and only that branch re-validates and re-stores a document the feed did not author.
+func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Server {
 	t.Helper()
 	t.Cleanup(func() {
 		integrationTestProvider.Cleanup(t)
 	})
 
-	priv, err := dp1svc.Ed25519PrivateKeyFromHex(integrationSeedHex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub, ok := priv.Public().(ed25519.PublicKey)
-	if !ok {
-		t.Fatal("unexpected public key type")
-	}
-	kid, err := dp1sign.Ed25519DIDKey(pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dp1Service, err := dp1svc.New(integrationSeedHex, kid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dp1Service, kid := newIntegrationSignerAndKid(t)
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -89,8 +84,37 @@ func newIntegrationServer(t *testing.T) *Server {
 	}
 
 	gin.SetMode(gin.TestMode)
-	exec := executor.New(integrationTestProvider.NewStore(), dp1Service, true, nil, cfg.Playlist.PublicBaseURL)
+	exec := executor.New(integrationTestProvider.NewStore(), dp1Service, true, fetch, cfg.Playlist.PublicBaseURL)
 	return New(cfg, zap.NewNop(), exec, "test")
+}
+
+// newIntegrationSigner returns a signer holding the same key the integration server signs with,
+// so a test can produce a document that server will accept as validly signed.
+func newIntegrationSigner(t *testing.T) *dp1svc.Service {
+	t.Helper()
+	svc, _ := newIntegrationSignerAndKid(t)
+	return svc
+}
+
+func newIntegrationSignerAndKid(t *testing.T) (*dp1svc.Service, string) {
+	t.Helper()
+	priv, err := dp1svc.Ed25519PrivateKeyFromHex(integrationSeedHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := dp1svc.New(integrationSeedHex, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, kid
 }
 
 func mustDoPlaylistJSON(t *testing.T, srv *Server, method, path string, body any, wantStatus int) playlist.Playlist {

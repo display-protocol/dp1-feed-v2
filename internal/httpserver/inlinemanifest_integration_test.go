@@ -7,12 +7,16 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 	"github.com/google/uuid"
+
+	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 )
 
 // inlineManifestFixture is a DP-1 Ref Manifest carried on an item (playlists extension §3.6).
@@ -179,12 +183,13 @@ func TestIntegration_InlineManifestCuratorSignedPublish(t *testing.T) {
 	assertPlaylistInlineManifest(t, "curator-signed GET playlist", gotRaw, itemID)
 }
 
-// TestIntegration_InlineManifestSurvivesGroupIngest covers the one path where the feed rewrites a
-// playlist document it did not author: creating a playlist-group re-stores every referenced
-// playlist (upsertPlaylistsBatch) and rebuilds its item index. A member lost there would corrupt a
-// third party's signature on someone else's playlist, which no amount of validation would catch
-// afterwards — the document would simply stop verifying.
-func TestIntegration_InlineManifestSurvivesGroupIngest(t *testing.T) {
+// TestIntegration_InlineManifestSurvivesLocalGroupIngest covers the local branch of group ingest:
+// the URI points at this feed, so resolveOnePlaylistRef loads the stored document and
+// upsertPlaylistsBatch writes it back over itself. Only playlists.body is rewritten here — the
+// item index is left as CreatePlaylist built it, and is correct precisely because the body did not
+// change. The remote branch, where the document is new to this feed, is
+// TestIntegration_InlineManifestSurvivesRemoteGroupIngest.
+func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
 	srv := newIntegrationServer(t)
 
 	itemID := uuid.MustParse("66666666-2222-4333-8444-555555555555")
@@ -220,6 +225,63 @@ func TestIntegration_InlineManifestSurvivesGroupIngest(t *testing.T) {
 	var itemPage ListResponse[playlist.PlaylistItem]
 	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlist-items", nil, http.StatusOK, &itemPage)
 	assertItemInlineManifest(t, "item index after group ingest", itemPage.Items, itemID)
+}
+
+// TestIntegration_InlineManifestSurvivesRemoteGroupIngest covers the branch that matters for a
+// third party's document: the URI is outside publicBaseURL, so the feed fetches it, re-validates
+// it, and stores a playlist it did not author. That store step re-marshals the document, and the
+// inline manifest is covered by the remote curator's signature with no refHash counterpart — so a
+// member dropped in transit would invalidate a signature this feed cannot re-create.
+//
+// Scope note: the item index is deliberately not asserted here. upsertPlaylistsBatch rewrites
+// playlists.body without rebuilding playlist_item_index, so a remotely ingested playlist has no
+// index rows at all — its items are missing from GET /playlist-items entirely, manifest or not.
+// That is a pre-existing store defect unrelated to inline manifests, tracked in #13; asserting
+// today's behaviour here would only encode it.
+func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
+	remoteID := uuid.MustParse("77777777-2222-4333-8444-555555555555")
+	itemID := uuid.MustParse("88888888-2222-4333-8444-555555555555")
+
+	signer := newIntegrationSigner(t)
+	remote := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        remoteID.String(),
+		Slug:      "remote-inline-manifest",
+		Title:     "Remote inline manifest",
+		Created:   "2020-01-02T03:04:05Z",
+		Items: []playlist.PlaylistItem{{
+			ID:             itemID.String(),
+			Source:         "https://cdn.example.com/remote.html",
+			InlineManifest: json.RawMessage(inlineManifestFixture),
+		}},
+	}
+	unsigned, err := json.Marshal(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedRemote, err := signer.SignPlaylist(unsigned, time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(signedRemote)
+	}))
+	defer origin.Close()
+
+	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20))
+
+	groupBody := map[string]any{
+		"dpVersion": "1.1.0",
+		"title":     "Group over a remote inline-manifest playlist",
+		"curator":   "Curator",
+		"playlists": []string{origin.URL + "/remote.json"},
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusCreated)
+
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+remote.Slug, nil, http.StatusOK)
+	assertPlaylistInlineManifest(t, "remotely ingested playlist", gotRaw, itemID)
 }
 
 // assertPlaylistInlineManifest checks the manifest bytes on the served document and, because the
