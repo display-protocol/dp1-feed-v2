@@ -3,49 +3,15 @@
 package httpserver
 
 import (
-	"bytes"
-	"context"
-	"crypto/ed25519"
-	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/display-protocol/dp1-go/playlist"
-	dp1sign "github.com/display-protocol/dp1-go/sign"
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
-
-	"github.com/display-protocol/dp1-feed-v2/internal/config"
-	"github.com/display-protocol/dp1-feed-v2/internal/dp1svc"
-	"github.com/display-protocol/dp1-feed-v2/internal/executor"
-	"github.com/display-protocol/dp1-feed-v2/internal/store"
-	"github.com/display-protocol/dp1-feed-v2/internal/store/pg/pgtest"
 )
 
-const displayAtIntegrationSeedHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-var displayAtTestProvider store.TestProvider
-
-func TestMain(m *testing.M) {
-	ctx := context.Background()
-	var err error
-	displayAtTestProvider, err = pgtest.NewProvider(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "displayAt integration setup: %v\n", err)
-		os.Exit(1)
-	}
-	code := m.Run()
-	displayAtTestProvider.Close()
-	os.Exit(code)
-}
-
 func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
-	srv := newDisplayAtIntegrationServer(t)
+	srv := newIntegrationServer(t)
 
 	playlistID := uuid.MustParse("aaaaaaaa-2222-4333-8444-555555555555")
 	item1ID := uuid.MustParse("11111111-2222-4333-8444-555555555555")
@@ -110,89 +76,6 @@ func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
 	assertPlaylistDisplayAt(t, "PATCH response", patchedPlaylist, item3ID, patchDisplayAt)
 	assertListPlaylistDisplayAt(t, srv, item3ID, patchDisplayAt)
 	assertIndexedItemDisplayAt(t, srv, item3ID, patchDisplayAt)
-}
-
-func newDisplayAtIntegrationServer(t *testing.T) *Server {
-	t.Helper()
-	t.Cleanup(func() {
-		displayAtTestProvider.Cleanup(t)
-	})
-
-	priv, err := dp1svc.Ed25519PrivateKeyFromHex(displayAtIntegrationSeedHex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub, ok := priv.Public().(ed25519.PublicKey)
-	if !ok {
-		t.Fatal("unexpected public key type")
-	}
-	kid, err := dp1sign.Ed25519DIDKey(pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dp1Service, err := dp1svc.New(displayAtIntegrationSeedHex, kid)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  120 * time.Second,
-		},
-		Auth:       config.AuthConfig{APIKey: "integration-api-key"},
-		Logging:    config.LoggingConfig{Debug: true},
-		Extensions: config.ExtensionsConfig{Enabled: true},
-		Playlist: config.PlaylistConfig{
-			SigningKeyHex: displayAtIntegrationSeedHex,
-			SigningKid:    kid,
-			PublicBaseURL: "http://example.com",
-		},
-		CORS: config.CORSConfig{},
-	}
-
-	gin.SetMode(gin.TestMode)
-	exec := executor.New(displayAtTestProvider.NewStore(), dp1Service, true, nil, cfg.Playlist.PublicBaseURL)
-	return New(cfg, zap.NewNop(), exec, "test")
-}
-
-func mustDoPlaylistJSON(t *testing.T, srv *Server, method, path string, body any, wantStatus int) playlist.Playlist {
-	t.Helper()
-	var out playlist.Playlist
-	mustDoJSON(t, srv, method, path, body, wantStatus, &out)
-	return out
-}
-
-func mustDoJSON(t *testing.T, srv *Server, method, path string, body any, wantStatus int, out any) {
-	t.Helper()
-	var payload *bytes.Reader
-	if body == nil {
-		payload = bytes.NewReader(nil)
-	} else {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		payload = bytes.NewReader(raw)
-	}
-
-	req := httptest.NewRequest(method, path, payload)
-	req.Header.Set("Content-Type", "application/json")
-	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete {
-		req.Header.Set("Authorization", "Bearer integration-api-key")
-	}
-	rec := httptest.NewRecorder()
-	srv.engine.ServeHTTP(rec, req)
-	if rec.Code != wantStatus {
-		t.Fatalf("%s %s: status=%d want %d body=%s", method, path, rec.Code, wantStatus, rec.Body.String())
-	}
-	if out == nil {
-		return
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
-		t.Fatalf("%s %s: decode response: %v body=%s", method, path, err, rec.Body.String())
-	}
 }
 
 func assertListPlaylistDisplayAt(t *testing.T, srv *Server, itemID uuid.UUID, wantDisplayAt string) {

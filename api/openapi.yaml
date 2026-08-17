@@ -923,6 +923,28 @@ components:
             colon are not accepted by that extension validator. Stored as item metadata; this feed does
             not compute playback eligibility.
           example: "2026-07-21T00:00:00"
+        inlineManifest:
+          description: >-
+            Optional complete DP-1 Ref Manifest carried on the item instead of behind `ref` (Playlist
+            Extension §3.6). Its shape is the DP-1 ref-manifest schema and is deliberately not
+            restated here, so this document cannot drift from a schema it does not own (that schema
+            changed in dp1-go v0.6.0, when thumbnail `w`/`h` became optional).
+            When playlist extension validation is enabled the manifest is validated against that
+            schema — which requires `refVersion`, `id`, `created`, and `locale` — and a malformed one
+            fails the request with 400. With extensions off the deployment does not implement the
+            extension: the core schema does not describe this field, core DP-1 tolerates unknown
+            ones, and whatever was sent is stored and returned unchecked — a string, an array or
+            null are all accepted there. That is why this property declares no `type`: any type
+            constraint would hold in one deployment mode and not the other, and OpenAPI cannot
+            express the difference.
+            The manifest is not returned byte-identical to the one submitted — signing and JSONB
+            storage re-encode it — so do not hash, diff, or cache the returned blob.
+            This feed does not fetch `ref`, merge the two, or apply the §3.6
+            precedence (a fetched `ref` manifest wins over the inline copy) — players resolve that.
+            The manifest is part of the signed payload, with no `refHash` counterpart of its own.
+            No inbound body limit applies, but
+            `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed fetches when
+            ingesting a group or channel by URL.
 
     Playlist:
       type: object
@@ -975,6 +997,10 @@ components:
             Optional ISO 8601 datetime for Playlist Extension displayAt scheduling (§3.5.2).
             Under playlist extension validation, same accepted forms as PlaylistItemInput.displayAt.
           example: "2026-07-21T00:00:00"
+        inlineManifest:
+          description: >-
+            Optional complete DP-1 Ref Manifest carried on the item (Playlist Extension §3.6).
+            Same shape, validation, and handling as PlaylistItemInput.inlineManifest.
         # Additional fields...
 
     PlaylistGroupInput:

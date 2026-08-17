@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -368,10 +369,119 @@ func TestService_ValidatePlaylistWithExtension(t *testing.T) {
 		}
 	})
 
+	t.Run("item_inlineManifest_ok", func(t *testing.T) {
+		t.Parallel()
+		raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", InlineManifest: inlineManifestJSON("manifest-1")},
+		})
+		pl, err := s.ValidatePlaylistWithExtension(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := pl.Items[0].ParseInlineManifest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m == nil || m.ID != "manifest-1" {
+			t.Fatalf("inlineManifest: %+v", m)
+		}
+		// v0.6.0 made thumbnail w/h optional; a manifest that omits them must still validate
+		// and must decode as absent rather than as zero.
+		th := m.Metadata.Thumbnails["small"]
+		if th.W != nil || th.H != nil {
+			t.Fatalf("thumbnail dimensions: want absent, got w=%v h=%v", th.W, th.H)
+		}
+	})
+
+	t.Run("malformed_inlineManifest_rejected", func(t *testing.T) {
+		t.Parallel()
+		// refVersion is required by the ref-manifest schema, which the extension overlay applies
+		// verbatim to inlineManifest: a manifest the feed could not serve must not be stored.
+		raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", InlineManifest: json.RawMessage(`{"id":"m","created":"2026-08-01T00:00:00Z","locale":"en"}`)},
+		})
+		if _, err := s.ValidatePlaylistWithExtension(raw); err == nil {
+			t.Fatal("expected validation error for inlineManifest missing refVersion")
+		}
+	})
+}
+
+// TestService_ValidatePlaylist_inlineManifestUnchecked pins the core-only posture: the core
+// playlist schema describes no inlineManifest and core DP-1 tolerates unknown fields, so a
+// deployment with extensions disabled stores whatever the client sent without checking it.
+// Same posture as displayAt — the feed adds no gate of its own on top of dp1-go.
+func TestService_ValidatePlaylist_inlineManifestUnchecked(t *testing.T) {
+	t.Parallel()
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+		{Source: "https://cdn.example.com/day1.html", InlineManifest: json.RawMessage(`{"id":"m"}`)},
+	})
+	pl, err := s.ValidatePlaylist(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pl.Items[0].InlineManifest) != `{"id":"m"}` {
+		t.Fatalf("inlineManifest: %s", pl.Items[0].InlineManifest)
+	}
+}
+
+// TestService_SignPlaylist_inlineManifestSurvivesReencode covers the feed's storage path: the
+// executor persists the document it re-marshals from the parsed playlist, so the inlineManifest
+// bytes go through a decode/encode cycle after signing. They are covered by the playlist
+// signature with no refHash counterpart (playlists extension §3.6), so any dropped field —
+// the present-but-empty artist id below is the canonical case — changes the JCS payload and
+// invalidates every signature on the document.
+func TestService_SignPlaylist_inlineManifestSurvivesReencode(t *testing.T) {
+	t.Parallel()
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned, err := json.Marshal(playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Daily",
+		Items: []playlist.PlaylistItem{
+			{Source: "https://cdn.example.com/day1.html", InlineManifest: inlineManifestJSON("manifest-1")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := s.SignPlaylist(unsigned, time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, err := s.ValidatePlaylistWithExtension(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, failed, err := s.VerifyPlaylistSignatures(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("re-encoded document failed signature verification: %+v", failed)
+	}
 }
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+// inlineManifestJSON returns a minimal DP-1 Ref Manifest for inlineManifest fixtures
+// (playlists extension §3.6). Two details are deliberate: the thumbnail omits w/h, which
+// dp1-go v0.6.0 made optional, and the artist carries a present-but-empty id, the field a
+// decode/re-encode round trip would silently drop.
+func inlineManifestJSON(id string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"refVersion":"1.0.0","id":%q,"created":"2026-08-01T00:00:00Z","locale":"en","metadata":{"title":"Work","artists":[{"id":"","name":"Artist"}],"thumbnails":{"small":{"uri":"https://cdn.example.com/thumb.png"}}},"controls":{"display":{"scaling":"fit"}}}`, id))
 }
 
 func signedPlaylistWithItems(t *testing.T, items []playlist.PlaylistItem) []byte {
