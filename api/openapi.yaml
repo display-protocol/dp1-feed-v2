@@ -924,7 +924,6 @@ components:
             not compute playback eligibility.
           example: "2026-07-21T00:00:00"
         inlineManifest:
-          type: object
           description: >-
             Optional complete DP-1 Ref Manifest carried on the item instead of behind `ref` (Playlist
             Extension §3.6). Its shape is the DP-1 ref-manifest schema and is deliberately not
@@ -934,7 +933,10 @@ components:
             schema — which requires `refVersion`, `id`, `created`, and `locale` — and a malformed one
             fails the request with 400. With extensions off the deployment does not implement the
             extension: the core schema does not describe this field, core DP-1 tolerates unknown
-            ones, and the manifest is stored and returned unchecked.
+            ones, and whatever was sent is stored and returned unchecked — a string, an array or
+            null are all accepted there. That is why this property declares no `type`: any type
+            constraint would hold in one deployment mode and not the other, and OpenAPI cannot
+            express the difference.
             Every member is preserved, including present-but-empty ones, but not the exact bytes:
             signing and JSONB storage normalize key order, whitespace, and number spelling. JCS
             re-sorts keys before hashing so signatures are unaffected, but clients must not byte-hash
@@ -997,7 +999,6 @@ components:
             Under playlist extension validation, same accepted forms as PlaylistItemInput.displayAt.
           example: "2026-07-21T00:00:00"
         inlineManifest:
-          type: object
           description: >-
             Optional complete DP-1 Ref Manifest carried on the item (Playlist Extension §3.6).
             Same shape, validation, and handling as PlaylistItemInput.inlineManifest.
