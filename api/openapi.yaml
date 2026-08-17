@@ -937,10 +937,9 @@ components:
             null are all accepted there. That is why this property declares no `type`: any type
             constraint would hold in one deployment mode and not the other, and OpenAPI cannot
             express the difference.
-            Every member is preserved, including present-but-empty ones, but not the exact bytes:
-            signing and JSONB storage normalize key order, whitespace, and number spelling. JCS
-            re-sorts keys before hashing so signatures are unaffected, but clients must not byte-hash
-            the returned blob. This feed does not fetch `ref`, merge the two, or apply the §3.6
+            The manifest is not returned byte-identical to the one submitted — signing and JSONB
+            storage re-encode it — so do not hash, diff, or cache the returned blob.
+            This feed does not fetch `ref`, merge the two, or apply the §3.6
             precedence (a fetched `ref` manifest wins over the inline copy) — players resolve that.
             The manifest is part of the signed payload with no `refHash` counterpart, so editing it
             invalidates existing signatures. No inbound body limit applies, but
