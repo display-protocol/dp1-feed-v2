@@ -941,8 +941,8 @@ components:
             storage re-encode it — so do not hash, diff, or cache the returned blob.
             This feed does not fetch `ref`, merge the two, or apply the §3.6
             precedence (a fetched `ref` manifest wins over the inline copy) — players resolve that.
-            The manifest is part of the signed payload with no `refHash` counterpart, so editing it
-            invalidates existing signatures. No inbound body limit applies, but
+            The manifest is part of the signed payload, with no `refHash` counterpart of its own.
+            No inbound body limit applies, but
             `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed fetches when
             ingesting a group or channel by URL.
 
