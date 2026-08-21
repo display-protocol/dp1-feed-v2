@@ -1147,7 +1147,7 @@ func (e *impl) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublishe
 }
 
 // ReplaceChannelRegistry atomically replaces the entire registry.
-// Converts API input (publishers with static/living URL lists) to relational rows with positions and kind.
+// Converts API input (publishers with a single ordered URL list) to relational rows with positions.
 // Returns total channel count for response.
 func (e *impl) ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error) {
 	publishers := make([]store.RegistryPublisher, 0, len(req.Publishers))
@@ -1167,22 +1167,11 @@ func (e *impl) ReplaceChannelRegistry(ctx context.Context, req models.ChannelReg
 			Position: pubPos,
 		})
 
-		for chPos, url := range item.Static {
+		for chPos, url := range item.ChannelURLs {
 			channels = append(channels, store.RegistryPublisherChannel{
 				ID:          uuid.New(),
 				PublisherID: pubID,
 				ChannelURL:  url,
-				Kind:        store.RegistryChannelKindStatic,
-				Position:    chPos,
-			})
-			totalChannels++
-		}
-		for chPos, url := range item.Living {
-			channels = append(channels, store.RegistryPublisherChannel{
-				ID:          uuid.New(),
-				PublisherID: pubID,
-				ChannelURL:  url,
-				Kind:        store.RegistryChannelKindLiving,
 				Position:    chPos,
 			})
 			totalChannels++

@@ -1156,7 +1156,7 @@ func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string) error {
 }
 
 // GetChannelRegistry implements store.Store.
-// Returns ordered publishers and their channel URLs (ordered by publisher position, then kind static before living, then URL position).
+// Returns ordered publishers and their channel URLs (ordered by publisher position, then URL position).
 func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
 	const (
 		pubQuery = `
@@ -1165,12 +1165,10 @@ func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublish
 			ORDER BY position ASC
 		`
 		chanQuery = `
-			SELECT c.id, c.publisher_id, c.channel_url, c.kind, c.position, c.created_at
+			SELECT c.id, c.publisher_id, c.channel_url, c.position, c.created_at
 			FROM registry_publisher_channels c
 			INNER JOIN registry_publishers p ON p.id = c.publisher_id
-			ORDER BY p.position ASC,
-				CASE c.kind WHEN 'static' THEN 0 ELSE 1 END,
-				c.position ASC
+			ORDER BY p.position ASC, c.position ASC
 		`
 	)
 
@@ -1206,7 +1204,7 @@ func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublish
 
 	for rows2.Next() {
 		var c store.RegistryPublisherChannel
-		if err := rows2.Scan(&c.ID, &c.PublisherID, &c.ChannelURL, &c.Kind, &c.Position, &c.CreatedAt); err != nil {
+		if err := rows2.Scan(&c.ID, &c.PublisherID, &c.ChannelURL, &c.Position, &c.CreatedAt); err != nil {
 			return nil, nil, fmt.Errorf("scan registry channel: %w", err)
 		}
 		chans = append(chans, c)
@@ -1253,11 +1251,11 @@ func (s *Store) ReplaceChannelRegistry(ctx context.Context, publishers []store.R
 
 	// Insert channels.
 	const chanInsert = `
-		INSERT INTO registry_publisher_channels (id, publisher_id, channel_url, kind, position, created_at)
-		VALUES ($1, $2, $3, $4, $5, now())
+		INSERT INTO registry_publisher_channels (id, publisher_id, channel_url, position, created_at)
+		VALUES ($1, $2, $3, $4, now())
 	`
 	for _, c := range channels {
-		if _, err := tx.Exec(ctx, chanInsert, c.ID, c.PublisherID, c.ChannelURL, c.Kind, c.Position); err != nil {
+		if _, err := tx.Exec(ctx, chanInsert, c.ID, c.PublisherID, c.ChannelURL, c.Position); err != nil {
 			return fmt.Errorf("replace registry: insert channel %q: %w", c.ChannelURL, err)
 		}
 	}
