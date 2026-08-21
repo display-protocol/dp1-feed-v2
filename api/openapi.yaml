@@ -662,7 +662,7 @@ paths:
     get:
       tags: [registry]
       summary: Get curated channel registry
-      description: Returns an ordered list of publishers, each with optional DID and separate static vs living channel URL lists
+      description: Returns an ordered list of publishers, each with an optional DID and an ordered channel URL list
       responses:
         '200':
           description: Curated registry
@@ -1217,6 +1217,7 @@ components:
       type: object
       required:
         - name
+        - channel_urls
       properties:
         name:
           type: string
@@ -1227,25 +1228,14 @@ components:
           type: string
           maxLength: 2048
           description: Optional publisher DID
-        static:
+        channel_urls:
           type: array
           maxItems: 10000
           items:
             type: string
             format: uri
             pattern: '\/api\/v1\/channels\/[0-9a-f-]{36}$'
-          description: Ordered static channel URLs (optional key; omit if none)
-        living:
-          type: array
-          maxItems: 10000
-          items:
-            type: string
-            format: uri
-            pattern: '\/api\/v1\/channels\/[0-9a-f-]{36}$'
-          description: Ordered living channel URLs (optional key; omit if none)
-      description: >
-        Include at least one channel URL in total across static and/or living (each property is optional,
-        but both cannot be absent or empty).
+          description: Ordered channel URLs (GET may return an empty array; PUT requires at least one)
 
     ErrorResponse:
       type: object

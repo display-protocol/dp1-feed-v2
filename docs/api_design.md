@@ -116,7 +116,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - **PATCH** — partial update (only provided fields change); server re-signs and re-validates as applicable.
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules).
 
-**Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and optional ordered URL arrays **`static`** and **`living`** (channel resource URLs under this API). A publisher may include only **`static`**, only **`living`**, or both; **PUT** still requires at least one URL in total per publisher across those lists. **PUT** requires at least one publisher overall; it atomically **replaces the entire** registry (not a merge-by-item API).
+**Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). **PUT** requires at least one publisher, and at least one channel URL per publisher; it atomically **replaces the entire** registry (not a merge-by-item API).
 
 The registry is the **curation gate**, and it is easy to mistake for a mirror of the catalog: downstream consumers that build offline snapshots (e.g. the mobile app's seed-database builder) ingest **only registry-listed channels**, not the feed's full `/channels` listing. Publishing a channel makes it fetchable by URL; it does **not** list it in the registry, so a published-but-unlisted channel is invisible to every registry-driven consumer until someone PUTs an updated registry.
 

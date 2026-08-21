@@ -2043,9 +2043,9 @@ func TestGetChannelRegistry(t *testing.T) {
 					{ID: pubID2, Name: "Publisher 2"},
 				}
 				chans := []store.RegistryPublisherChannel{
-					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String(), Kind: store.RegistryChannelKindStatic},
-					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String(), Kind: store.RegistryChannelKindStatic},
-					{PublisherID: pubID2, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String(), Kind: store.RegistryChannelKindLiving},
+					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String()},
+					{PublisherID: pubID1, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String()},
+					{PublisherID: pubID2, ChannelURL: "http://example.com/api/v1/channels/" + uuid.New().String()},
 				}
 				m.EXPECT().
 					GetChannelRegistry(gomock.Any()).
@@ -2057,11 +2057,9 @@ func TestGetChannelRegistry(t *testing.T) {
 				require.NoError(t, json.Unmarshal(body, &resp))
 				assert.Len(t, resp.Publishers, 2)
 				assert.Equal(t, "Publisher 1", resp.Publishers[0].Name)
-				assert.Len(t, resp.Publishers[0].Static, 2)
-				assert.Len(t, resp.Publishers[0].Living, 0)
+				assert.Len(t, resp.Publishers[0].ChannelURLs, 2)
 				assert.Equal(t, "Publisher 2", resp.Publishers[1].Name)
-				assert.Len(t, resp.Publishers[1].Static, 0)
-				assert.Len(t, resp.Publishers[1].Living, 1)
+				assert.Len(t, resp.Publishers[1].ChannelURLs, 1)
 			},
 		},
 		{
@@ -2079,8 +2077,8 @@ func TestGetChannelRegistry(t *testing.T) {
 				var resp models.ChannelRegistry
 				require.NoError(t, json.Unmarshal(body, &resp))
 				assert.Len(t, resp.Publishers, 1)
-				assert.Len(t, resp.Publishers[0].Static, 0)
-				assert.Len(t, resp.Publishers[0].Living, 0)
+				assert.NotNil(t, resp.Publishers[0].ChannelURLs)
+				assert.Len(t, resp.Publishers[0].ChannelURLs, 0)
 			},
 		},
 		{
@@ -2128,7 +2126,7 @@ func TestReplaceChannelRegistry(t *testing.T) {
 	validURL := "http://example.com/api/v1/channels/" + uuid.New().String()
 	validBody := models.ChannelRegistry{
 		Publishers: []models.ChannelRegistryPublisher{
-			{Name: "Publisher 1", Static: []string{validURL}, Living: []string{}},
+			{Name: "Publisher 1", ChannelURLs: []string{validURL}},
 		},
 	}
 
@@ -2157,10 +2155,12 @@ func TestReplaceChannelRegistry(t *testing.T) {
 			},
 		},
 		{
-			name: "success static only living key omitted",
+			// The wire body carries the optional did and a single channel_urls list;
+			// this pins both onto what the executor actually receives.
+			name: "success with did and raw JSON body",
 			body: map[string]any{
 				"publishers": []map[string]any{
-					{"name": "Publisher 1", "static": []string{validURL}},
+					{"name": "Publisher 1", "did": "did:key:z6Mk", "channel_urls": []string{validURL}},
 				},
 			},
 			setupMock: func(m *mocks.MockExecutor) {
@@ -2168,32 +2168,9 @@ func TestReplaceChannelRegistry(t *testing.T) {
 					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(_ context.Context, req models.ChannelRegistry) (int, error) {
 						require.Len(t, req.Publishers, 1)
-						assert.Nil(t, req.Publishers[0].Living)
-						require.Len(t, req.Publishers[0].Static, 1)
-						return 1, nil
-					})
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp map[string]any
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, float64(1), resp["total_channels"])
-			},
-		},
-		{
-			name: "success living only static key omitted",
-			body: map[string]any{
-				"publishers": []map[string]any{
-					{"name": "Publisher 1", "living": []string{validURL}},
-				},
-			},
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(_ context.Context, req models.ChannelRegistry) (int, error) {
-						require.Len(t, req.Publishers, 1)
-						assert.Nil(t, req.Publishers[0].Static)
-						require.Len(t, req.Publishers[0].Living, 1)
+						assert.Equal(t, "did:key:z6Mk", req.Publishers[0].DID)
+						require.Len(t, req.Publishers[0].ChannelURLs, 1)
+						assert.Equal(t, validURL, req.Publishers[0].ChannelURLs[0])
 						return 1, nil
 					})
 			},
@@ -2221,7 +2198,7 @@ func TestReplaceChannelRegistry(t *testing.T) {
 			name: "publisher with no channels",
 			body: models.ChannelRegistry{
 				Publishers: []models.ChannelRegistryPublisher{
-					{Name: "Publisher 1", Static: []string{}, Living: []string{}},
+					{Name: "Publisher 1", ChannelURLs: []string{}},
 				},
 			},
 			setupMock:      func(m *mocks.MockExecutor) {},
@@ -2230,14 +2207,14 @@ func TestReplaceChannelRegistry(t *testing.T) {
 				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
 				assert.Equal(t, "bad_request", resp.Error)
-				assert.Contains(t, resp.Message, "static and/or living")
+				assert.Contains(t, resp.Message, "at least one channel URL")
 			},
 		},
 		{
 			name: "invalid channel URL format",
 			body: models.ChannelRegistry{
 				Publishers: []models.ChannelRegistryPublisher{
-					{Name: "Publisher 1", Static: []string{"http://example.com/invalid"}, Living: []string{}},
+					{Name: "Publisher 1", ChannelURLs: []string{"http://example.com/invalid"}},
 				},
 			},
 			setupMock:      func(m *mocks.MockExecutor) {},

@@ -503,36 +503,24 @@ func (h *Handler) GetChannelRegistry(c *gin.Context) {
 		return
 	}
 
-	// Group channel URLs by publisher ID and kind (static vs living).
-	chansByPub := make(map[string]map[string][]string)
+	// Group channel URLs by publisher ID for efficient lookup; the store returns them
+	// already ordered by publisher position, then URL position, so append preserves order.
+	chansByPub := make(map[string][]string)
 	for _, ch := range chans {
 		pubID := ch.PublisherID.String()
-		m := chansByPub[pubID]
-		if m == nil {
-			m = make(map[string][]string)
-			chansByPub[pubID] = m
-		}
-		m[ch.Kind] = append(m[ch.Kind], ch.ChannelURL)
+		chansByPub[pubID] = append(chansByPub[pubID], ch.ChannelURL)
 	}
 
 	items := make([]models.ChannelRegistryPublisher, 0, len(pubs))
 	for _, pub := range pubs {
-		m := chansByPub[pub.ID.String()]
-		if m == nil {
-			m = make(map[string][]string)
-		}
-		static := m[store.RegistryChannelKindStatic]
-		living := m[store.RegistryChannelKindLiving]
-		if static == nil {
-			static = []string{}
-		}
-		if living == nil {
-			living = []string{}
+		urls := chansByPub[pub.ID.String()]
+		if urls == nil {
+			// Emit [] rather than null: clients iterate this list unconditionally.
+			urls = []string{}
 		}
 		item := models.ChannelRegistryPublisher{
-			Name:   pub.Name,
-			Static: static,
-			Living: living,
+			Name:        pub.Name,
+			ChannelURLs: urls,
 		}
 		if pub.DID != nil {
 			item.DID = *pub.DID
@@ -557,19 +545,13 @@ func (h *Handler) ReplaceChannelRegistry(c *gin.Context) {
 	}
 
 	for i, p := range req.Publishers {
-		if len(p.Static)+len(p.Living) == 0 {
-			writeError(c.Writer, http.StatusBadRequest, "bad_request", "each publisher must have at least one channel URL in static and/or living at index "+strconv.Itoa(i))
+		if len(p.ChannelURLs) == 0 {
+			writeError(c.Writer, http.StatusBadRequest, "bad_request", "each publisher must have at least one channel URL at index "+strconv.Itoa(i))
 			return
 		}
-		for _, url := range p.Static {
+		for _, url := range p.ChannelURLs {
 			if !isValidChannelURL(url) {
-				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} (publisher "+strconv.Itoa(i)+", static)")
-				return
-			}
-		}
-		for _, url := range p.Living {
-			if !isValidChannelURL(url) {
-				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} (publisher "+strconv.Itoa(i)+", living)")
+				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} (publisher "+strconv.Itoa(i)+")")
 				return
 			}
 		}
