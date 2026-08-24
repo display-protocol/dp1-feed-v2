@@ -159,6 +159,10 @@ auth:
 
 playlist:
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
+
+notifications:
+  timeout: 15s
+  clients: []
 ```
 
 ### Environment Variable Overrides
@@ -167,8 +171,21 @@ Prefix config keys with `DP1_FEED_` and use underscores for nesting:
 
 ```bash
 export DP1_FEED_SERVER_PORT=9000
-export DP1_FEED_AUTH_API_KEY=my-secret-key
+export DP1_FEED_API_KEY=my-secret-key
 ```
+
+Channel notification clients are configured as a JSON array so their shared
+secrets can stay in the environment rather than the YAML file:
+
+```bash
+export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels","secret":"replace-me"}]'
+```
+
+The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
+with HMAC-SHA256 and sends `channel.added`, `channel.updated`, or
+`channel.deleted`. Calls happen concurrently under one aggregate timeout after
+the database commit. They are best-effort: failures are logged, while the
+successful channel mutation remains successful.
 
 ### Docker Compose Configuration
 

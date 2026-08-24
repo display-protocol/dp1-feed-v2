@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/httpserver"
 	"github.com/display-protocol/dp1-feed-v2/internal/logger"
+	"github.com/display-protocol/dp1-feed-v2/internal/notification"
 	"github.com/display-protocol/dp1-feed-v2/internal/store/pg"
 )
 
@@ -74,7 +76,20 @@ func main() {
 	}
 	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes)
 
-	exec := executor.New(st, dp1, cfg.Extensions.Enabled, f, cfg.Playlist.PublicBaseURL)
+	execOptions := make([]executor.Option, 0, 1)
+	if len(cfg.Notifications.Clients) > 0 {
+		httpClient := &http.Client{Timeout: cfg.Notifications.Timeout}
+		clients := make([]notification.NamedClient, 0, len(cfg.Notifications.Clients))
+		for _, clientConfig := range cfg.Notifications.Clients {
+			client, err := notification.NewWebhookClient(clientConfig.URL, clientConfig.Secret, httpClient)
+			if err != nil {
+				zlog.Fatal("notification client", zap.String("client", clientConfig.Name), zap.Error(err))
+			}
+			clients = append(clients, notification.NamedClient{Name: clientConfig.Name, Client: client})
+		}
+		execOptions = append(execOptions, executor.WithNotificationClient(notification.NewDispatcher(zlog, cfg.Notifications.Timeout, clients)))
+	}
+	exec := executor.New(st, dp1, cfg.Extensions.Enabled, f, cfg.Playlist.PublicBaseURL, execOptions...)
 	srv := httpserver.New(cfg, zlog, exec, version)
 
 	// 3) Graceful shutdown on SIGINT/SIGTERM, then block on ListenAndServe.

@@ -80,6 +80,7 @@ func TestLoad_envOverrides(t *testing.T) {
 	t.Setenv("DP1_FEED_LOG_DEBUG", "true")
 	t.Setenv("DP1_FEED_EXTENSIONS_ENABLED", "0")
 	t.Setenv("DP1_FEED_PUBLIC_BASE_URL", "https://example.com/")
+	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels","secret":"webhook-secret"}]`)
 
 	cfg, err := Load("")
 	if err != nil {
@@ -102,6 +103,71 @@ func TestLoad_envOverrides(t *testing.T) {
 	}
 	if cfg.Playlist.PublicBaseURL != "https://example.com" {
 		t.Fatalf("PUBLIC_BASE_URL should trim trailing slash: got %q", cfg.Playlist.PublicBaseURL)
+	}
+	if len(cfg.Notifications.Clients) != 1 || cfg.Notifications.Clients[0].Name != "catalog" {
+		t.Fatalf("notification clients override: %#v", cfg.Notifications.Clients)
+	}
+}
+
+func TestLoad_notificationClientsFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := strings.TrimSpace(`
+database:
+  url: postgres://user:pass@localhost:5432/db?sslmode=disable
+auth:
+  api_key: integration-test-key
+playlist:
+  signing_key_hex: "` + testSeedHex + `"
+  public_base_url: https://feed.example
+notifications:
+  timeout: 7s
+  clients:
+    - name: catalog
+      url: https://catalog.example/webhooks/v1/channels
+      secret: webhook-secret
+`)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notifications.Timeout.String() != "7s" {
+		t.Fatalf("notification timeout = %s", cfg.Notifications.Timeout)
+	}
+	if len(cfg.Notifications.Clients) != 1 {
+		t.Fatalf("notification clients = %#v", cfg.Notifications.Clients)
+	}
+	client := cfg.Notifications.Clients[0]
+	if client.Name != "catalog" || client.URL != "https://catalog.example/webhooks/v1/channels" || client.Secret != "webhook-secret" {
+		t.Fatalf("notification client = %#v", client)
+	}
+}
+
+func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
+	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
+	t.Setenv("DP1_FEED_API_KEY", "k")
+	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", "not-json")
+
+	_, err := Load("")
+	if err == nil || !strings.Contains(err.Error(), "notification clients") {
+		t.Fatalf("Load error = %v, want notification clients error", err)
+	}
+}
+
+func TestLoad_invalidNotificationClient(t *testing.T) {
+	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
+	t.Setenv("DP1_FEED_API_KEY", "k")
+	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels"}]`)
+
+	_, err := Load("")
+	if err == nil || !strings.Contains(err.Error(), "secret is required") {
+		t.Fatalf("Load error = %v, want missing secret", err)
 	}
 }
 

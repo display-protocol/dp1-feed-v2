@@ -4,7 +4,9 @@ package config
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,14 +24,28 @@ const envPrefix = "DP1_FEED_"
 
 // Config is the root application configuration.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Database   DatabaseConfig   `yaml:"database"`
-	Auth       AuthConfig       `yaml:"auth"`
-	Sentry     SentryConfig     `yaml:"sentry"`
-	Logging    LoggingConfig    `yaml:"logging"`
-	Extensions ExtensionsConfig `yaml:"extensions"`
-	Playlist   PlaylistConfig   `yaml:"playlist"`
-	CORS       CORSConfig       `yaml:"cors"`
+	Server        ServerConfig       `yaml:"server"`
+	Database      DatabaseConfig     `yaml:"database"`
+	Auth          AuthConfig         `yaml:"auth"`
+	Sentry        SentryConfig       `yaml:"sentry"`
+	Logging       LoggingConfig      `yaml:"logging"`
+	Extensions    ExtensionsConfig   `yaml:"extensions"`
+	Playlist      PlaylistConfig     `yaml:"playlist"`
+	CORS          CORSConfig         `yaml:"cors"`
+	Notifications NotificationConfig `yaml:"notifications"`
+}
+
+// NotificationConfig controls outbound channel lifecycle delivery.
+type NotificationConfig struct {
+	Timeout time.Duration              `yaml:"timeout"`
+	Clients []NotificationClientConfig `yaml:"clients"`
+}
+
+// NotificationClientConfig describes one HMAC-authenticated webhook consumer.
+type NotificationClientConfig struct {
+	Name   string `json:"name" yaml:"name"`
+	URL    string `json:"url" yaml:"url"`
+	Secret string `json:"secret" yaml:"secret"`
 }
 
 // CORSConfig controls browser cross-origin access (gin-contrib/cors).
@@ -101,7 +117,9 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("config yaml: %w", err)
 		}
 	}
-	applyEnv(cfg)
+	if err := applyEnv(cfg); err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -133,11 +151,12 @@ func defaultConfig() *Config {
 			FetchTimeout:      30 * time.Second,
 			FetchMaxBodyBytes: 4 << 20, // 4 MiB
 		},
+		Notifications: NotificationConfig{Timeout: 15 * time.Second},
 	}
 }
 
 // applyEnv overlays non-empty DP1_FEED_* variables onto cfg (ops secrets and overrides without editing YAML).
-func applyEnv(cfg *Config) {
+func applyEnv(cfg *Config) error {
 	if v := os.Getenv(envPrefix + "DATABASE_URL"); v != "" {
 		cfg.Database.URL = v
 	}
@@ -179,6 +198,14 @@ func applyEnv(cfg *Config) {
 			cfg.CORS.AllowOrigins = origins
 		}
 	}
+	if v := os.Getenv(envPrefix + "NOTIFICATION_CLIENTS"); v != "" {
+		var clients []NotificationClientConfig
+		if err := json.Unmarshal([]byte(v), &clients); err != nil {
+			return fmt.Errorf("notification clients env: %w", err)
+		}
+		cfg.Notifications.Clients = clients
+	}
+	return nil
 }
 
 func (c *Config) validate() error {
@@ -191,6 +218,35 @@ func (c *Config) validate() error {
 	}
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")
+	}
+	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
+		return fmt.Errorf("notification timeout must be positive")
+	}
+	names := make(map[string]struct{}, len(c.Notifications.Clients))
+	for i := range c.Notifications.Clients {
+		client := &c.Notifications.Clients[i]
+		client.Name = strings.TrimSpace(client.Name)
+		client.URL = strings.TrimSpace(client.URL)
+		if client.Name == "" {
+			return fmt.Errorf("notification client %d name is required", i)
+		}
+		if _, exists := names[client.Name]; exists {
+			return fmt.Errorf("notification client name %q is duplicated", client.Name)
+		}
+		names[client.Name] = struct{}{}
+		parsed, err := url.Parse(client.URL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("notification client %q url must be absolute", client.Name)
+		}
+		if strings.TrimSpace(client.Secret) == "" {
+			return fmt.Errorf("notification client %q secret is required", client.Name)
+		}
+	}
+	if len(c.Notifications.Clients) > 0 {
+		publicBase, err := url.Parse(c.Playlist.PublicBaseURL)
+		if err != nil || publicBase.Scheme == "" || publicBase.Host == "" {
+			return fmt.Errorf("playlist public base url must be absolute when notification clients are configured")
+		}
 	}
 	return nil
 }

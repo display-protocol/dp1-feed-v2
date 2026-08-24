@@ -37,3 +37,8 @@ playlist:
   # Ed25519 seed: 32 bytes = 64 hex chars. Required — generate: openssl rand -hex 32 (or set DP1_FEED_SIGNING_KEY_HEX)
   signing_key_hex: ""
   public_base_url: "http://localhost:8787"
+
+# Optional channel lifecycle consumers. Prefer DP1_FEED_NOTIFICATION_CLIENTS so secrets stay out of YAML.
+notifications:
+  timeout: 15s
+  clients: []

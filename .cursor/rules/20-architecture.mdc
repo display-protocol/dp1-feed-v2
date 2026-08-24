@@ -27,6 +27,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 | **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
 | **DP-1 protocol adapter** | `internal/dp1svc` | dp1-go: schema validation and v1.1+ multisig signing. |
 | **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
+| **Outbound notifications** | `internal/notification` | Client contract and best-effort channel lifecycle delivery after commits. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
 | **Cross-cutting** | `internal/logger` | Zap; Sentry wired with Gin in `httpserver` (see Observability). |
@@ -50,6 +51,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 ## Background job and transaction ownership
 
 - **Background jobs:** none by design. Request-path only; no workers or queues.
+- **Channel notifications:** configured clients are called concurrently under one aggregate timeout after channel commits. Failures are logged and do not fail the already-committed mutation; durable retry remains out of scope without an outbox/job owner.
 - **Transactions:** multi-step writes (e.g. playlist-group/channel create with resolved playlists and membership) are owned by **`internal/executor`**, using the store’s transactional APIs so ingest + persist commit or roll back together. **HTTP does not start or own DB transactions.**
 
 ## Observability expectations

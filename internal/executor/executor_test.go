@@ -24,6 +24,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/executor"
 	"github.com/display-protocol/dp1-feed-v2/internal/mocks"
 	"github.com/display-protocol/dp1-feed-v2/internal/models"
+	"github.com/display-protocol/dp1-feed-v2/internal/notification"
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 	"github.com/display-protocol/dp1-feed-v2/internal/utils"
 )
@@ -71,6 +72,15 @@ func displayAtValue(item playlist.PlaylistItem) string {
 		return ""
 	}
 	return *item.DisplayAt
+}
+
+type recordingNotificationClient struct {
+	events []notification.Event
+}
+
+func (c *recordingNotificationClient) Notify(_ context.Context, event notification.Event) error {
+	c.events = append(c.events, event)
+	return nil
 }
 
 // inlineManifestJSON is a minimal DP-1 Ref Manifest carried on an item (playlists extension
@@ -2034,7 +2044,9 @@ func TestCreateChannel_success(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
 	)
+	var createdChannelID uuid.UUID
 	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
+		createdChannelID = in.ID
 		if in.ID == uuid.Nil || in.Slug != "my-channel" {
 			t.Fatalf("create expects id and slugified slug, id=%v slug=%q", in.ID, in.Slug)
 		}
@@ -2046,13 +2058,20 @@ func TestCreateChannel_success(t *testing.T) {
 		}
 	}).Return(nil)
 
-	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	notifications := &recordingNotificationClient{}
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
 	out, err := e.CreateChannel(context.Background(), validChannelCreateReq("My Channel", localPlaylistRef("pl-ch")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out == nil || !reflect.DeepEqual(*out, wantCh) {
 		t.Fatal("response mismatch")
+	}
+	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelAdded {
+		t.Fatalf("notification events = %#v", notifications.events)
+	}
+	if got, want := notifications.events[0].Channel.URL, testPublicBase+"/api/v1/channels/"+createdChannelID.String(); got != want {
+		t.Fatalf("notification channel URL = %q", got)
 	}
 }
 
@@ -2109,10 +2128,14 @@ func TestCreateChannel_storeError(t *testing.T) {
 	)
 	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(errors.New("db"))
 
-	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	notifications := &recordingNotificationClient{}
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
 	_, err := e.CreateChannel(context.Background(), validChannelCreateReq("slug", localPlaylistRef("p")))
 	if err == nil || !strings.Contains(err.Error(), "store: db") {
 		t.Fatalf("got %v", err)
+	}
+	if len(notifications.events) != 0 {
+		t.Fatalf("notification sent before commit: %#v", notifications.events)
 	}
 }
 
@@ -2175,11 +2198,17 @@ func TestDeleteChannel(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
+	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{ID: cid}, nil)
 	mockStore.EXPECT().DeleteChannel(gomock.Any(), "cid").Return(nil)
 
-	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, "")
+	notifications := &recordingNotificationClient{}
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase, executor.WithNotificationClient(notifications))
 	if err := e.DeleteChannel(context.Background(), "cid"); err != nil {
 		t.Fatal(err)
+	}
+	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelDeleted || notifications.events[0].Channel.URL != testPublicBase+"/api/v1/channels/"+cid.String() {
+		t.Fatalf("notification events = %#v", notifications.events)
 	}
 }
 
@@ -2223,7 +2252,8 @@ func TestReplaceChannel_success(t *testing.T) {
 		}
 	}).Return(nil)
 
-	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	notifications := &recordingNotificationClient{}
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
 	req := validChannelCreateReq("ignored-on-replace", localPlaylistRef("pl2"))
 	req.Title = "New title"
 	out, err := e.ReplaceChannel(context.Background(), "ch-slug", req)
@@ -2232,6 +2262,9 @@ func TestReplaceChannel_success(t *testing.T) {
 	}
 	if out == nil || !reflect.DeepEqual(*out, parsedCh) {
 		t.Fatal("out mismatch")
+	}
+	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelUpdated || notifications.events[0].Channel.URL != testPublicBase+"/api/v1/channels/"+cid.String() {
+		t.Fatalf("notification events = %#v", notifications.events)
 	}
 }
 
@@ -2343,7 +2376,8 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 	)
 	mockStore.EXPECT().UpdateChannel(gomock.Any(), "old-ch", gomock.Any()).Return(nil)
 
-	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	notifications := &recordingNotificationClient{}
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
 	newTitle := "Updated Channel"
 	req := &models.ChannelUpdateRequest{
 		Title: &newTitle,
@@ -2354,6 +2388,9 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 	}
 	if out == nil {
 		t.Fatal("expected non-nil output")
+	}
+	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelUpdated || notifications.events[0].Channel.URL != testPublicBase+"/api/v1/channels/"+cid.String() {
+		t.Fatalf("notification events = %#v", notifications.events)
 	}
 }
 

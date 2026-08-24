@@ -23,6 +23,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/dp1svc"
 	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/models"
+	"github.com/display-protocol/dp1-feed-v2/internal/notification"
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
 
@@ -89,23 +90,51 @@ type Executor interface {
 
 // impl is the concrete Executor: coordinates store, dp1-go validation/signing, optional HTTP fetch, and publicBaseURL for local playlist URLs.
 type impl struct {
-	store             store.Store
-	dp1               dp1svc.ValidatorSigner
-	extensionsEnabled bool
-	fetch             fetcher.Fetcher
-	publicBase        string
+	store              store.Store
+	dp1                dp1svc.ValidatorSigner
+	extensionsEnabled  bool
+	fetch              fetcher.Fetcher
+	publicBase         string
+	notificationClient notification.Client
+}
+
+// Option configures optional executor side-effect boundaries.
+type Option func(*impl)
+
+// WithNotificationClient registers the client notified after successful channel mutations.
+func WithNotificationClient(client notification.Client) Option {
+	return func(e *impl) {
+		e.notificationClient = client
+	}
 }
 
 // New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
-func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string) Executor {
-	return &impl{
+func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
+	e := &impl{
 		store:             st,
 		dp1:               dp,
 		extensionsEnabled: extensionsEnabled,
 		fetch:             fetch,
 		publicBase:        strings.TrimSpace(publicBaseURL),
 	}
+	for _, option := range options {
+		option(e)
+	}
+	return e
+}
+
+func (e *impl) notifyChannel(ctx context.Context, eventType notification.EventType, id uuid.UUID) {
+	if e.notificationClient == nil {
+		return
+	}
+	_ = e.notificationClient.Notify(ctx, notification.Event{
+		Type: eventType,
+		Time: time.Now().UTC(),
+		Channel: notification.ChannelRef{
+			URL: strings.TrimRight(e.publicBase, "/") + "/api/v1/channels/" + id.String(),
+		},
+	})
 }
 
 // ErrExtensionsDisabled is returned for channel APIs when the deployment has extensions disabled.
@@ -933,6 +962,7 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	e.notifyChannel(ctx, notification.ChannelAdded, id)
 	return ch, nil
 }
 
@@ -1027,6 +1057,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
 	return ch, nil
 }
 
@@ -1130,6 +1161,7 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
 	return ch, nil
 }
 
@@ -1138,7 +1170,19 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string) error {
 	if !e.extensionsEnabled {
 		return ErrExtensionsDisabled
 	}
-	return e.store.DeleteChannel(ctx, idOrSlug)
+	var id uuid.UUID
+	if e.notificationClient != nil {
+		rec, err := e.store.GetChannel(ctx, idOrSlug)
+		if err != nil {
+			return err
+		}
+		id = rec.ID
+	}
+	if err := e.store.DeleteChannel(ctx, idOrSlug); err != nil {
+		return err
+	}
+	e.notifyChannel(ctx, notification.ChannelDeleted, id)
+	return nil
 }
 
 // GetChannelRegistry returns the curated channel registry (publishers + channels in order).

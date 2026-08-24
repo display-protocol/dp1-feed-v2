@@ -20,6 +20,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 | **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
 | **DP-1 protocol adapter** | `internal/dp1svc` | Wraps [dp1-go](https://github.com/display-protocol/dp1-go): schema validation and v1.1+ multisig signing. |
 | **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
+| **Outbound notifications** | `internal/notification` | Transport-neutral client contract, HMAC webhook delivery, and best-effort multi-client dispatch for channel lifecycle events. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL implementation, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
 | **Cross-cutting** | `internal/logger` | Zap logger construction; Sentry is wired with Gin in `httpserver` (see Observability). |
@@ -49,6 +50,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 ## Background job and transaction ownership
 
 - **Background jobs:** none by design. Every operation completes in the request path; there are no workers or queues.
+- **Channel notifications:** after a channel create, replace, patch, or delete commits, the executor sends the canonical channel URL to configured clients in the same request path. Clients run concurrently under one aggregate timeout. Delivery is best-effort: failures are logged and do not change the successful mutation response. This avoids duplicate create retries caused by returning an error after commit. Guaranteed retry would require a durable outbox and an explicit background-job owner.
 - **Transactions:** multi-step writes (e.g. playlist-group or channel create with resolved playlists and membership) are owned by **`internal/executor`**, which uses the store’s transactional APIs so ingest + persist commit or roll back together. The HTTP layer does not start or manage database transactions.
 
 ---
