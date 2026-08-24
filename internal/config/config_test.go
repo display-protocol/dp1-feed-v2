@@ -80,7 +80,8 @@ func TestLoad_envOverrides(t *testing.T) {
 	t.Setenv("DP1_FEED_LOG_DEBUG", "true")
 	t.Setenv("DP1_FEED_EXTENSIONS_ENABLED", "0")
 	t.Setenv("DP1_FEED_PUBLIC_BASE_URL", "https://example.com/")
-	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels","secret":"webhook-secret"}]`)
+	t.Setenv("CATALOG_WEBHOOK_SECRET", "webhook-secret")
+	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels","secret_env":"CATALOG_WEBHOOK_SECRET"}]`)
 
 	cfg, err := Load("")
 	if err != nil {
@@ -106,6 +107,9 @@ func TestLoad_envOverrides(t *testing.T) {
 	}
 	if len(cfg.Notifications.Clients) != 1 || cfg.Notifications.Clients[0].Name != "catalog" {
 		t.Fatalf("notification clients override: %#v", cfg.Notifications.Clients)
+	}
+	if got := cfg.Notifications.Clients[0].Secret; got != "webhook-secret" {
+		t.Fatalf("resolved notification secret = %q", got)
 	}
 }
 
@@ -147,6 +151,38 @@ notifications:
 	}
 }
 
+func TestLoad_notificationClientSecretEnvFromYAML(t *testing.T) {
+	t.Setenv("CATALOG_WEBHOOK_SECRET", "environment-secret")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := strings.TrimSpace(`
+database:
+  url: postgres://user:pass@localhost:5432/db?sslmode=disable
+auth:
+  api_key: integration-test-key
+playlist:
+  signing_key_hex: "` + testSeedHex + `"
+  public_base_url: https://feed.example
+notifications:
+  clients:
+    - name: art-catalog
+      url: https://catalog.example/webhooks/v1/channels
+      secret_env: CATALOG_WEBHOOK_SECRET
+`)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	client := cfg.Notifications.Clients[0]
+	if client.SecretEnv != "CATALOG_WEBHOOK_SECRET" || client.Secret != "environment-secret" {
+		t.Fatalf("notification client secret resolution failed: %#v", client)
+	}
+}
+
 func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
 	t.Setenv("DP1_FEED_API_KEY", "k")
@@ -169,6 +205,32 @@ func TestLoad_invalidNotificationClient(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "secret is required") {
 		t.Fatalf("Load error = %v, want missing secret", err)
 	}
+}
+
+func TestLoad_notificationClientSecretConfiguration(t *testing.T) {
+	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
+	t.Setenv("DP1_FEED_API_KEY", "k")
+	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_PUBLIC_BASE_URL", "https://feed.example")
+
+	t.Run("missing referenced environment variable", func(t *testing.T) {
+		t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels","secret_env":"MISSING_CATALOG_SECRET"}]`)
+
+		_, err := Load("")
+		if err == nil || !strings.Contains(err.Error(), `environment variable "MISSING_CATALOG_SECRET" is not set`) {
+			t.Fatalf("Load error = %v, want missing secret environment error", err)
+		}
+	})
+
+	t.Run("direct and environment secret conflict", func(t *testing.T) {
+		t.Setenv("CATALOG_WEBHOOK_SECRET", "environment-secret")
+		t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels","secret":"direct-secret","secret_env":"CATALOG_WEBHOOK_SECRET"}]`)
+
+		_, err := Load("")
+		if err == nil || !strings.Contains(err.Error(), "only one of secret or secret_env") {
+			t.Fatalf("Load error = %v, want conflicting secret configuration error", err)
+		}
+	})
 }
 
 func TestLoad_corsAllowOriginsEnv(t *testing.T) {

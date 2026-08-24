@@ -43,9 +43,10 @@ type NotificationConfig struct {
 
 // NotificationClientConfig describes one HMAC-authenticated webhook consumer.
 type NotificationClientConfig struct {
-	Name   string `json:"name" yaml:"name"`
-	URL    string `json:"url" yaml:"url"`
-	Secret string `json:"secret" yaml:"secret"`
+	Name      string `json:"name" yaml:"name"`
+	URL       string `json:"url" yaml:"url"`
+	Secret    string `json:"secret" yaml:"secret"`
+	SecretEnv string `json:"secret_env" yaml:"secret_env"`
 }
 
 // CORSConfig controls browser cross-origin access (gin-contrib/cors).
@@ -120,6 +121,9 @@ func Load(configPath string) (*Config, error) {
 	if err := applyEnv(cfg); err != nil {
 		return nil, err
 	}
+	if err := resolveNotificationClientSecrets(cfg); err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -127,6 +131,28 @@ func Load(configPath string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// resolveNotificationClientSecrets keeps secret values out of checked-in YAML while preserving
+// one runtime representation for client construction. The environment variable name is config;
+// its value is the HMAC key and is never sent as a request header.
+func resolveNotificationClientSecrets(cfg *Config) error {
+	for i := range cfg.Notifications.Clients {
+		client := &cfg.Notifications.Clients[i]
+		client.SecretEnv = strings.TrimSpace(client.SecretEnv)
+		if strings.TrimSpace(client.Secret) != "" && client.SecretEnv != "" {
+			return fmt.Errorf("notification client %q must configure only one of secret or secret_env", client.Name)
+		}
+		if client.SecretEnv == "" {
+			continue
+		}
+		secret, exists := os.LookupEnv(client.SecretEnv)
+		if !exists || strings.TrimSpace(secret) == "" {
+			return fmt.Errorf("notification client %q secret environment variable %q is not set", client.Name, client.SecretEnv)
+		}
+		client.Secret = secret
+	}
+	return nil
 }
 
 // defaultConfig is the baseline before YAML and env; local-dev friendly defaults.
@@ -239,7 +265,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("notification client %q url must be absolute", client.Name)
 		}
 		if strings.TrimSpace(client.Secret) == "" {
-			return fmt.Errorf("notification client %q secret is required", client.Name)
+			return fmt.Errorf("notification client %q secret is required (configure secret or secret_env)", client.Name)
 		}
 	}
 	if len(c.Notifications.Clients) > 0 {
