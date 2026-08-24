@@ -131,10 +131,9 @@ func P256PublicKeyString(publicKey *ecdsa.PublicKey) (string, error) {
 
 // NewWebhookClient validates configuration and constructs a P-256-authenticated webhook client.
 func NewWebhookClient(endpoint string, privateKey *ecdsa.PrivateKey, httpClient *http.Client) (*WebhookClient, error) {
-	endpoint = strings.TrimSpace(endpoint)
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("notification endpoint must be an absolute URL")
+	endpoint, err := ValidateWebhookEndpoint(endpoint)
+	if err != nil {
+		return nil, err
 	}
 	if privateKey == nil {
 		return nil, fmt.Errorf("notification private key is required")
@@ -154,6 +153,21 @@ func NewWebhookClient(endpoint string, privateKey *ecdsa.PrivateKey, httpClient 
 		now:        time.Now,
 		newEventID: func() string { return "evt_" + uuid.NewString() },
 	}, nil
+}
+
+// ValidateWebhookEndpoint rejects URL schemes that net/http cannot deliver.
+// Fragments are also rejected because HTTP clients never send them to servers.
+func ValidateWebhookEndpoint(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" ||
+		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
+		return "", fmt.Errorf("notification endpoint must be an absolute HTTP(S) URL")
+	}
+	if parsed.Fragment != "" {
+		return "", fmt.Errorf("notification endpoint must not contain a fragment")
+	}
+	return endpoint, nil
 }
 
 // Notify signs the exact JSON request bytes and accepts any 2xx response.

@@ -194,6 +194,89 @@ func TestLoad_invalidWebhookPrivateKey(t *testing.T) {
 	}
 }
 
+func TestValidate_notificationConfiguration(t *testing.T) {
+	t.Parallel()
+
+	valid := defaultConfig()
+	valid.Database.URL = "postgres://x"
+	valid.Auth.APIKey = "k"
+	valid.Playlist.SigningKeyHex = testSeedHex
+	valid.Playlist.PublicBaseURL = "https://feed.example"
+	valid.Notifications.PrivateKeyHex = testWebhookPrivateKeyHex
+	valid.Notifications.Clients = []NotificationClientConfig{{
+		Name: "catalog",
+		URL:  "https://catalog.example/webhooks/v1/channels",
+	}}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "unsupported webhook scheme",
+			mutate: func(cfg *Config) {
+				cfg.Notifications.Clients[0].URL = "ftp://catalog.example/webhooks"
+			},
+			wantErr: "absolute HTTP(S) URL",
+		},
+		{
+			name: "public base query",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "https://feed.example?tenant=x"
+			},
+			wantErr: "must not contain a query or fragment",
+		},
+		{
+			name: "public base fragment",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "https://feed.example#channels"
+			},
+			wantErr: "must not contain a query or fragment",
+		},
+		{
+			name: "public base empty query",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "https://feed.example?"
+			},
+			wantErr: "must not contain a query or fragment",
+		},
+		{
+			name: "public base empty fragment",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "https://feed.example#"
+			},
+			wantErr: "must not contain a query or fragment",
+		},
+		{
+			name: "non-positive fetch timeout",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.FetchTimeout = 0
+			},
+			wantErr: "fetch timeout must be positive",
+		},
+		{
+			name: "write timeout does not reserve notification time",
+			mutate: func(cfg *Config) {
+				cfg.Server.WriteTimeout = cfg.Playlist.FetchTimeout + cfg.Notifications.Timeout
+			},
+			wantErr: "write timeout must exceed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := *valid
+			cfg.Notifications.Clients = append([]NotificationClientConfig(nil), valid.Notifications.Clients...)
+			tt.mutate(&cfg)
+			err := cfg.validate()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoad_corsAllowOriginsEnv(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
 	t.Setenv("DP1_FEED_API_KEY", "k")

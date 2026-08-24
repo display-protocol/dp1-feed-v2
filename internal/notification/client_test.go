@@ -139,6 +139,8 @@ func TestNewWebhookClientValidation(t *testing.T) {
 	}{
 		{name: "missing endpoint", withKey: true},
 		{name: "invalid endpoint", endpoint: "://bad", withKey: true},
+		{name: "unsupported endpoint scheme", endpoint: "ftp://example.com/webhooks", withKey: true},
+		{name: "endpoint fragment", endpoint: "https://example.com/webhooks#ignored", withKey: true},
 		{name: "missing private key", endpoint: "https://example.com"},
 	}
 	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")

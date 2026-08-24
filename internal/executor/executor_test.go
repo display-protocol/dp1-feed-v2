@@ -2194,13 +2194,51 @@ func TestListChannels(t *testing.T) {
 	}
 }
 
+type contextBlockingFetcher struct{}
+
+func (contextBlockingFetcher) FetchPlaylist(ctx context.Context, _ string) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestCreateChannel_playlistResolutionTimeoutIsAggregate(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	resolveTimeout := 80 * time.Millisecond
+	e := executor.New(
+		mocks.NewMockStore(ctrl),
+		mocks.NewMockValidatorSigner(ctrl),
+		true,
+		contextBlockingFetcher{},
+		testPublicBase,
+		executor.WithPlaylistResolveTimeout(resolveTimeout),
+	)
+	playlists := make([]string, 9) // More than the resolver concurrency limit of eight.
+	for i := range playlists {
+		playlists[i] = fmt.Sprintf("https://remote.example/playlists/%d", i)
+	}
+
+	started := time.Now()
+	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
+		Title:     "Aggregate timeout",
+		Playlists: playlists,
+	})
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CreateChannel error = %v, want deadline exceeded", err)
+	}
+	if elapsed > 4*resolveTimeout {
+		t.Fatalf("playlist resolution took %s, want one aggregate %s timeout", elapsed, resolveTimeout)
+	}
+}
+
 func TestDeleteChannel(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{ID: cid}, nil)
-	mockStore.EXPECT().DeleteChannel(gomock.Any(), "cid").Return(nil)
+	mockStore.EXPECT().DeleteChannel(gomock.Any(), cid.String()).Return(nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -2240,7 +2278,7 @@ func TestReplaceChannel_success(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), "ch-slug", gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput) {
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput) {
 		if in.ID != uuid.Nil || in.Slug != "" {
 			t.Fatalf("update input should not set row id/slug: id=%v slug=%q", in.ID, in.Slug)
 		}
@@ -2298,7 +2336,7 @@ func TestReplaceChannel_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), "ch-slug", gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	req := validChannelCreateReq("ignored-on-replace", localPlaylistRef("pl2"))
@@ -2374,7 +2412,7 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), "old-ch", gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Return(nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))

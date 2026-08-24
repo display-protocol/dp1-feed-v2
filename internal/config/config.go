@@ -141,7 +141,7 @@ func defaultConfig() *Config {
 			Host:         "0.0.0.0",
 			Port:         8787,
 			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
+			WriteTimeout: 60 * time.Second,
 			IdleTimeout:  120 * time.Second,
 		},
 		Database: DatabaseConfig{
@@ -227,8 +227,14 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")
 	}
+	if c.Playlist.FetchTimeout <= 0 {
+		return fmt.Errorf("playlist fetch timeout must be positive")
+	}
 	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
 		return fmt.Errorf("notification timeout must be positive")
+	}
+	if len(c.Notifications.Clients) > 0 && c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Notifications.Timeout {
+		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus notification timeout")
 	}
 	if len(c.Notifications.Clients) > 0 && strings.TrimSpace(c.Notifications.PrivateKeyHex) == "" {
 		return fmt.Errorf("webhook private key is required when notification clients are configured (yaml notifications.private_key_hex or DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX)")
@@ -245,15 +251,21 @@ func (c *Config) validate() error {
 			return fmt.Errorf("notification client name %q is duplicated", client.Name)
 		}
 		names[client.Name] = struct{}{}
-		parsed, err := url.Parse(client.URL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("notification client %q url must be absolute", client.Name)
+		endpoint, err := notification.ValidateWebhookEndpoint(client.URL)
+		if err != nil {
+			return fmt.Errorf("notification client %q url: %w", client.Name, err)
 		}
+		client.URL = endpoint
 	}
 	if len(c.Notifications.Clients) > 0 {
+		c.Playlist.PublicBaseURL = strings.TrimRight(strings.TrimSpace(c.Playlist.PublicBaseURL), "/")
 		publicBase, err := url.Parse(c.Playlist.PublicBaseURL)
-		if err != nil || publicBase.Scheme == "" || publicBase.Host == "" {
-			return fmt.Errorf("playlist public base url must be absolute when notification clients are configured")
+		if err != nil || publicBase.Host == "" ||
+			(!strings.EqualFold(publicBase.Scheme, "http") && !strings.EqualFold(publicBase.Scheme, "https")) {
+			return fmt.Errorf("playlist public base url must be an absolute HTTP(S) URL when notification clients are configured")
+		}
+		if publicBase.RawQuery != "" || publicBase.ForceQuery || strings.Contains(c.Playlist.PublicBaseURL, "#") {
+			return fmt.Errorf("playlist public base url must not contain a query or fragment when notification clients are configured")
 		}
 	}
 	return nil

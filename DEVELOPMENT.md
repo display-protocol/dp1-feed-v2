@@ -148,6 +148,7 @@ See `internal/config/config.go` for all available options. Key settings:
 server:
   host: 0.0.0.0
   port: 8787
+  write_timeout: 60s
 
 database:
   url: postgres://localhost/dp1_feed?sslmode=disable
@@ -158,6 +159,7 @@ auth:
   api_key: your-secret-api-key-here
 
 playlist:
+  fetch_timeout: 30s
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
 
 notifications:
@@ -195,6 +197,11 @@ value in `Webhook-Public-Key` and the 64-byte `R || S` signature in
 `Webhook-Signature: p256=<base64url-signature>`. Calls happen concurrently
 under one aggregate timeout after the database commit. They are best-effort:
 failures are logged, while the successful channel mutation remains successful.
+When clients are enabled, `server.write_timeout` must be greater than
+`playlist.fetch_timeout + notifications.timeout`; startup rejects a smaller
+budget so post-commit delivery cannot consume the entire response window.
+Notification endpoints must use HTTP(S), and the public base URL cannot contain
+a query or fragment.
 
 ### Docker Compose Configuration
 

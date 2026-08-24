@@ -100,6 +100,11 @@ func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.
 	if len(uris) == 0 {
 		return nil, fmt.Errorf("playlists must be non-empty")
 	}
+	if e.playlistResolveTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.playlistResolveTimeout)
+		defer cancel()
+	}
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(8)
 	out := make([]store.IngestedPlaylist, len(uris))
