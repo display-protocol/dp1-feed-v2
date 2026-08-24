@@ -20,7 +20,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 | **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
 | **DP-1 protocol adapter** | `internal/dp1svc` | Wraps [dp1-go](https://github.com/display-protocol/dp1-go): schema validation and v1.1+ multisig signing. |
 | **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
-| **Outbound notifications** | `internal/notification` | Transport-neutral client contract, HMAC webhook delivery, and best-effort multi-client dispatch for channel lifecycle events. |
+| **Outbound notifications** | `internal/notification` | Transport-neutral client contract, P-256 signed webhook delivery, and best-effort multi-client dispatch for channel lifecycle events. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL implementation, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
 | **Cross-cutting** | `internal/logger` | Zap logger construction; Sentry is wired with Gin in `httpserver` (see Observability). |

@@ -4,9 +4,12 @@ package notification
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,28 +97,59 @@ func (d *Dispatcher) Notify(ctx context.Context, event Event) error {
 // WebhookClient delivers events using the signed webhook contract shared with event consumers.
 type WebhookClient struct {
 	endpoint   string
-	secret     []byte
+	privateKey *ecdsa.PrivateKey
+	publicKey  string
 	httpClient *http.Client
 	now        func() time.Time
 	newEventID func() string
 }
 
-// NewWebhookClient validates configuration and constructs an HMAC-authenticated webhook client.
-func NewWebhookClient(endpoint, secret string, httpClient *http.Client) (*WebhookClient, error) {
+// ParseP256PrivateKeyHex parses one fixed-width P-256 private scalar.
+func ParseP256PrivateKeyHex(value string) (*ecdsa.PrivateKey, error) {
+	encoded, err := hex.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(encoded) != 32 {
+		return nil, fmt.Errorf("P-256 private key must be exactly 32 bytes encoded as 64 hexadecimal characters")
+	}
+	privateKey, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), encoded)
+	if err != nil {
+		return nil, fmt.Errorf("P-256 private key scalar is outside the valid range")
+	}
+	return privateKey, nil
+}
+
+// P256PublicKeyString returns the public key format used by Webhook-Public-Key.
+func P256PublicKeyString(publicKey *ecdsa.PublicKey) (string, error) {
+	if publicKey == nil || publicKey.Curve == nil || publicKey.Curve.Params().Name != elliptic.P256().Params().Name {
+		return "", fmt.Errorf("webhook public key must be a valid P-256 point")
+	}
+	encoded, err := publicKey.Bytes()
+	if err != nil {
+		return "", fmt.Errorf("webhook public key must be a valid P-256 point: %w", err)
+	}
+	return "p256:" + base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+// NewWebhookClient validates configuration and constructs a P-256-authenticated webhook client.
+func NewWebhookClient(endpoint string, privateKey *ecdsa.PrivateKey, httpClient *http.Client) (*WebhookClient, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("notification endpoint must be an absolute URL")
 	}
-	if strings.TrimSpace(secret) == "" {
-		return nil, fmt.Errorf("notification secret is required")
+	if privateKey == nil {
+		return nil, fmt.Errorf("notification private key is required")
+	}
+	publicKey, err := P256PublicKeyString(&privateKey.PublicKey)
+	if err != nil {
+		return nil, err
 	}
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return &WebhookClient{
 		endpoint:   endpoint,
-		secret:     []byte(secret),
+		privateKey: privateKey,
+		publicKey:  publicKey,
 		httpClient: httpClient,
 		now:        time.Now,
 		newEventID: func() string { return "evt_" + uuid.NewString() },
@@ -131,10 +165,16 @@ func (c *WebhookClient) Notify(ctx context.Context, event Event) error {
 	eventID := c.newEventID()
 	timestamp := strconv.FormatInt(c.now().Unix(), 10)
 
-	mac := hmac.New(sha256.New, c.secret)
-	_, _ = mac.Write([]byte(eventID + "." + timestamp + "."))
-	_, _ = mac.Write(body)
-	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	signed := append([]byte(eventID+"."+timestamp+"."), body...)
+	digest := sha256.Sum256(signed)
+	r, s, err := ecdsa.Sign(rand.Reader, c.privateKey, digest[:])
+	if err != nil {
+		return fmt.Errorf("sign channel event: %w", err)
+	}
+	signatureBytes := make([]byte, 64)
+	r.FillBytes(signatureBytes[:32])
+	s.FillBytes(signatureBytes[32:])
+	signature := base64.RawURLEncoding.EncodeToString(signatureBytes)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -143,7 +183,8 @@ func (c *WebhookClient) Notify(ctx context.Context, event Event) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Webhook-Id", eventID)
 	req.Header.Set("Webhook-Timestamp", timestamp)
-	req.Header.Set("Webhook-Signature", "v1="+signature)
+	req.Header.Set("Webhook-Public-Key", c.publicKey)
+	req.Header.Set("Webhook-Signature", "p256="+signature)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

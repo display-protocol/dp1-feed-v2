@@ -54,6 +54,9 @@ func main() {
 		panic(err)
 	}
 	defer func() { _ = zlog.Sync() }()
+	if cfg.Notifications.PublicKey != "" {
+		zlog.Info("webhook signing public key", zap.String("public_key", cfg.Notifications.PublicKey))
+	}
 
 	// 2) PostgreSQL pool, optional migrate-up on startup, then wire store → dp1 → fetcher → executor → HTTP.
 	ctx := context.Background()
@@ -78,10 +81,14 @@ func main() {
 
 	execOptions := make([]executor.Option, 0, 1)
 	if len(cfg.Notifications.Clients) > 0 {
+		privateKey, err := notification.ParseP256PrivateKeyHex(cfg.Notifications.PrivateKeyHex)
+		if err != nil {
+			zlog.Fatal("webhook private key", zap.Error(err))
+		}
 		httpClient := &http.Client{Timeout: cfg.Notifications.Timeout}
 		clients := make([]notification.NamedClient, 0, len(cfg.Notifications.Clients))
 		for _, clientConfig := range cfg.Notifications.Clients {
-			client, err := notification.NewWebhookClient(clientConfig.URL, clientConfig.Secret, httpClient)
+			client, err := notification.NewWebhookClient(clientConfig.URL, privateKey, httpClient)
 			if err != nil {
 				zlog.Fatal("notification client", zap.String("client", clientConfig.Name), zap.Error(err))
 			}

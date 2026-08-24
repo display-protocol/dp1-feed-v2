@@ -162,10 +162,10 @@ playlist:
 
 notifications:
   timeout: 15s
+  private_key_hex: 64-char-p256-private-scalar
   clients:
     - name: art-catalog
       url: https://catalog.example/webhooks/v1/channels
-      secret_env: DP1_FEED_ART_CATALOG_WEBHOOK_SECRET
 ```
 
 ### Environment Variable Overrides
@@ -177,23 +177,24 @@ export DP1_FEED_SERVER_PORT=9000
 export DP1_FEED_API_KEY=my-secret-key
 ```
 
-For each channel notification client, `secret_env` names the environment
-variable containing its shared HMAC key. This keeps the value out of YAML and
-separates it from the client list when clients are supplied as JSON:
+The feed uses one P-256 private key for every configured notification client.
+Keep that private scalar in the environment and keep only destinations in the
+client list:
 
 ```bash
-export DP1_FEED_ART_CATALOG_WEBHOOK_SECRET='replace-me'
-export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"art-catalog","url":"https://catalog.example/webhooks/v1/channels","secret_env":"DP1_FEED_ART_CATALOG_WEBHOOK_SECRET"}]'
+export DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX="$(openssl rand -hex 32)"
+export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"art-catalog","url":"https://catalog.example/webhooks/v1/channels"}]'
 ```
 
 The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
-with HMAC-SHA256 and sends `channel.added`, `channel.updated`, or
-`channel.deleted`. The shared key is used locally to produce
-`Webhook-Signature`; it is never sent as an API-key or authorization header.
-The receiving service must hold the same key and verify the signature. Calls
-happen concurrently under one aggregate timeout after the database commit.
-They are best-effort: failures are logged, while the successful channel
-mutation remains successful.
+with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or
+`channel.deleted`. Startup logs the derived public key as
+`p256:<base64url-uncompressed-SEC1-key>`. Give that public value to each
+consumer's allowlist; never copy the private scalar. Requests attach the same
+value in `Webhook-Public-Key` and the 64-byte `R || S` signature in
+`Webhook-Signature: p256=<base64url-signature>`. Calls happen concurrently
+under one aggregate timeout after the database commit. They are best-effort:
+failures are logged, while the successful channel mutation remains successful.
 
 ### Docker Compose Configuration
 
@@ -214,8 +215,8 @@ The `.env` file contains all necessary environment variables for Docker deployme
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging
-- `DP1_FEED_NOTIFICATION_CLIENTS` — Optional JSON client list; each item may use `secret_env`
-- `DP1_FEED_ART_CATALOG_WEBHOOK_SECRET` — Example shared HMAC key referenced by `secret_env`
+- `DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX` — P-256 private scalar used only to sign webhooks
+- `DP1_FEED_NOTIFICATION_CLIENTS` — Optional JSON destination list
 
 ## Development Workflow
 

@@ -18,6 +18,7 @@ import (
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/dp1svc"
+	"github.com/display-protocol/dp1-feed-v2/internal/notification"
 )
 
 const envPrefix = "DP1_FEED_"
@@ -37,16 +38,16 @@ type Config struct {
 
 // NotificationConfig controls outbound channel lifecycle delivery.
 type NotificationConfig struct {
-	Timeout time.Duration              `yaml:"timeout"`
-	Clients []NotificationClientConfig `yaml:"clients"`
+	Timeout       time.Duration              `yaml:"timeout"`
+	PrivateKeyHex string                     `yaml:"private_key_hex"`
+	PublicKey     string                     `yaml:"-"`
+	Clients       []NotificationClientConfig `yaml:"clients"`
 }
 
-// NotificationClientConfig describes one HMAC-authenticated webhook consumer.
+// NotificationClientConfig describes one signed webhook consumer.
 type NotificationClientConfig struct {
-	Name      string `json:"name" yaml:"name"`
-	URL       string `json:"url" yaml:"url"`
-	Secret    string `json:"secret" yaml:"secret"`
-	SecretEnv string `json:"secret_env" yaml:"secret_env"`
+	Name string `json:"name" yaml:"name"`
+	URL  string `json:"url" yaml:"url"`
 }
 
 // CORSConfig controls browser cross-origin access (gin-contrib/cors).
@@ -121,38 +122,16 @@ func Load(configPath string) (*Config, error) {
 	if err := applyEnv(cfg); err != nil {
 		return nil, err
 	}
-	if err := resolveNotificationClientSecrets(cfg); err != nil {
-		return nil, err
-	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.deriveSigningKid(); err != nil {
 		return nil, err
 	}
-	return cfg, nil
-}
-
-// resolveNotificationClientSecrets keeps secret values out of checked-in YAML while preserving
-// one runtime representation for client construction. The environment variable name is config;
-// its value is the HMAC key and is never sent as a request header.
-func resolveNotificationClientSecrets(cfg *Config) error {
-	for i := range cfg.Notifications.Clients {
-		client := &cfg.Notifications.Clients[i]
-		client.SecretEnv = strings.TrimSpace(client.SecretEnv)
-		if strings.TrimSpace(client.Secret) != "" && client.SecretEnv != "" {
-			return fmt.Errorf("notification client %q must configure only one of secret or secret_env", client.Name)
-		}
-		if client.SecretEnv == "" {
-			continue
-		}
-		secret, exists := os.LookupEnv(client.SecretEnv)
-		if !exists || strings.TrimSpace(secret) == "" {
-			return fmt.Errorf("notification client %q secret environment variable %q is not set", client.Name, client.SecretEnv)
-		}
-		client.Secret = secret
+	if err := cfg.deriveWebhookPublicKey(); err != nil {
+		return nil, err
 	}
-	return nil
+	return cfg, nil
 }
 
 // defaultConfig is the baseline before YAML and env; local-dev friendly defaults.
@@ -231,6 +210,9 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Notifications.Clients = clients
 	}
+	if v := os.Getenv(envPrefix + "WEBHOOK_PRIVATE_KEY_HEX"); v != "" {
+		cfg.Notifications.PrivateKeyHex = v
+	}
 	return nil
 }
 
@@ -248,6 +230,9 @@ func (c *Config) validate() error {
 	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
 		return fmt.Errorf("notification timeout must be positive")
 	}
+	if len(c.Notifications.Clients) > 0 && strings.TrimSpace(c.Notifications.PrivateKeyHex) == "" {
+		return fmt.Errorf("webhook private key is required when notification clients are configured (yaml notifications.private_key_hex or DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX)")
+	}
 	names := make(map[string]struct{}, len(c.Notifications.Clients))
 	for i := range c.Notifications.Clients {
 		client := &c.Notifications.Clients[i]
@@ -264,9 +249,6 @@ func (c *Config) validate() error {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("notification client %q url must be absolute", client.Name)
 		}
-		if strings.TrimSpace(client.Secret) == "" {
-			return fmt.Errorf("notification client %q secret is required (configure secret or secret_env)", client.Name)
-		}
 	}
 	if len(c.Notifications.Clients) > 0 {
 		publicBase, err := url.Parse(c.Playlist.PublicBaseURL)
@@ -274,6 +256,23 @@ func (c *Config) validate() error {
 			return fmt.Errorf("playlist public base url must be absolute when notification clients are configured")
 		}
 	}
+	return nil
+}
+
+// deriveWebhookPublicKey validates the configured private scalar and publishes only its public half.
+func (c *Config) deriveWebhookPublicKey() error {
+	if strings.TrimSpace(c.Notifications.PrivateKeyHex) == "" {
+		return nil
+	}
+	privateKey, err := notification.ParseP256PrivateKeyHex(c.Notifications.PrivateKeyHex)
+	if err != nil {
+		return fmt.Errorf("webhook private key: %w", err)
+	}
+	publicKey, err := notification.P256PublicKeyString(&privateKey.PublicKey)
+	if err != nil {
+		return fmt.Errorf("webhook public key: %w", err)
+	}
+	c.Notifications.PublicKey = publicKey
 	return nil
 }
 

@@ -2,12 +2,13 @@ package notification
 
 import (
 	"context"
-	"crypto/hmac"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +22,14 @@ import (
 func TestWebhookClientNotify(t *testing.T) {
 	t.Parallel()
 
-	const secret = "test-webhook-secret" // #nosec G101 -- deterministic test-only HMAC key.
+	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := P256PublicKeyString(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	requestTime := time.Date(2026, 8, 24, 1, 2, 3, 0, time.UTC)
 	eventTime := time.Date(2026, 8, 24, 1, 2, 2, 0, time.UTC)
 
@@ -45,12 +53,25 @@ func TestWebhookClientNotify(t *testing.T) {
 			t.Errorf("Webhook-Timestamp = %q, want %q", got, want)
 		}
 
-		mac := hmac.New(sha256.New, []byte(secret))
-		_, _ = mac.Write([]byte("evt_test.1787533323."))
-		_, _ = mac.Write(body)
-		wantSignature := "v1=" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-		if got := r.Header.Get("Webhook-Signature"); got != wantSignature {
-			t.Errorf("Webhook-Signature = %q, want %q", got, wantSignature)
+		if got := r.Header.Get("Webhook-Public-Key"); got != publicKey {
+			t.Errorf("Webhook-Public-Key = %q, want %q", got, publicKey)
+		}
+		signatureHeader := r.Header.Get("Webhook-Signature")
+		if !strings.HasPrefix(signatureHeader, "p256=") {
+			t.Errorf("Webhook-Signature = %q, want p256 signature", signatureHeader)
+		} else {
+			signature, decodeErr := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(signatureHeader, "p256="))
+			if decodeErr != nil || len(signature) != 64 {
+				t.Errorf("decode Webhook-Signature: bytes=%d err=%v", len(signature), decodeErr)
+			} else {
+				signed := append([]byte("evt_test.1787533323."), body...)
+				digest := sha256.Sum256(signed)
+				rValue := new(big.Int).SetBytes(signature[:32])
+				sValue := new(big.Int).SetBytes(signature[32:])
+				if !ecdsa.Verify(&privateKey.PublicKey, digest[:], rValue, sValue) {
+					t.Error("Webhook-Signature did not verify")
+				}
+			}
 		}
 
 		var got Event
@@ -66,7 +87,7 @@ func TestWebhookClientNotify(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewWebhookClient(server.URL, secret, server.Client())
+	client, err := NewWebhookClient(server.URL, privateKey, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,16 +112,17 @@ func TestWebhookClientNotifyRejectsNon2xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewWebhookClient(server.URL, "do-not-leak-me", server.Client())
+	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewWebhookClient(server.URL, privateKey, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = client.Notify(context.Background(), Event{Type: ChannelAdded, Time: time.Now(), Channel: ChannelRef{URL: "https://feed.example/channel"}})
 	if err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("Notify error = %v, want status", err)
-	}
-	if strings.Contains(err.Error(), "do-not-leak-me") {
-		t.Fatalf("Notify error leaked secret: %v", err)
 	}
 	if len(err.Error()) > 2_000 {
 		t.Fatalf("Notify error is unexpectedly large: %d", len(err.Error()))
@@ -113,19 +135,50 @@ func TestNewWebhookClientValidation(t *testing.T) {
 	tests := []struct {
 		name     string
 		endpoint string
-		secret   string
+		withKey  bool
 	}{
-		{name: "missing endpoint", secret: "secret"},
-		{name: "invalid endpoint", endpoint: "://bad", secret: "secret"},
-		{name: "missing secret", endpoint: "https://example.com"},
+		{name: "missing endpoint", withKey: true},
+		{name: "invalid endpoint", endpoint: "://bad", withKey: true},
+		{name: "missing private key", endpoint: "https://example.com"},
+	}
+	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := NewWebhookClient(tt.endpoint, tt.secret, http.DefaultClient); err == nil {
+			var key *ecdsa.PrivateKey
+			if tt.withKey {
+				key = privateKey
+			}
+			if _, err := NewWebhookClient(tt.endpoint, key, http.DefaultClient); err == nil {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestParseP256PrivateKeyHex(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := P256PublicKeyString(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expected = "p256:BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+	if publicKey != expected {
+		t.Fatalf("P256PublicKeyString() = %q, want %q", publicKey, expected)
+	}
+
+	for _, value := range []string{"", "01", strings.Repeat("00", 32), strings.Repeat("ff", 32), strings.Repeat("zz", 32)} {
+		if _, err := ParseP256PrivateKeyHex(value); err == nil {
+			t.Fatalf("ParseP256PrivateKeyHex(%q) succeeded", value)
+		}
 	}
 }
 

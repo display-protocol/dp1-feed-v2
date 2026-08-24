@@ -38,13 +38,13 @@ playlist:
   signing_key_hex: ""
   public_base_url: "http://localhost:8787"
 
-# Optional channel lifecycle consumers. secret_env names the environment variable
-# containing the shared HMAC key; the key itself is not sent as an API header.
+# Optional channel lifecycle consumers. Keep private_key_hex in
+# DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX outside checked-in YAML.
 notifications:
   timeout: 15s
+  private_key_hex: ""
   clients: []
   # To enable a client, replace the empty list above with:
   # clients:
   #   - name: "art-catalog"
   #     url: "https://catalog.example/webhooks/v1/channels"
-  #     secret_env: "DP1_FEED_ART_CATALOG_WEBHOOK_SECRET"
