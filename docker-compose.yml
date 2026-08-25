@@ -9,6 +9,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql
+      - ./scripts/postgres18-entrypoint.sh:/usr/local/bin/dp1-postgres-entrypoint:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/dp1-postgres-entrypoint"]
+    command: ["postgres"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s

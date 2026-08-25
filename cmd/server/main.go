@@ -94,10 +94,7 @@ func main() {
 			}
 			clients = append(clients, notification.NamedClient{Name: clientConfig.Name, Client: client})
 		}
-		execOptions = append(execOptions,
-			executor.WithNotificationClient(notification.NewDispatcher(zlog, cfg.Notifications.Timeout, clients)),
-			executor.WithChannelMutationTimeout(cfg.Server.WriteTimeout),
-		)
+		execOptions = append(execOptions, executor.WithNotificationClient(notification.NewDispatcher(zlog, cfg.Notifications.Timeout, clients)))
 	}
 	exec := executor.New(st, dp1, cfg.Extensions.Enabled, f, cfg.Playlist.PublicBaseURL, execOptions...)
 	srv := httpserver.New(cfg, zlog, exec, version)

@@ -34,12 +34,13 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 		v1.DELETE("/playlist-groups/:id", APIKeyAuth(cfg.Auth.APIKey, log), h.DeletePlaylistGroup)
 
 		if cfg.Extensions.Enabled {
+			channelMutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
 			v1.GET("/channels", h.ListChannels)
 			v1.GET("/channels/:id", h.GetChannel)
-			v1.POST("/channels", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.CreateChannel)
-			v1.PUT("/channels/:id", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.ReplaceChannel)
-			v1.PATCH("/channels/:id", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.UpdateChannel)
-			v1.DELETE("/channels/:id", APIKeyAuth(cfg.Auth.APIKey, log), h.DeleteChannel)
+			v1.POST("/channels", channelMutationDeadline, SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.CreateChannel)
+			v1.PUT("/channels/:id", channelMutationDeadline, SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.ReplaceChannel)
+			v1.PATCH("/channels/:id", channelMutationDeadline, SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.UpdateChannel)
+			v1.DELETE("/channels/:id", channelMutationDeadline, APIKeyAuth(cfg.Auth.APIKey, log), h.DeleteChannel)
 		} else {
 			v1.GET("/channels", extensionsDisabled)
 			v1.GET("/channels/:id", extensionsDisabled)

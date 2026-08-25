@@ -67,6 +67,13 @@ func stringPtr(s string) *string {
 	return &s
 }
 
+func notifiedMutationContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func displayAtValue(item playlist.PlaylistItem) string {
 	if item.DisplayAt == nil {
 		return ""
@@ -84,12 +91,15 @@ func (c *recordingNotificationClient) Notify(_ context.Context, event notificati
 }
 
 type contextRecordingNotificationClient struct {
-	contextErr error
-	events     []notification.Event
+	contextErr  error
+	deadline    time.Time
+	hasDeadline bool
+	events      []notification.Event
 }
 
 func (c *contextRecordingNotificationClient) Notify(ctx context.Context, event notification.Event) error {
 	c.contextErr = ctx.Err()
+	c.deadline, c.hasDeadline = ctx.Deadline()
 	c.events = append(c.events, event)
 	return nil
 }
@@ -2071,7 +2081,7 @@ func TestCreateChannel_success(t *testing.T) {
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
-	out, err := e.CreateChannel(context.Background(), validChannelCreateReq("My Channel", localPlaylistRef("pl-ch")))
+	out, err := e.CreateChannel(notifiedMutationContext(t), validChannelCreateReq("My Channel", localPlaylistRef("pl-ch")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2141,7 +2151,7 @@ func TestCreateChannel_storeError(t *testing.T) {
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
-	_, err := e.CreateChannel(context.Background(), validChannelCreateReq("slug", localPlaylistRef("p")))
+	_, err := e.CreateChannel(notifiedMutationContext(t), validChannelCreateReq("slug", localPlaylistRef("p")))
 	if err == nil || !strings.Contains(err.Error(), "store: db") {
 		t.Fatalf("got %v", err)
 	}
@@ -2275,7 +2285,7 @@ func TestDeleteChannel(t *testing.T) {
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase, executor.WithNotificationClient(notifications))
-	if err := e.DeleteChannel(context.Background(), "cid"); err != nil {
+	if err := e.DeleteChannel(notifiedMutationContext(t), "cid"); err != nil {
 		t.Fatal(err)
 	}
 	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelDeleted || notifications.events[0].Channel.URL != testPublicBase+"/api/v1/channels/"+cid.String() {
@@ -2290,7 +2300,9 @@ func TestDeleteChannel_notificationSurvivesRequestCancellationAfterCommit(t *tes
 	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{ID: cid}, nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	deadlineCtx := notifiedMutationContext(t)
+	wantDeadline, _ := deadlineCtx.Deadline()
+	ctx, cancel := context.WithCancel(deadlineCtx)
 	mockStore.EXPECT().DeleteChannel(gomock.Any(), cid.String()).DoAndReturn(func(mutationCtx context.Context, _ string) error {
 		cancel() // The row committed just before the HTTP request context was canceled.
 		if err := mutationCtx.Err(); err != nil {
@@ -2307,6 +2319,9 @@ func TestDeleteChannel_notificationSurvivesRequestCancellationAfterCommit(t *tes
 	if notifications.contextErr != nil {
 		t.Fatalf("notification context error = %v, want detached post-commit context", notifications.contextErr)
 	}
+	if !notifications.hasDeadline || !notifications.deadline.Equal(wantDeadline) {
+		t.Fatalf("notification deadline = %v, %t; want %v, true", notifications.deadline, notifications.hasDeadline, wantDeadline)
+	}
 	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelDeleted {
 		t.Fatalf("notification events = %#v", notifications.events)
 	}
@@ -2317,7 +2332,7 @@ func TestDeleteChannel_doesNotBeginMutationAfterRequestCancellation(t *testing.T
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(notifiedMutationContext(t))
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").DoAndReturn(func(context.Context, string) (*store.ChannelRecord, error) {
 		cancel()
 		return &store.ChannelRecord{ID: cid}, nil
@@ -2353,9 +2368,10 @@ func TestDeleteChannel_detachedMutationContextIsBounded(t *testing.T) {
 		nil,
 		testPublicBase,
 		executor.WithNotificationClient(notifications),
-		executor.WithChannelMutationTimeout(10*time.Millisecond),
 	)
-	err := e.DeleteChannel(context.Background(), "cid")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := e.DeleteChannel(ctx, "cid")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("DeleteChannel error = %v, want context.DeadlineExceeded", err)
 	}
@@ -2408,7 +2424,7 @@ func TestReplaceChannel_success(t *testing.T) {
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
 	req := validChannelCreateReq("ignored-on-replace", localPlaylistRef("pl2"))
 	req.Title = "New title"
-	out, err := e.ReplaceChannel(context.Background(), "ch-slug", req)
+	out, err := e.ReplaceChannel(notifiedMutationContext(t), "ch-slug", req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2534,7 +2550,7 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 	req := &models.ChannelUpdateRequest{
 		Title: &newTitle,
 	}
-	out, err := e.UpdateChannel(context.Background(), "old-ch", req)
+	out, err := e.UpdateChannel(notifiedMutationContext(t), "old-ch", req)
 	if err != nil {
 		t.Fatal(err)
 	}

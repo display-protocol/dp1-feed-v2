@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,17 @@ import (
 )
 
 const authHeader = "Authorization"
+
+// RequestDeadline makes the handler budget visible to persistence and outbound
+// notification calls. The HTTP server's WriteTimeout is only a socket deadline.
+func RequestDeadline(timeout time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
 
 // AuthMode distinguishes API key (ops) vs signature-based (user) authentication paths.
 type AuthMode int

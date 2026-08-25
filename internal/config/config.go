@@ -60,11 +60,12 @@ type CORSConfig struct {
 
 // ServerConfig controls the HTTP listener.
 type ServerConfig struct {
-	Host         string        `yaml:"host"`
-	Port         int           `yaml:"port"`
-	ReadTimeout  time.Duration `yaml:"read_timeout"`
-	WriteTimeout time.Duration `yaml:"write_timeout"`
-	IdleTimeout  time.Duration `yaml:"idle_timeout"`
+	Host                 string        `yaml:"host"`
+	Port                 int           `yaml:"port"`
+	ReadTimeout          time.Duration `yaml:"read_timeout"`
+	WriteTimeout         time.Duration `yaml:"write_timeout"`
+	ResponseWriteReserve time.Duration `yaml:"response_write_reserve"`
+	IdleTimeout          time.Duration `yaml:"idle_timeout"`
 }
 
 // DatabaseConfig holds PostgreSQL connection settings.
@@ -139,11 +140,12 @@ func Load(configPath string) (*Config, error) {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host:         "0.0.0.0",
-			Port:         8787,
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			Host:                 "0.0.0.0",
+			Port:                 8787,
+			ReadTimeout:          30 * time.Second,
+			WriteTimeout:         60 * time.Second,
+			ResponseWriteReserve: time.Second,
+			IdleTimeout:          120 * time.Second,
 		},
 		Database: DatabaseConfig{
 			URL:             "postgres://postgres:postgres@localhost:5432/dp1_feed?sslmode=disable", // #nosec G101 -- local development default; production config comes from YAML/env.
@@ -231,11 +233,17 @@ func (c *Config) validate() error {
 	if c.Playlist.FetchTimeout <= 0 {
 		return fmt.Errorf("playlist fetch timeout must be positive")
 	}
+	if c.Server.ResponseWriteReserve <= 0 {
+		return fmt.Errorf("response write reserve must be positive")
+	}
+	if c.Server.WriteTimeout <= c.Server.ResponseWriteReserve {
+		return fmt.Errorf("server write timeout must exceed response write reserve")
+	}
 	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
 		return fmt.Errorf("notification timeout must be positive")
 	}
-	if len(c.Notifications.Clients) > 0 && c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Notifications.Timeout {
-		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus notification timeout")
+	if len(c.Notifications.Clients) > 0 && c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Notifications.Timeout+c.Server.ResponseWriteReserve {
+		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus notification timeout plus response write reserve")
 	}
 	if len(c.Notifications.Clients) > 0 && strings.TrimSpace(c.Notifications.PrivateKeyHex) == "" {
 		return fmt.Errorf("webhook private key is required when notification clients are configured (yaml notifications.private_key_hex or DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX)")

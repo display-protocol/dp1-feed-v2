@@ -70,6 +70,9 @@ playlist:
 	if !strings.HasPrefix(cfg.Playlist.SigningKid, "did:key:") {
 		t.Fatalf("SigningKid should be did:key: %q", cfg.Playlist.SigningKid)
 	}
+	if cfg.Server.ResponseWriteReserve.String() != "1s" {
+		t.Fatalf("response write reserve = %s, want 1s", cfg.Server.ResponseWriteReserve)
+	}
 }
 
 func TestLoad_envOverrides(t *testing.T) {
@@ -340,9 +343,16 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 		{
 			name: "write timeout does not reserve notification time",
 			mutate: func(cfg *Config) {
-				cfg.Server.WriteTimeout = cfg.Playlist.FetchTimeout + cfg.Notifications.Timeout
+				cfg.Server.WriteTimeout = cfg.Playlist.FetchTimeout + cfg.Notifications.Timeout + cfg.Server.ResponseWriteReserve
 			},
 			wantErr: "write timeout must exceed",
+		},
+		{
+			name: "non-positive response write reserve",
+			mutate: func(cfg *Config) {
+				cfg.Server.ResponseWriteReserve = 0
+			},
+			wantErr: "response write reserve must be positive",
 		},
 	}
 

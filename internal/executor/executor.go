@@ -88,19 +88,14 @@ type Executor interface {
 	APIInfo(version string) map[string]any
 }
 
-// The server overrides this fallback with its validated write timeout. Keeping
-// a finite default makes direct executor construction safe when a notifier is added.
-const defaultChannelMutationTimeout = 30 * time.Second
-
 // impl is the concrete Executor: coordinates store, dp1-go validation/signing, optional HTTP fetch, and publicBaseURL for local playlist URLs.
 type impl struct {
-	store                  store.Store
-	dp1                    dp1svc.ValidatorSigner
-	extensionsEnabled      bool
-	fetch                  fetcher.Fetcher
-	publicBase             string
-	notificationClient     notification.Client
-	channelMutationTimeout time.Duration
+	store              store.Store
+	dp1                dp1svc.ValidatorSigner
+	extensionsEnabled  bool
+	fetch              fetcher.Fetcher
+	publicBase         string
+	notificationClient notification.Client
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -113,24 +108,15 @@ func WithNotificationClient(client notification.Client) Option {
 	}
 }
 
-// WithChannelMutationTimeout bounds final channel persistence after request cancellation.
-// Callers must provide a positive duration.
-func WithChannelMutationTimeout(timeout time.Duration) Option {
-	return func(e *impl) {
-		e.channelMutationTimeout = timeout
-	}
-}
-
 // New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
 func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
 	e := &impl{
-		store:                  st,
-		dp1:                    dp,
-		extensionsEnabled:      extensionsEnabled,
-		fetch:                  fetch,
-		publicBase:             strings.TrimSpace(publicBaseURL),
-		channelMutationTimeout: defaultChannelMutationTimeout,
+		store:             st,
+		dp1:               dp,
+		extensionsEnabled: extensionsEnabled,
+		fetch:             fetch,
+		publicBase:        strings.TrimSpace(publicBaseURL),
 	}
 	for _, option := range options {
 		option(e)
@@ -145,21 +131,16 @@ func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Conte
 	if e.notificationClient == nil {
 		return mutate(ctx)
 	}
-	if e.channelMutationTimeout <= 0 {
-		return fmt.Errorf("channel mutation timeout must be positive")
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fmt.Errorf("notified channel mutation requires a request deadline")
 	}
 
 	// Once final persistence begins, a client disconnect must not create an
 	// ambiguous committed-without-notification outcome. Preserve request values
-	// and any earlier deadline, while imposing an independent operational bound.
+	// while keeping the one deadline established at request entry.
 	base := context.WithoutCancel(ctx)
-	mutationCtx, cancel := context.WithTimeout(base, e.channelMutationTimeout)
-	if requestDeadline, ok := ctx.Deadline(); ok {
-		if mutationDeadline, _ := mutationCtx.Deadline(); requestDeadline.Before(mutationDeadline) {
-			cancel()
-			mutationCtx, cancel = context.WithDeadline(base, requestDeadline)
-		}
-	}
+	mutationCtx, cancel := context.WithDeadline(base, deadline)
 	defer cancel()
 	return mutate(mutationCtx)
 }
@@ -168,10 +149,15 @@ func (e *impl) notifyChannel(ctx context.Context, eventType notification.EventTy
 	if e.notificationClient == nil {
 		return
 	}
-	// Persistence has already committed, so delivery must not disappear merely because the
-	// caller disconnected. WithoutCancel preserves request-scoped values while the dispatcher
-	// still supplies the configured aggregate delivery deadline.
+	// Persistence has already committed, so delivery must not disappear merely
+	// because the caller disconnected. Keep the request-scoped deadline so
+	// delivery consumes only the remaining end-to-end budget.
 	deliveryCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		deliveryCtx, cancel = context.WithDeadline(deliveryCtx, deadline)
+		defer cancel()
+	}
 	_ = e.notificationClient.Notify(deliveryCtx, notification.Event{
 		Type: eventType,
 		Time: time.Now().UTC(),

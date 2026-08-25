@@ -2,10 +2,13 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap/zaptest"
@@ -17,6 +20,49 @@ func setGinTestMode() {
 	ginModeOnce.Do(func() {
 		gin.SetMode(gin.TestMode)
 	})
+}
+
+func TestRequestDeadline(t *testing.T) {
+	setGinTestMode()
+	router := gin.New()
+	timeout := 100 * time.Millisecond
+	router.POST("/test", RequestDeadline(timeout), func(c *gin.Context) {
+		deadline, ok := c.Request.Context().Deadline()
+		if !ok {
+			t.Fatal("request context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > timeout {
+			t.Fatalf("request deadline remaining = %s, want within (0, %s]", remaining, timeout)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestRequestDeadlineCancelsDownstreamWork(t *testing.T) {
+	setGinTestMode()
+	router := gin.New()
+	router.POST("/test", RequestDeadline(10*time.Millisecond), func(c *gin.Context) {
+		<-c.Request.Context().Done()
+		if !errors.Is(c.Request.Context().Err(), context.DeadlineExceeded) {
+			t.Fatalf("request context error = %v, want deadline exceeded", c.Request.Context().Err())
+		}
+		c.Status(http.StatusGatewayTimeout)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusGatewayTimeout)
+	}
 }
 
 func TestSignatureOrAPIKeyAuth(t *testing.T) {
