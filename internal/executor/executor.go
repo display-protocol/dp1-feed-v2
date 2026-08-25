@@ -88,14 +88,19 @@ type Executor interface {
 	APIInfo(version string) map[string]any
 }
 
+// The server overrides this fallback with its validated write timeout. Keeping
+// a finite default makes direct executor construction safe when a notifier is added.
+const defaultChannelMutationTimeout = 30 * time.Second
+
 // impl is the concrete Executor: coordinates store, dp1-go validation/signing, optional HTTP fetch, and publicBaseURL for local playlist URLs.
 type impl struct {
-	store              store.Store
-	dp1                dp1svc.ValidatorSigner
-	extensionsEnabled  bool
-	fetch              fetcher.Fetcher
-	publicBase         string
-	notificationClient notification.Client
+	store                  store.Store
+	dp1                    dp1svc.ValidatorSigner
+	extensionsEnabled      bool
+	fetch                  fetcher.Fetcher
+	publicBase             string
+	notificationClient     notification.Client
+	channelMutationTimeout time.Duration
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -108,20 +113,55 @@ func WithNotificationClient(client notification.Client) Option {
 	}
 }
 
+// WithChannelMutationTimeout bounds final channel persistence after request cancellation.
+// Callers must provide a positive duration.
+func WithChannelMutationTimeout(timeout time.Duration) Option {
+	return func(e *impl) {
+		e.channelMutationTimeout = timeout
+	}
+}
+
 // New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
 func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
 	e := &impl{
-		store:             st,
-		dp1:               dp,
-		extensionsEnabled: extensionsEnabled,
-		fetch:             fetch,
-		publicBase:        strings.TrimSpace(publicBaseURL),
+		store:                  st,
+		dp1:                    dp,
+		extensionsEnabled:      extensionsEnabled,
+		fetch:                  fetch,
+		publicBase:             strings.TrimSpace(publicBaseURL),
+		channelMutationTimeout: defaultChannelMutationTimeout,
 	}
 	for _, option := range options {
 		option(e)
 	}
 	return e
+}
+
+func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.notificationClient == nil {
+		return mutate(ctx)
+	}
+	if e.channelMutationTimeout <= 0 {
+		return fmt.Errorf("channel mutation timeout must be positive")
+	}
+
+	// Once final persistence begins, a client disconnect must not create an
+	// ambiguous committed-without-notification outcome. Preserve request values
+	// and any earlier deadline, while imposing an independent operational bound.
+	base := context.WithoutCancel(ctx)
+	mutationCtx, cancel := context.WithTimeout(base, e.channelMutationTimeout)
+	if requestDeadline, ok := ctx.Deadline(); ok {
+		if mutationDeadline, _ := mutationCtx.Deadline(); requestDeadline.Before(mutationDeadline) {
+			cancel()
+			mutationCtx, cancel = context.WithDeadline(base, requestDeadline)
+		}
+	}
+	defer cancel()
+	return mutate(mutationCtx)
 }
 
 func (e *impl) notifyChannel(ctx context.Context, eventType notification.EventType, id uuid.UUID) {
@@ -958,11 +998,13 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	}
 
 	// Persist validated document
-	if err := e.store.CreateChannel(ctx, &store.ChannelInput{
-		ID:        id,
-		Slug:      slug,
-		Body:      *ch,
-		Playlists: ingested,
+	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
+		return e.store.CreateChannel(mutationCtx, &store.ChannelInput{
+			ID:        id,
+			Slug:      slug,
+			Body:      *ch,
+			Playlists: ingested,
+		})
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
@@ -1055,9 +1097,11 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	}
 
 	// 6. Persist validated document.
-	if err := e.store.UpdateChannel(ctx, rec.ID.String(), &store.ChannelInput{
-		Body:      *ch,
-		Playlists: ingested,
+	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
+		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{
+			Body:      *ch,
+			Playlists: ingested,
+		})
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
@@ -1159,9 +1203,11 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 	}
 
 	// 7. Persist validated document.
-	if err := e.store.UpdateChannel(ctx, rec.ID.String(), &store.ChannelInput{
-		Body:      *ch,
-		Playlists: ingested,
+	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
+		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{
+			Body:      *ch,
+			Playlists: ingested,
+		})
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
@@ -1178,7 +1224,9 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.store.DeleteChannel(ctx, rec.ID.String()); err != nil {
+	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
+		return e.store.DeleteChannel(mutationCtx, rec.ID.String())
+	}); err != nil {
 		return err
 	}
 	e.notifyChannel(ctx, notification.ChannelDeleted, rec.ID)

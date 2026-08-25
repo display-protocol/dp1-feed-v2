@@ -247,6 +247,20 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 			wantErr: "absolute HTTP(S) URL",
 		},
 		{
+			name: "webhook query",
+			mutate: func(cfg *Config) {
+				cfg.Notifications.Clients[0].URL = "https://catalog.example/webhooks?token=secret"
+			},
+			wantErr: "must not contain a query",
+		},
+		{
+			name: "webhook empty query",
+			mutate: func(cfg *Config) {
+				cfg.Notifications.Clients[0].URL = "https://catalog.example/webhooks?"
+			},
+			wantErr: "must not contain a query",
+		},
+		{
 			name: "public base missing hostname",
 			mutate: func(cfg *Config) {
 				cfg.Playlist.PublicBaseURL = "http://:8787"

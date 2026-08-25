@@ -208,15 +208,19 @@ under one aggregate notification timeout after the database commit. Delivery
 is detached from caller cancellation, so a client disconnect after commit does
 not suppress the event. Calls are best-effort:
 failures are logged, while the successful channel mutation remains successful.
+Once final channel persistence begins, it is also detached from caller
+cancellation and bounded by `server.write_timeout`; a request canceled before
+that boundary does not start the mutation. This prevents a disconnect during
+commit acknowledgement from suppressing the matching notification.
 When clients are enabled, `server.write_timeout` must be greater than
 `playlist.fetch_timeout + notifications.timeout`; startup rejects a smaller
 minimum. Playlist fetch timeout remains per remote request; because resolution
 runs eight requests concurrently, mutations with more than eight remote
 playlists can span multiple fetch batches and need a correspondingly larger
 server write timeout. Notification endpoints must use HTTP(S), include a
-hostname, and cannot contain credentials or fragments; redirect responses fail
-delivery instead of being followed. The public base URL cannot contain
-credentials, a query, or a fragment, and it must include a hostname.
+hostname, and cannot contain credentials, queries, or fragments; redirect
+responses fail delivery instead of being followed. The public base URL cannot
+contain credentials, a query, or a fragment, and it must include a hostname.
 
 ### Docker Compose Configuration
 

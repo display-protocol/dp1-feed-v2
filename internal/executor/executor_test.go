@@ -2291,8 +2291,11 @@ func TestDeleteChannel_notificationSurvivesRequestCancellationAfterCommit(t *tes
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{ID: cid}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	mockStore.EXPECT().DeleteChannel(gomock.Any(), cid.String()).DoAndReturn(func(context.Context, string) error {
+	mockStore.EXPECT().DeleteChannel(gomock.Any(), cid.String()).DoAndReturn(func(mutationCtx context.Context, _ string) error {
 		cancel() // The row committed just before the HTTP request context was canceled.
+		if err := mutationCtx.Err(); err != nil {
+			t.Fatalf("mutation context error after request cancellation = %v, want detached context", err)
+		}
 		return nil
 	})
 
@@ -2306,6 +2309,58 @@ func TestDeleteChannel_notificationSurvivesRequestCancellationAfterCommit(t *tes
 	}
 	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelDeleted {
 		t.Fatalf("notification events = %#v", notifications.events)
+	}
+}
+
+func TestDeleteChannel_doesNotBeginMutationAfterRequestCancellation(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
+	ctx, cancel := context.WithCancel(context.Background())
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").DoAndReturn(func(context.Context, string) (*store.ChannelRecord, error) {
+		cancel()
+		return &store.ChannelRecord{ID: cid}, nil
+	})
+
+	notifications := &recordingNotificationClient{}
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase, executor.WithNotificationClient(notifications))
+	err := e.DeleteChannel(ctx, "cid")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteChannel error = %v, want context.Canceled", err)
+	}
+	if len(notifications.events) != 0 {
+		t.Fatalf("notification events = %#v, want none", notifications.events)
+	}
+}
+
+func TestDeleteChannel_detachedMutationContextIsBounded(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{ID: cid}, nil)
+	mockStore.EXPECT().DeleteChannel(gomock.Any(), cid.String()).DoAndReturn(func(mutationCtx context.Context, _ string) error {
+		<-mutationCtx.Done()
+		return mutationCtx.Err()
+	})
+
+	notifications := &recordingNotificationClient{}
+	e := executor.New(
+		mockStore,
+		mocks.NewMockValidatorSigner(ctrl),
+		true,
+		nil,
+		testPublicBase,
+		executor.WithNotificationClient(notifications),
+		executor.WithChannelMutationTimeout(10*time.Millisecond),
+	)
+	err := e.DeleteChannel(context.Background(), "cid")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DeleteChannel error = %v, want context.DeadlineExceeded", err)
+	}
+	if len(notifications.events) != 0 {
+		t.Fatalf("notification events = %#v, want none", notifications.events)
 	}
 }
 

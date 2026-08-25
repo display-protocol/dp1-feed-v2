@@ -176,6 +176,9 @@ func ValidateWebhookEndpoint(endpoint string) (string, error) {
 	if parsed.User != nil {
 		return "", fmt.Errorf("notification endpoint must not contain credentials")
 	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", fmt.Errorf("notification endpoint must not contain a query")
+	}
 	return endpoint, nil
 }
 
