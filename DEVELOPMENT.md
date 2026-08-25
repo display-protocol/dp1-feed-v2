@@ -148,6 +148,8 @@ See `internal/config/config.go` for all available options. Key settings:
 server:
   host: 0.0.0.0
   port: 8787
+  write_timeout: 60s
+  response_write_reserve: 1s
 
 database:
   url: postgres://localhost/dp1_feed?sslmode=disable
@@ -158,7 +160,16 @@ auth:
   api_key: your-secret-api-key-here
 
 playlist:
+  fetch_timeout: 30s
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
+  public_base_url: https://feed.example
+
+notifications:
+  timeout: 15s
+  private_key_hex: 64-char-p256-private-scalar
+  clients:
+    - name: art-catalog
+      url: https://catalog.example/webhooks/v1/channels
 ```
 
 ### Environment Variable Overrides
@@ -167,10 +178,81 @@ Prefix config keys with `DP1_FEED_` and use underscores for nesting:
 
 ```bash
 export DP1_FEED_SERVER_PORT=9000
-export DP1_FEED_AUTH_API_KEY=my-secret-key
+export DP1_FEED_API_KEY=my-secret-key
 ```
 
+The feed uses one P-256 private key for every configured notification client.
+Keep that private scalar in the environment and keep only destinations in the
+client list:
+
+```bash
+export DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX="$(openssl rand -hex 32)"
+export DP1_FEED_PUBLIC_BASE_URL="https://feed.example"
+export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"art-catalog","url":"https://catalog.example/webhooks/v1/channels"}]'
+```
+
+`DP1_FEED_PUBLIC_BASE_URL` is required operational configuration when clients
+are enabled. Set it to the externally reachable feed origin that consumers use
+to retrieve `/api/v1/channels/{id}`; Docker's localhost default is only usable
+from the feed container itself. Startup rejects localhost, loopback, and
+unspecified bind addresses, including scoped IPv6 forms, when notification
+clients are configured.
+
+The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
+with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or
+`channel.deleted`. Startup logs the derived public key as
+`p256:<base64url-uncompressed-SEC1-key>`. Give that public value to each
+consumer's allowlist; never copy the private scalar. Requests attach the same
+value in `Webhook-Public-Key` and the 64-byte `R || S` signature in
+`Webhook-Signature: p256=<base64url-signature>`. Calls happen concurrently
+under one aggregate notification timeout after the database commit. Delivery
+is detached from caller cancellation, so a client disconnect after commit does
+not suppress the event. Calls are best-effort:
+failures are logged, while the successful channel mutation remains successful.
+Notified channel routes establish one end-to-end deadline at request entry.
+Playlist resolution, final persistence, and notification delivery share that
+budget. Once final persistence begins, it is detached from caller cancellation
+but retains the route deadline; a request canceled before that boundary does
+not start the mutation. This prevents a disconnect during commit acknowledgement
+from suppressing the matching notification.
+When clients are enabled, `server.write_timeout` must be greater than
+`playlist.fetch_timeout + notifications.timeout +
+server.response_write_reserve`; startup rejects a smaller minimum. The reserve
+is excluded from the route deadline so response encoding and socket writes
+still have time before the HTTP server write deadline. Playlist fetch timeout
+remains per remote request; because resolution runs eight requests concurrently,
+mutations with more than eight remote playlists can span multiple fetch batches
+and need a correspondingly larger server write timeout. Notification endpoints
+must use HTTP(S), include a hostname, and cannot contain credentials, queries,
+or fragments; redirect responses fail delivery instead of being followed. The
+public base URL cannot contain credentials, a query, or a fragment, and it must
+include a hostname.
+
 ### Docker Compose Configuration
+
+PostgreSQL 18 stores its active cluster below `/var/lib/postgresql/18/docker`,
+so Compose mounts `pgdata` at `/var/lib/postgresql`. The guarded entrypoint
+refuses to initialize a new cluster if it detects data from the former
+`/var/lib/postgresql/data` mount outside the active `PGDATA`. This is an
+intentional breaking deployment check: it keeps an existing feed from appearing
+healthy with an empty database.
+
+Before updating a Compose deployment with an existing `pgdata` volume:
+
+1. Keep the old deployment running and create a logical backup with
+   `docker compose exec -T postgres pg_dumpall -U postgres > dp1-feed-backup.sql`.
+2. Require both `test -s dp1-feed-backup.sql` and
+   `grep -q "PostgreSQL database cluster dump" dp1-feed-backup.sql` to succeed.
+   Then run `docker compose down` and identify the legacy volume with
+   `docker volume ls --filter name=pgdata`.
+3. Only after the logical backup is safe, remove that volume with
+   `docker volume rm <legacy-volume>`, then run
+   `docker compose up -d --wait postgres` to create the PostgreSQL 18 layout.
+4. Restore with `docker compose exec -T postgres psql -U postgres -d postgres < dp1-feed-backup.sql`,
+   then verify the feed data before starting the API.
+
+If the local data is disposable, `make clean` removes the old volume and
+`make up` creates the PostgreSQL 18 layout directly.
 
 When using Docker Compose, configuration is loaded from `config/.env`:
 
@@ -189,6 +271,8 @@ The `.env` file contains all necessary environment variables for Docker deployme
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging
+- `DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX` — P-256 private scalar used only to sign webhooks
+- `DP1_FEED_NOTIFICATION_CLIENTS` — Optional JSON destination list
 
 ## Development Workflow
 

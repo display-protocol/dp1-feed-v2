@@ -4,7 +4,10 @@ package config
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,20 +19,36 @@ import (
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/dp1svc"
+	"github.com/display-protocol/dp1-feed-v2/internal/notification"
 )
 
 const envPrefix = "DP1_FEED_"
 
 // Config is the root application configuration.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Database   DatabaseConfig   `yaml:"database"`
-	Auth       AuthConfig       `yaml:"auth"`
-	Sentry     SentryConfig     `yaml:"sentry"`
-	Logging    LoggingConfig    `yaml:"logging"`
-	Extensions ExtensionsConfig `yaml:"extensions"`
-	Playlist   PlaylistConfig   `yaml:"playlist"`
-	CORS       CORSConfig       `yaml:"cors"`
+	Server        ServerConfig       `yaml:"server"`
+	Database      DatabaseConfig     `yaml:"database"`
+	Auth          AuthConfig         `yaml:"auth"`
+	Sentry        SentryConfig       `yaml:"sentry"`
+	Logging       LoggingConfig      `yaml:"logging"`
+	Extensions    ExtensionsConfig   `yaml:"extensions"`
+	Playlist      PlaylistConfig     `yaml:"playlist"`
+	CORS          CORSConfig         `yaml:"cors"`
+	Notifications NotificationConfig `yaml:"notifications"`
+}
+
+// NotificationConfig controls outbound channel lifecycle delivery.
+type NotificationConfig struct {
+	Timeout       time.Duration              `yaml:"timeout"`
+	PrivateKeyHex string                     `yaml:"private_key_hex"`
+	PublicKey     string                     `yaml:"-"`
+	Clients       []NotificationClientConfig `yaml:"clients"`
+}
+
+// NotificationClientConfig describes one signed webhook consumer.
+type NotificationClientConfig struct {
+	Name string `json:"name" yaml:"name"`
+	URL  string `json:"url" yaml:"url"`
 }
 
 // CORSConfig controls browser cross-origin access (gin-contrib/cors).
@@ -41,11 +60,12 @@ type CORSConfig struct {
 
 // ServerConfig controls the HTTP listener.
 type ServerConfig struct {
-	Host         string        `yaml:"host"`
-	Port         int           `yaml:"port"`
-	ReadTimeout  time.Duration `yaml:"read_timeout"`
-	WriteTimeout time.Duration `yaml:"write_timeout"`
-	IdleTimeout  time.Duration `yaml:"idle_timeout"`
+	Host                 string        `yaml:"host"`
+	Port                 int           `yaml:"port"`
+	ReadTimeout          time.Duration `yaml:"read_timeout"`
+	WriteTimeout         time.Duration `yaml:"write_timeout"`
+	ResponseWriteReserve time.Duration `yaml:"response_write_reserve"`
+	IdleTimeout          time.Duration `yaml:"idle_timeout"`
 }
 
 // DatabaseConfig holds PostgreSQL connection settings.
@@ -101,11 +121,16 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("config yaml: %w", err)
 		}
 	}
-	applyEnv(cfg)
+	if err := applyEnv(cfg); err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.deriveSigningKid(); err != nil {
+		return nil, err
+	}
+	if err := cfg.deriveWebhookPublicKey(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -115,11 +140,12 @@ func Load(configPath string) (*Config, error) {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host:         "0.0.0.0",
-			Port:         8787,
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			Host:                 "0.0.0.0",
+			Port:                 8787,
+			ReadTimeout:          30 * time.Second,
+			WriteTimeout:         60 * time.Second,
+			ResponseWriteReserve: time.Second,
+			IdleTimeout:          120 * time.Second,
 		},
 		Database: DatabaseConfig{
 			URL:             "postgres://postgres:postgres@localhost:5432/dp1_feed?sslmode=disable", // #nosec G101 -- local development default; production config comes from YAML/env.
@@ -133,11 +159,12 @@ func defaultConfig() *Config {
 			FetchTimeout:      30 * time.Second,
 			FetchMaxBodyBytes: 4 << 20, // 4 MiB
 		},
+		Notifications: NotificationConfig{Timeout: 15 * time.Second},
 	}
 }
 
 // applyEnv overlays non-empty DP1_FEED_* variables onto cfg (ops secrets and overrides without editing YAML).
-func applyEnv(cfg *Config) {
+func applyEnv(cfg *Config) error {
 	if v := os.Getenv(envPrefix + "DATABASE_URL"); v != "" {
 		cfg.Database.URL = v
 	}
@@ -179,6 +206,17 @@ func applyEnv(cfg *Config) {
 			cfg.CORS.AllowOrigins = origins
 		}
 	}
+	if v := os.Getenv(envPrefix + "NOTIFICATION_CLIENTS"); v != "" {
+		var clients []NotificationClientConfig
+		if err := json.Unmarshal([]byte(v), &clients); err != nil {
+			return fmt.Errorf("notification clients env: %w", err)
+		}
+		cfg.Notifications.Clients = clients
+	}
+	if v := os.Getenv(envPrefix + "WEBHOOK_PRIVATE_KEY_HEX"); v != "" {
+		cfg.Notifications.PrivateKeyHex = v
+	}
+	return nil
 }
 
 func (c *Config) validate() error {
@@ -192,6 +230,84 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")
 	}
+	if c.Playlist.FetchTimeout <= 0 {
+		return fmt.Errorf("playlist fetch timeout must be positive")
+	}
+	if c.Server.ResponseWriteReserve <= 0 {
+		return fmt.Errorf("response write reserve must be positive")
+	}
+	if c.Server.WriteTimeout <= c.Server.ResponseWriteReserve {
+		return fmt.Errorf("server write timeout must exceed response write reserve")
+	}
+	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
+		return fmt.Errorf("notification timeout must be positive")
+	}
+	if len(c.Notifications.Clients) > 0 && c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Notifications.Timeout+c.Server.ResponseWriteReserve {
+		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus notification timeout plus response write reserve")
+	}
+	if len(c.Notifications.Clients) > 0 && strings.TrimSpace(c.Notifications.PrivateKeyHex) == "" {
+		return fmt.Errorf("webhook private key is required when notification clients are configured (yaml notifications.private_key_hex or DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX)")
+	}
+	names := make(map[string]struct{}, len(c.Notifications.Clients))
+	for i := range c.Notifications.Clients {
+		client := &c.Notifications.Clients[i]
+		client.Name = strings.TrimSpace(client.Name)
+		client.URL = strings.TrimSpace(client.URL)
+		if client.Name == "" {
+			return fmt.Errorf("notification client %d name is required", i)
+		}
+		if _, exists := names[client.Name]; exists {
+			return fmt.Errorf("notification client name %q is duplicated", client.Name)
+		}
+		names[client.Name] = struct{}{}
+		endpoint, err := notification.ValidateWebhookEndpoint(client.URL)
+		if err != nil {
+			return fmt.Errorf("notification client %q url: %w", client.Name, err)
+		}
+		client.URL = endpoint
+	}
+	if len(c.Notifications.Clients) > 0 {
+		c.Playlist.PublicBaseURL = strings.TrimRight(strings.TrimSpace(c.Playlist.PublicBaseURL), "/")
+		publicBase, err := url.Parse(c.Playlist.PublicBaseURL)
+		if err != nil || publicBase.Host == "" || publicBase.Hostname() == "" ||
+			(!strings.EqualFold(publicBase.Scheme, "http") && !strings.EqualFold(publicBase.Scheme, "https")) {
+			return fmt.Errorf("playlist public base url must be an absolute HTTP(S) URL when notification clients are configured")
+		}
+		hostname := strings.TrimSuffix(publicBase.Hostname(), ".")
+		// url.Hostname preserves an RFC 6874 IPv6 zone (for example ::1%lo),
+		// but net.ParseIP classifies only the address portion.
+		ipHostname, _, _ := strings.Cut(hostname, "%")
+		parsedIP := net.ParseIP(ipHostname)
+		if strings.EqualFold(hostname, "localhost") || (parsedIP != nil && parsedIP.IsLoopback()) {
+			return fmt.Errorf("playlist public base url must not use a loopback host when notification clients are configured")
+		}
+		if parsedIP != nil && parsedIP.IsUnspecified() {
+			return fmt.Errorf("playlist public base url must not use an unspecified host when notification clients are configured")
+		}
+		if publicBase.RawQuery != "" || publicBase.ForceQuery || strings.Contains(c.Playlist.PublicBaseURL, "#") {
+			return fmt.Errorf("playlist public base url must not contain a query or fragment when notification clients are configured")
+		}
+		if publicBase.User != nil {
+			return fmt.Errorf("playlist public base url must not contain credentials when notification clients are configured")
+		}
+	}
+	return nil
+}
+
+// deriveWebhookPublicKey validates the configured private scalar and publishes only its public half.
+func (c *Config) deriveWebhookPublicKey() error {
+	if strings.TrimSpace(c.Notifications.PrivateKeyHex) == "" {
+		return nil
+	}
+	privateKey, err := notification.ParseP256PrivateKeyHex(c.Notifications.PrivateKeyHex)
+	if err != nil {
+		return fmt.Errorf("webhook private key: %w", err)
+	}
+	publicKey, err := notification.P256PublicKeyString(&privateKey.PublicKey)
+	if err != nil {
+		return fmt.Errorf("webhook public key: %w", err)
+	}
+	c.Notifications.PublicKey = publicKey
 	return nil
 }
 

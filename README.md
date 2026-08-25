@@ -115,6 +115,11 @@ Prefer containers? We've got you covered.
 
 This starts both PostgreSQL and the feed server. The API will be available at `http://localhost:8787`.
 
+PostgreSQL 18 uses a different volume layout. Compose refuses to initialize an
+empty PostgreSQL 18 cluster when it detects an existing volume from the former
+`/var/lib/postgresql/data` mount. Back up and restore persistent local data
+before this mount change; see [Docker Compose Configuration](DEVELOPMENT.md#docker-compose-configuration).
+
 Configuration is loaded from `config/.env`. The default values work for local development, but you should change the API key and generate a new signing key for production:
 
 ```bash
