@@ -266,7 +266,10 @@ func (c *Config) validate() error {
 			return fmt.Errorf("playlist public base url must be an absolute HTTP(S) URL when notification clients are configured")
 		}
 		hostname := strings.TrimSuffix(publicBase.Hostname(), ".")
-		parsedIP := net.ParseIP(hostname)
+		// url.Hostname preserves an RFC 6874 IPv6 zone (for example ::1%lo),
+		// but net.ParseIP classifies only the address portion.
+		ipHostname, _, _ := strings.Cut(hostname, "%")
+		parsedIP := net.ParseIP(ipHostname)
 		if strings.EqualFold(hostname, "localhost") || (parsedIP != nil && parsedIP.IsLoopback()) {
 			return fmt.Errorf("playlist public base url must not use a loopback host when notification clients are configured")
 		}

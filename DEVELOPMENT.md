@@ -194,7 +194,8 @@ export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"art-catalog","url":"https://cata
 are enabled. Set it to the externally reachable feed origin that consumers use
 to retrieve `/api/v1/channels/{id}`; Docker's localhost default is only usable
 from the feed container itself. Startup rejects localhost, loopback, and
-unspecified bind addresses when notification clients are configured.
+unspecified bind addresses, including scoped IPv6 forms, when notification
+clients are configured.
 
 The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
 with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or

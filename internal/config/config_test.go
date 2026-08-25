@@ -289,6 +289,20 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 			wantErr: "must not use an unspecified host",
 		},
 		{
+			name: "public base scoped loopback IPv6",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "http://[::1%25lo]:8787"
+			},
+			wantErr: "must not use a loopback host",
+		},
+		{
+			name: "public base scoped unspecified IPv6",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "http://[::%25lo]:8787"
+			},
+			wantErr: "must not use an unspecified host",
+		},
+		{
 			name: "non-positive fetch timeout",
 			mutate: func(cfg *Config) {
 				cfg.Playlist.FetchTimeout = 0
