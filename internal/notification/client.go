@@ -145,11 +145,17 @@ func NewWebhookClient(endpoint string, privateKey *ecdsa.PrivateKey, httpClient 
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	// Signed requests are bound to the configured endpoint. Following redirects could
+	// either rewrite the POST to GET or replay its signature and body to another origin.
+	deliveryClient := *httpClient
+	deliveryClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &WebhookClient{
 		endpoint:   endpoint,
 		privateKey: privateKey,
 		publicKey:  publicKey,
-		httpClient: httpClient,
+		httpClient: &deliveryClient,
 		now:        time.Now,
 		newEventID: func() string { return "evt_" + uuid.NewString() },
 	}, nil

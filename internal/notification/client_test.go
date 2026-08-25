@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,6 +127,41 @@ func TestWebhookClientNotifyRejectsNon2xx(t *testing.T) {
 	}
 	if len(err.Error()) > 2_000 {
 		t.Fatalf("Notify error is unexpectedly large: %d", len(err.Error()))
+	}
+}
+
+func TestWebhookClientNotifyRejectsRedirects(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var redirectedRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/target" {
+					redirectedRequests.Add(1)
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				http.Redirect(w, r, "/target", status)
+			}))
+			defer server.Close()
+
+			client, err := NewWebhookClient(server.URL+"/source", privateKey, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.Notify(context.Background(), Event{Type: ChannelAdded, Time: time.Now(), Channel: ChannelRef{URL: "https://feed.example/channel"}})
+			if err == nil || !strings.Contains(err.Error(), http.StatusText(status)) {
+				t.Fatalf("Notify error = %v, want redirect status", err)
+			}
+			if got := redirectedRequests.Load(); got != 0 {
+				t.Fatalf("redirect target requests = %d, want 0", got)
+			}
+		})
 	}
 }
 

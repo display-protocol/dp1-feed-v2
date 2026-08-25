@@ -155,6 +155,18 @@ notifications:
 	}
 }
 
+func TestLoad_exampleConfigRejectsNotificationsWithLoopbackPublicBase(t *testing.T) {
+	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX", testWebhookPrivateKeyHex)
+	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels"}]`)
+
+	path := filepath.Join("..", "..", "config", "config.yaml.example")
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "must not use a loopback host") {
+		t.Fatalf("Load error = %v, want loopback public base error", err)
+	}
+}
+
 func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
 	t.Setenv("DP1_FEED_API_KEY", "k")

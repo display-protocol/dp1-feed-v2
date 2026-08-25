@@ -193,7 +193,8 @@ export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"art-catalog","url":"https://cata
 `DP1_FEED_PUBLIC_BASE_URL` is required operational configuration when clients
 are enabled. Set it to the externally reachable feed origin that consumers use
 to retrieve `/api/v1/channels/{id}`; Docker's localhost default is only usable
-from the feed container itself.
+from the feed container itself. Startup rejects localhost and loopback addresses
+when notification clients are configured.
 
 The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
 with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or
@@ -212,7 +213,8 @@ minimum. Playlist fetch timeout remains per remote request; because resolution
 runs eight requests concurrently, mutations with more than eight remote
 playlists can span multiple fetch batches and need a correspondingly larger
 server write timeout. Notification endpoints must use HTTP(S) and cannot
-contain credentials or fragments. The public base URL cannot contain
+contain credentials or fragments; redirect responses fail delivery instead of
+being followed. The public base URL cannot contain
 credentials, a query, or a fragment.
 
 ### Docker Compose Configuration

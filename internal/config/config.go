@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -263,6 +264,11 @@ func (c *Config) validate() error {
 		if err != nil || publicBase.Host == "" ||
 			(!strings.EqualFold(publicBase.Scheme, "http") && !strings.EqualFold(publicBase.Scheme, "https")) {
 			return fmt.Errorf("playlist public base url must be an absolute HTTP(S) URL when notification clients are configured")
+		}
+		hostname := strings.TrimSuffix(publicBase.Hostname(), ".")
+		parsedIP := net.ParseIP(hostname)
+		if strings.EqualFold(hostname, "localhost") || (parsedIP != nil && parsedIP.IsLoopback()) {
+			return fmt.Errorf("playlist public base url must not use a loopback host when notification clients are configured")
 		}
 		if publicBase.RawQuery != "" || publicBase.ForceQuery || strings.Contains(c.Playlist.PublicBaseURL, "#") {
 			return fmt.Errorf("playlist public base url must not contain a query or fragment when notification clients are configured")
