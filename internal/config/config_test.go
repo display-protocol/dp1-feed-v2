@@ -275,6 +275,20 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 			wantErr: "must not contain credentials",
 		},
 		{
+			name: "public base unspecified IPv4",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "http://0.0.0.0:8787"
+			},
+			wantErr: "must not use an unspecified host",
+		},
+		{
+			name: "public base unspecified IPv6",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "http://[::]:8787"
+			},
+			wantErr: "must not use an unspecified host",
+		},
+		{
 			name: "non-positive fetch timeout",
 			mutate: func(cfg *Config) {
 				cfg.Playlist.FetchTimeout = 0
