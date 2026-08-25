@@ -176,6 +176,7 @@ func TestNewWebhookClientValidation(t *testing.T) {
 		{name: "missing endpoint", withKey: true},
 		{name: "invalid endpoint", endpoint: "://bad", withKey: true},
 		{name: "unsupported endpoint scheme", endpoint: "ftp://example.com/webhooks", withKey: true},
+		{name: "endpoint missing hostname", endpoint: "http://:8787/webhooks", withKey: true},
 		{name: "endpoint fragment", endpoint: "https://example.com/webhooks#ignored", withKey: true},
 		{name: "endpoint credentials", endpoint: "https://user:token@example.com/webhooks", withKey: true}, //nolint:gosec // Rejected credential-bearing URL fixture.
 		{name: "missing private key", endpoint: "https://example.com"},

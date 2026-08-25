@@ -166,7 +166,7 @@ func NewWebhookClient(endpoint string, privateKey *ecdsa.PrivateKey, httpClient 
 func ValidateWebhookEndpoint(endpoint string) (string, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" ||
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" ||
 		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
 		return "", fmt.Errorf("notification endpoint must be an absolute HTTP(S) URL")
 	}

@@ -261,7 +261,7 @@ func (c *Config) validate() error {
 	if len(c.Notifications.Clients) > 0 {
 		c.Playlist.PublicBaseURL = strings.TrimRight(strings.TrimSpace(c.Playlist.PublicBaseURL), "/")
 		publicBase, err := url.Parse(c.Playlist.PublicBaseURL)
-		if err != nil || publicBase.Host == "" ||
+		if err != nil || publicBase.Host == "" || publicBase.Hostname() == "" ||
 			(!strings.EqualFold(publicBase.Scheme, "http") && !strings.EqualFold(publicBase.Scheme, "https")) {
 			return fmt.Errorf("playlist public base url must be an absolute HTTP(S) URL when notification clients are configured")
 		}
