@@ -221,6 +221,13 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 			wantErr: "absolute HTTP(S) URL",
 		},
 		{
+			name: "webhook credentials",
+			mutate: func(cfg *Config) {
+				cfg.Notifications.Clients[0].URL = "https://user:token@catalog.example/webhooks"
+			},
+			wantErr: "must not contain credentials",
+		},
+		{
 			name: "public base query",
 			mutate: func(cfg *Config) {
 				cfg.Playlist.PublicBaseURL = "https://feed.example?tenant=x"

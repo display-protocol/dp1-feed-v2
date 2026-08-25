@@ -167,6 +167,9 @@ func ValidateWebhookEndpoint(endpoint string) (string, error) {
 	if parsed.Fragment != "" {
 		return "", fmt.Errorf("notification endpoint must not contain a fragment")
 	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("notification endpoint must not contain credentials")
+	}
 	return endpoint, nil
 }
 

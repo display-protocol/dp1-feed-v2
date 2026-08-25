@@ -211,8 +211,9 @@ When clients are enabled, `server.write_timeout` must be greater than
 minimum. Playlist fetch timeout remains per remote request; because resolution
 runs eight requests concurrently, mutations with more than eight remote
 playlists can span multiple fetch batches and need a correspondingly larger
-server write timeout. Notification endpoints must use HTTP(S), and the public
-base URL cannot contain credentials, a query, or a fragment.
+server write timeout. Notification endpoints must use HTTP(S) and cannot
+contain credentials or fragments. The public base URL cannot contain
+credentials, a query, or a fragment.
 
 ### Docker Compose Configuration
 

@@ -141,6 +141,7 @@ func TestNewWebhookClientValidation(t *testing.T) {
 		{name: "invalid endpoint", endpoint: "://bad", withKey: true},
 		{name: "unsupported endpoint scheme", endpoint: "ftp://example.com/webhooks", withKey: true},
 		{name: "endpoint fragment", endpoint: "https://example.com/webhooks#ignored", withKey: true},
+		{name: "endpoint credentials", endpoint: "https://user:token@example.com/webhooks", withKey: true}, //nolint:gosec // Rejected credential-bearing URL fixture.
 		{name: "missing private key", endpoint: "https://example.com"},
 	}
 	privateKey, err := ParseP256PrivateKeyHex("0000000000000000000000000000000000000000000000000000000000000001")
