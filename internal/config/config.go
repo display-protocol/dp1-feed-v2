@@ -267,6 +267,9 @@ func (c *Config) validate() error {
 		if publicBase.RawQuery != "" || publicBase.ForceQuery || strings.Contains(c.Playlist.PublicBaseURL, "#") {
 			return fmt.Errorf("playlist public base url must not contain a query or fragment when notification clients are configured")
 		}
+		if publicBase.User != nil {
+			return fmt.Errorf("playlist public base url must not contain credentials when notification clients are configured")
+		}
 	}
 	return nil
 }

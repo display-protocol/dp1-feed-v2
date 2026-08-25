@@ -83,6 +83,17 @@ func (c *recordingNotificationClient) Notify(_ context.Context, event notificati
 	return nil
 }
 
+type contextRecordingNotificationClient struct {
+	contextErr error
+	events     []notification.Event
+}
+
+func (c *contextRecordingNotificationClient) Notify(ctx context.Context, event notification.Event) error {
+	c.contextErr = ctx.Err()
+	c.events = append(c.events, event)
+	return nil
+}
+
 // inlineManifestJSON is a minimal DP-1 Ref Manifest carried on an item (playlists extension
 // §3.6). The present-but-empty artist id is deliberate: it is the field a decode/re-encode
 // round trip would drop, and the bytes are covered by the playlist signature.
@@ -2194,41 +2205,63 @@ func TestListChannels(t *testing.T) {
 	}
 }
 
-type contextBlockingFetcher struct{}
-
-func (contextBlockingFetcher) FetchPlaylist(ctx context.Context, _ string) ([]byte, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
+type delayedFetcher struct {
+	delay   time.Duration
+	started chan struct{}
 }
 
-func TestCreateChannel_playlistResolutionTimeoutIsAggregate(t *testing.T) {
+func (f delayedFetcher) FetchPlaylist(ctx context.Context, _ string) ([]byte, error) {
+	f.started <- struct{}{}
+	select {
+	case <-time.After(f.delay):
+		return []byte(`{"playlist":true}`), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestCreateChannel_playlistResolutionPreservesPerFetchTimeoutAcrossBatches(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	resolveTimeout := 80 * time.Millisecond
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	remotePlaylist := &playlist.Playlist{
+		ID:   "77777777-7777-4777-8777-777777777777",
+		Slug: "remote",
+	}
+	mockDP1.EXPECT().ValidatePlaylistWithExtension(gomock.Any()).Return(remotePlaylist, nil).Times(9)
+	signed := []byte(`{"kind":"signed-channel"}`)
+	wantChannel := mustDecodeChannel(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantChannel, nil),
+	)
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(nil)
+
+	fetcher := delayedFetcher{delay: 40 * time.Millisecond, started: make(chan struct{}, 9)}
 	e := executor.New(
-		mocks.NewMockStore(ctrl),
-		mocks.NewMockValidatorSigner(ctrl),
+		mockStore,
+		mockDP1,
 		true,
-		contextBlockingFetcher{},
+		fetcher,
 		testPublicBase,
-		executor.WithPlaylistResolveTimeout(resolveTimeout),
 	)
 	playlists := make([]string, 9) // More than the resolver concurrency limit of eight.
 	for i := range playlists {
 		playlists[i] = fmt.Sprintf("https://remote.example/playlists/%d", i)
 	}
 
-	started := time.Now()
-	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
-		Title:     "Aggregate timeout",
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := e.CreateChannel(ctx, &models.ChannelCreateRequest{
+		Title:     "Second fetch batch",
 		Playlists: playlists,
 	})
-	elapsed := time.Since(started)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("CreateChannel error = %v, want deadline exceeded", err)
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
 	}
-	if elapsed > 4*resolveTimeout {
-		t.Fatalf("playlist resolution took %s, want one aggregate %s timeout", elapsed, resolveTimeout)
+	if got := len(fetcher.started); got != len(playlists) {
+		t.Fatalf("fetches started = %d, want %d", got, len(playlists))
 	}
 }
 
@@ -2246,6 +2279,32 @@ func TestDeleteChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelDeleted || notifications.events[0].Channel.URL != testPublicBase+"/api/v1/channels/"+cid.String() {
+		t.Fatalf("notification events = %#v", notifications.events)
+	}
+}
+
+func TestDeleteChannel_notificationSurvivesRequestCancellationAfterCommit(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	cid := uuid.MustParse("eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{ID: cid}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mockStore.EXPECT().DeleteChannel(gomock.Any(), cid.String()).DoAndReturn(func(context.Context, string) error {
+		cancel() // The row committed just before the HTTP request context was canceled.
+		return nil
+	})
+
+	notifications := &contextRecordingNotificationClient{}
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase, executor.WithNotificationClient(notifications))
+	if err := e.DeleteChannel(ctx, "cid"); err != nil {
+		t.Fatal(err)
+	}
+	if notifications.contextErr != nil {
+		t.Fatalf("notification context error = %v, want detached post-commit context", notifications.contextErr)
+	}
+	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelDeleted {
 		t.Fatalf("notification events = %#v", notifications.events)
 	}
 }

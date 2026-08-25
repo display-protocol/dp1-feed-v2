@@ -161,6 +161,7 @@ auth:
 playlist:
   fetch_timeout: 30s
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
+  public_base_url: https://feed.example
 
 notifications:
   timeout: 15s
@@ -185,8 +186,14 @@ client list:
 
 ```bash
 export DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX="$(openssl rand -hex 32)"
+export DP1_FEED_PUBLIC_BASE_URL="https://feed.example"
 export DP1_FEED_NOTIFICATION_CLIENTS='[{"name":"art-catalog","url":"https://catalog.example/webhooks/v1/channels"}]'
 ```
+
+`DP1_FEED_PUBLIC_BASE_URL` is required operational configuration when clients
+are enabled. Set it to the externally reachable feed origin that consumers use
+to retrieve `/api/v1/channels/{id}`; Docker's localhost default is only usable
+from the feed container itself.
 
 The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
 with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or
@@ -195,13 +202,17 @@ with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or
 consumer's allowlist; never copy the private scalar. Requests attach the same
 value in `Webhook-Public-Key` and the 64-byte `R || S` signature in
 `Webhook-Signature: p256=<base64url-signature>`. Calls happen concurrently
-under one aggregate timeout after the database commit. They are best-effort:
+under one aggregate notification timeout after the database commit. Delivery
+is detached from caller cancellation, so a client disconnect after commit does
+not suppress the event. Calls are best-effort:
 failures are logged, while the successful channel mutation remains successful.
 When clients are enabled, `server.write_timeout` must be greater than
 `playlist.fetch_timeout + notifications.timeout`; startup rejects a smaller
-budget so post-commit delivery cannot consume the entire response window.
-Notification endpoints must use HTTP(S), and the public base URL cannot contain
-a query or fragment.
+minimum. Playlist fetch timeout remains per remote request; because resolution
+runs eight requests concurrently, mutations with more than eight remote
+playlists can span multiple fetch batches and need a correspondingly larger
+server write timeout. Notification endpoints must use HTTP(S), and the public
+base URL cannot contain credentials, a query, or a fragment.
 
 ### Docker Compose Configuration
 

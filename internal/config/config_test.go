@@ -249,6 +249,13 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 			wantErr: "must not contain a query or fragment",
 		},
 		{
+			name: "public base credentials",
+			mutate: func(cfg *Config) {
+				cfg.Playlist.PublicBaseURL = "https://user:password@feed.example"
+			},
+			wantErr: "must not contain credentials",
+		},
+		{
 			name: "non-positive fetch timeout",
 			mutate: func(cfg *Config) {
 				cfg.Playlist.FetchTimeout = 0

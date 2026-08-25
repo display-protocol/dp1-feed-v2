@@ -79,7 +79,7 @@ func main() {
 	}
 	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes)
 
-	execOptions := []executor.Option{executor.WithPlaylistResolveTimeout(cfg.Playlist.FetchTimeout)}
+	var execOptions []executor.Option
 	if len(cfg.Notifications.Clients) > 0 {
 		privateKey, err := notification.ParseP256PrivateKeyHex(cfg.Notifications.PrivateKeyHex)
 		if err != nil {

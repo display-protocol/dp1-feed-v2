@@ -90,13 +90,12 @@ type Executor interface {
 
 // impl is the concrete Executor: coordinates store, dp1-go validation/signing, optional HTTP fetch, and publicBaseURL for local playlist URLs.
 type impl struct {
-	store                  store.Store
-	dp1                    dp1svc.ValidatorSigner
-	extensionsEnabled      bool
-	fetch                  fetcher.Fetcher
-	playlistResolveTimeout time.Duration
-	publicBase             string
-	notificationClient     notification.Client
+	store              store.Store
+	dp1                dp1svc.ValidatorSigner
+	extensionsEnabled  bool
+	fetch              fetcher.Fetcher
+	publicBase         string
+	notificationClient notification.Client
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -106,14 +105,6 @@ type Option func(*impl)
 func WithNotificationClient(client notification.Client) Option {
 	return func(e *impl) {
 		e.notificationClient = client
-	}
-}
-
-// WithPlaylistResolveTimeout bounds one complete group/channel playlist resolution,
-// including all concurrency-limited batches, rather than only each individual fetch.
-func WithPlaylistResolveTimeout(timeout time.Duration) Option {
-	return func(e *impl) {
-		e.playlistResolveTimeout = timeout
 	}
 }
 
@@ -137,7 +128,11 @@ func (e *impl) notifyChannel(ctx context.Context, eventType notification.EventTy
 	if e.notificationClient == nil {
 		return
 	}
-	_ = e.notificationClient.Notify(ctx, notification.Event{
+	// Persistence has already committed, so delivery must not disappear merely because the
+	// caller disconnected. WithoutCancel preserves request-scoped values while the dispatcher
+	// still supplies the configured aggregate delivery deadline.
+	deliveryCtx := context.WithoutCancel(ctx)
+	_ = e.notificationClient.Notify(deliveryCtx, notification.Event{
 		Type: eventType,
 		Time: time.Now().UTC(),
 		Channel: notification.ChannelRef{
