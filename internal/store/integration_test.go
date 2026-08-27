@@ -1192,11 +1192,18 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
-	// Create a playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000003")
-	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Repeated"}
-	if err := st.CreatePlaylist(ctx, playlistID, "repeated", &pl); err != nil {
-		t.Fatal(err)
+	itemID := uuid.MustParse("00000000-0000-4000-8000-000000000003")
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Repeated",
+		Items:     []playlist.PlaylistItem{{ID: itemID.String(), Source: "https://example.com/repeated.html"}},
+	}
+	laterItemID := uuid.MustParse("00000000-0000-4000-8000-000000000004")
+	later := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Conflicting later occurrence",
+		Items:     []playlist.PlaylistItem{{ID: laterItemID.String(), Source: "https://example.com/later.html"}},
 	}
 
 	// Create group with same playlist repeated (valid in DP-1 spec - position matters)
@@ -1212,8 +1219,8 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 		},
 		Playlists: []store.IngestedPlaylist{
 			{ID: playlistID, Slug: "repeated", Body: pl},
-			{ID: playlistID, Slug: "repeated", Body: pl},
-			{ID: playlistID, Slug: "repeated", Body: pl},
+			{ID: playlistID, Slug: "repeated-later", Body: later},
+			{ID: playlistID, Slug: "repeated-later", Body: later},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, dupInput); err != nil {
@@ -1233,6 +1240,87 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 		if m.ID != playlistID {
 			t.Fatalf("member[%d]: wrong ID, want %v, got %v", i, playlistID, m.ID)
 		}
+	}
+	stored, err := st.GetPlaylist(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylist: %v", err)
+	}
+	if stored.Slug != "repeated" {
+		t.Fatalf("deduplicated playlist slug: got %q, want first occurrence", stored.Slug)
+	}
+	assertDeepEqual(t, "deduplicated playlist body", pl, stored.Body)
+
+	items, err := st.GetPlaylistItems(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylistItems: %v", err)
+	}
+	if len(items) != 1 || items[0].ItemID != itemID {
+		t.Fatalf("item index for deduplicated playlist: %+v", items)
+	}
+}
+
+func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	playlistID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
+	originalItemID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
+	original := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Remotely ingested",
+		Items: []playlist.PlaylistItem{
+			{ID: originalItemID.String(), Source: "https://example.com/original.html"},
+		},
+	}
+	groupID := uuid.MustParse("30000000-0000-4000-8000-000000000001")
+	group := playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "remote-ingest-group",
+		Title:     "Remote ingest group",
+		Playlists: []string{"https://origin.example/playlist.json"},
+	}
+
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:        groupID,
+		Slug:      group.Slug,
+		Body:      group,
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Body: original}},
+	}); err != nil {
+		t.Fatalf("CreatePlaylistGroup: %v", err)
+	}
+
+	items, err := st.GetPlaylistItems(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylistItems after create ingest: %v", err)
+	}
+	if len(items) != 1 || items[0].ItemID != originalItemID {
+		t.Fatalf("item index after create ingest: %+v", items)
+	}
+
+	replacementItemID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
+	replacement := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Remotely re-ingested",
+		Items: []playlist.PlaylistItem{
+			{ID: replacementItemID.String(), Source: "https://example.com/replacement.html"},
+		},
+	}
+	if err := st.UpdatePlaylistGroup(ctx, group.Slug, &store.PlaylistGroupInput{
+		Body:      group,
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Body: replacement}},
+	}); err != nil {
+		t.Fatalf("UpdatePlaylistGroup: %v", err)
+	}
+
+	items, err = st.GetPlaylistItems(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylistItems after re-ingest: %v", err)
+	}
+	if len(items) != 1 || items[0].ItemID != replacementItemID {
+		t.Fatalf("item index after re-ingest: %+v", items)
+	}
+	if _, err := st.GetPlaylistItem(ctx, originalItemID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("stale item lookup: got %v, want ErrNotFound", err)
 	}
 }
 

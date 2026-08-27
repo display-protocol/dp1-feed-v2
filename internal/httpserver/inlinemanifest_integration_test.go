@@ -185,9 +185,8 @@ func TestIntegration_InlineManifestCuratorSignedPublish(t *testing.T) {
 
 // TestIntegration_InlineManifestSurvivesLocalGroupIngest covers the local branch of group ingest:
 // the URI points at this feed, so resolveOnePlaylistRef loads the stored document and
-// upsertPlaylistsBatch writes it back over itself. Only playlists.body is rewritten here — the
-// item index is left as CreatePlaylist built it, and is correct precisely because the body did not
-// change. The remote branch, where the document is new to this feed, is
+// upsertPlaylistsBatch writes it back and rebuilds the item index from that body. The remote
+// branch, where the document is new to this feed, is
 // TestIntegration_InlineManifestSurvivesRemoteGroupIngest.
 func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
 	srv := newIntegrationServer(t)
@@ -232,12 +231,6 @@ func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
 // it, and stores a playlist it did not author. That store step re-marshals the document, and the
 // inline manifest is covered by the remote curator's signature with no refHash counterpart — so a
 // member dropped in transit would invalidate a signature this feed cannot re-create.
-//
-// Scope note: the item index is deliberately not asserted here. upsertPlaylistsBatch rewrites
-// playlists.body without rebuilding playlist_item_index, so a remotely ingested playlist has no
-// index rows at all — its items are missing from GET /playlist-items entirely, manifest or not.
-// That is a pre-existing store defect unrelated to inline manifests, tracked in #13; asserting
-// today's behaviour here would only encode it.
 func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	remoteID := uuid.MustParse("77777777-2222-4333-8444-555555555555")
 	itemID := uuid.MustParse("88888888-2222-4333-8444-555555555555")
@@ -282,6 +275,14 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 
 	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+remote.Slug, nil, http.StatusOK)
 	assertPlaylistInlineManifest(t, "remotely ingested playlist", gotRaw, itemID)
+
+	var itemPage ListResponse[playlist.PlaylistItem]
+	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlist-items", nil, http.StatusOK, &itemPage)
+	assertItemInlineManifest(t, "remotely ingested item index", itemPage.Items, itemID)
+
+	var item playlist.PlaylistItem
+	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlist-items/"+itemID.String(), nil, http.StatusOK, &item)
+	assertItemInlineManifest(t, "remotely ingested item lookup", []playlist.PlaylistItem{item}, itemID)
 }
 
 // assertPlaylistInlineManifest checks the manifest bytes on the served document and, because the

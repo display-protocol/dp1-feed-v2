@@ -497,11 +497,12 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string) error {
 // Playlist groups (same row shape as playlists; membership in playlist_group_members)
 // =============================================================================
 
-// upsertPlaylistsBatch bulk-upserts playlists from a slice.
-// Input may repeat the same id (group/channel membership order); DISTINCT ON keeps the first
-// occurrence per id for this statement so ON CONFLICT never touches the same row twice.
+// upsertPlaylistsBatch bulk-upserts playlists and rebuilds their item indexes in the same transaction.
+// Input may repeat the same id (group/channel membership order); both writes keep the first
+// occurrence per id so playlists.body and playlist_item_index are always derived from the same body.
 func upsertPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
-	const q = `
+	const (
+		upsertPlaylists = `
 INSERT INTO playlists (id, slug, body)
 SELECT DISTINCT ON (x.id) x.id, x.slug, x.body::jsonb
 FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY AS x(id, slug, body, ord)
@@ -509,6 +510,26 @@ ORDER BY x.id, x.ord
 ON CONFLICT (id) DO UPDATE SET
 	slug = EXCLUDED.slug,
 	body = EXCLUDED.body`
+
+		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = ANY($1::uuid[])`
+
+		insertItemIndex = `
+WITH input AS (
+	SELECT DISTINCT ON (x.id) x.id, x.body::jsonb AS body
+	FROM unnest($1::uuid[], $2::text[]) WITH ORDINALITY AS x(id, body, ord)
+	ORDER BY x.id, x.ord
+), playlist_items AS (
+	SELECT input.id, playlists.created_at, CASE
+		WHEN jsonb_typeof(input.body->'items') = 'array' THEN input.body->'items'
+		ELSE '[]'::jsonb
+	END AS items
+	FROM input
+	JOIN playlists ON playlists.id = input.id
+)
+INSERT INTO playlist_item_index (item_id, playlist_id, playlist_created_at, position, item)
+SELECT (elem->>'id')::uuid, playlist_items.id, playlist_items.created_at, (ord - 1)::int, elem
+FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY AS t(elem, ord)`
+	)
 
 	if len(playlists) == 0 {
 		return nil
@@ -526,8 +547,16 @@ ON CONFLICT (id) DO UPDATE SET
 		}
 		bodies[i] = string(b)
 	}
-	_, err := tx.Exec(ctx, q, ids, slugs, bodies)
-	return err
+	if _, err := tx.Exec(ctx, upsertPlaylists, ids, slugs, bodies); err != nil {
+		return fmt.Errorf("upsert playlist rows: %w", err)
+	}
+	if _, err := tx.Exec(ctx, clearItemIndex, ids); err != nil {
+		return fmt.Errorf("clear playlist item index: %w", err)
+	}
+	if _, err := tx.Exec(ctx, insertItemIndex, ids, bodies); err != nil {
+		return fmt.Errorf("insert playlist item index: %w", err)
+	}
+	return nil
 }
 
 // insertPlaylistGroupMembersBatch writes membership rows in playlist order.
