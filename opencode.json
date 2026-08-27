@@ -5,7 +5,7 @@
     "reviewer": {
       "description": "Read-only code reviewer for Go changes. Use after implementation for a fresh-context review of the diff, touched files, and check output.",
       "mode": "subagent",
-      "prompt": "{file:./prompts/code-review.md}",
+      "prompt": "{file:./prompts/code-review.md}\n\n{file:./prompts/code-review.delta.md}",
       "tools": {
         "write": false,
         "edit": false
@@ -24,7 +24,7 @@
   "command": {
     "review": {
       "description": "Run a fresh-context code review using the shared review contract",
-      "template": "Review the current changes using prompts/code-review.md and AGENTS.md. Use this evidence:\\n- Diff stat: !`git diff --stat`\\n- Full diff: !`git diff`\\n- Relevant lint/test output: run or use what is provided.\\n\\nReport findings using the required sections and end with Verdict: accept or Verdict: revise. Do not edit files unless explicitly asked.",
+      "template": "Review the current changes using prompts/code-review.md, prompts/code-review.delta.md, and AGENTS.md. Use this evidence:\\n- Diff stat: !`git diff --stat`\\n- Full diff: !`git diff`\\n- Relevant lint/test output: run or use what is provided.\\n\\nReport findings using the required sections and end with Verdict: accept or Verdict: revise. Do not edit files unless explicitly asked.",
       "agent": "reviewer",
       "subtask": true
     },
