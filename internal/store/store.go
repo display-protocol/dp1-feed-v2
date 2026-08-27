@@ -97,7 +97,8 @@ type ListPlaylistItemsParams struct {
 	PlaylistGroupFilter string
 }
 
-// IngestedPlaylist is a playlist row to upsert while committing a group or channel (FK targets). Order in the slice is membership order.
+// IngestedPlaylist is a playlist row to upsert, with its item index, while committing a group or channel.
+// Order in the slice is membership order; if an ID repeats, the first body is authoritative.
 type IngestedPlaylist struct {
 	ID   uuid.UUID
 	Slug string
@@ -147,26 +148,26 @@ type Store interface {
 	// DeletePlaylist removes a playlist row.
 	DeletePlaylist(ctx context.Context, idOrSlug string) error
 
-	// CreatePlaylistGroup upserts playlists in order, inserts the group row, and creates membership from that order (single transaction).
+	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
 	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error
 	// GetPlaylistGroup loads a playlist-group by UUID or slug.
 	GetPlaylistGroup(ctx context.Context, idOrSlug string) (*PlaylistGroupRecord, error)
 	// ListPlaylistGroups returns a page ordered by created_at and Sort.
 	ListPlaylistGroups(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistGroupRecord, string, error)
-	// UpdatePlaylistGroup upserts playlists in order, updates the group row body, and replaces membership (single transaction).
+	// UpdatePlaylistGroup upserts playlists and item indexes, updates the group row body, and replaces ordered membership (single transaction).
 	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *PlaylistGroupInput) error
 	// ListPlaylistsInGroup returns full playlist rows in membership order (position 0 first). ErrNotFound if the group does not exist.
 	ListPlaylistsInGroup(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
 	// DeletePlaylistGroup removes a playlist-group row.
 	DeletePlaylistGroup(ctx context.Context, idOrSlug string) error
 
-	// CreateChannel upserts playlists in order, inserts the channel row, and creates membership from that order (single transaction).
+	// CreateChannel upserts playlists and item indexes, inserts the channel row, and creates ordered membership (single transaction).
 	CreateChannel(ctx context.Context, in *ChannelInput) error
 	// GetChannel loads a channel by UUID or slug.
 	GetChannel(ctx context.Context, idOrSlug string) (*ChannelRecord, error)
 	// ListChannels returns a page ordered by created_at and Sort.
 	ListChannels(ctx context.Context, p *ListPlaylistsParams) ([]ChannelRecord, string, error)
-	// UpdateChannel upserts playlists in order, updates the channel row body, and replaces membership (single transaction).
+	// UpdateChannel upserts playlists and item indexes, updates the channel row body, and replaces ordered membership (single transaction).
 	UpdateChannel(ctx context.Context, idOrSlug string, in *ChannelInput) error
 	// ListPlaylistsInChannel returns full playlist rows in membership order (position 0 first). ErrNotFound if the channel does not exist.
 	ListPlaylistsInChannel(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
