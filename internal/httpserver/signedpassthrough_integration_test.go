@@ -349,6 +349,134 @@ func TestIntegration_SlugFollowsDocument(t *testing.T) {
 	mustVerifyAll(t, "signed PUT of the served document", replaced)
 }
 
+// signer is a curator/publisher key pair for the group and channel round-trips below.
+type signer struct {
+	priv ed25519.PrivateKey
+	kid  string
+}
+
+func newSigner(t *testing.T) signer {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer{priv: priv, kid: kid}
+}
+
+// sign appends one signature with the given role to the unsigned document bytes.
+func (s signer) sign(t *testing.T, unsigned []byte, role string) []byte {
+	t.Helper()
+	sig, err := dp1sign.SignMultiEd25519(unsigned, s.priv, role, "2020-01-02T03:04:05Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(unsigned, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["signatures"], _ = json.Marshal([]playlist.Signature{sig})
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// seedLocalPlaylist creates an API-key playlist and returns the same-origin URL groups/channels reference.
+func seedLocalPlaylist(t *testing.T, srv *Server, slug string) string {
+	t.Helper()
+	post := map[string]any{
+		"dpVersion": "1.1.0", "slug": slug, "title": "member " + slug,
+		"items": []map[string]any{{"id": uuid.New().String(), "source": "https://cdn.example.com/" + slug + ".html"}},
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", post, http.StatusCreated)
+	return "http://example.com/api/v1/playlists/" + slug
+}
+
+// TestIntegration_SignedPlaylistGroup_RoundTrip: the group document takes the same signed path as
+// playlists — verified over received bytes, feed co-signed, stored and served verbatim, immutable to
+// API-key edits, replaceable by a signed PUT with the same identity.
+func TestIntegration_SignedPlaylistGroup_RoundTrip(t *testing.T) {
+	srv := newIntegrationServer(t)
+	member := seedLocalPlaylist(t, srv, "group-member")
+	curator := newSigner(t)
+
+	id := uuid.MustParse("c0c0c0c0-2222-4333-8444-555555555555")
+	const slug = "signed-group"
+	doc := func(title string) []byte {
+		return []byte(`{"id":"` + id.String() + `","slug":"` + slug + `","title":"` + title + `","created":"2020-01-02T03:04:05Z",` +
+			`"playlists":["` + member + `"],"curator":"` + curator.kid + `"}`)
+	}
+
+	createdRaw := mustDoRawUnauthenticated(t, srv, http.MethodPost, "/api/v1/playlist-groups", json.RawMessage(curator.sign(t, doc("v1"), playlist.RoleCurator)), http.StatusCreated)
+	ok, failed, err := dp1sign.VerifyPlaylistGroupSignatures(createdRaw)
+	if err != nil || !ok {
+		t.Fatalf("POST response signatures: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlist-groups/"+slug, nil, http.StatusOK)
+	if ok, failed, err := dp1sign.VerifyPlaylistGroupSignatures(gotRaw); err != nil || !ok {
+		t.Fatalf("GET response signatures: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+
+	doRaw(t, srv, http.MethodPatch, "/api/v1/playlist-groups/"+slug, map[string]any{"title": "ops"}, http.StatusConflict, true)
+	doRaw(t, srv, http.MethodPut, "/api/v1/playlist-groups/"+slug, map[string]any{"title": "ops", "playlists": []string{member}}, http.StatusConflict, true)
+
+	replaced := mustDoRawUnauthenticated(t, srv, http.MethodPut, "/api/v1/playlist-groups/"+slug, json.RawMessage(curator.sign(t, doc("v2"), playlist.RoleCurator)), http.StatusOK)
+	if ok, failed, err := dp1sign.VerifyPlaylistGroupSignatures(replaced); err != nil || !ok {
+		t.Fatalf("signed PUT response signatures: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlist-groups/"+slug, nil, http.StatusOK), &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["title"]) != `"v2"` {
+		t.Fatalf("title after signed PUT: %s", got["title"])
+	}
+}
+
+// TestIntegration_SignedChannel_RoundTrip is the channel counterpart (publisher-signed; channels
+// require slug and version in the document).
+func TestIntegration_SignedChannel_RoundTrip(t *testing.T) {
+	srv := newIntegrationServer(t)
+	member := seedLocalPlaylist(t, srv, "channel-member")
+	publisher := newSigner(t)
+
+	id := uuid.MustParse("d0d0d0d0-2222-4333-8444-555555555555")
+	const slug = "signed-channel"
+	doc := func(title string) []byte {
+		return []byte(`{"id":"` + id.String() + `","slug":"` + slug + `","title":"` + title + `","version":"1.0.0","created":"2020-01-02T03:04:05Z",` +
+			`"playlists":["` + member + `"],"publisher":{"name":"Publisher","key":"` + publisher.kid + `"}}`)
+	}
+
+	createdRaw := mustDoRawUnauthenticated(t, srv, http.MethodPost, "/api/v1/channels", json.RawMessage(publisher.sign(t, doc("v1"), "publisher")), http.StatusCreated)
+	ok, failed, err := dp1sign.VerifyChannelSignatures(createdRaw)
+	if err != nil || !ok {
+		t.Fatalf("POST response signatures: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/channels/"+slug, nil, http.StatusOK)
+	if ok, failed, err := dp1sign.VerifyChannelSignatures(gotRaw); err != nil || !ok {
+		t.Fatalf("GET response signatures: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+
+	doRaw(t, srv, http.MethodPatch, "/api/v1/channels/"+slug, map[string]any{"title": "ops"}, http.StatusConflict, true)
+	doRaw(t, srv, http.MethodPut, "/api/v1/channels/"+slug, map[string]any{"title": "ops", "playlists": []string{member}}, http.StatusConflict, true)
+
+	// Identity mismatch on a signed PUT (different id) is a 400.
+	other := []byte(`{"id":"` + uuid.New().String() + `","slug":"` + slug + `","title":"v2","version":"1.0.0","created":"2020-01-02T03:04:05Z",` +
+		`"playlists":["` + member + `"],"publisher":{"name":"Publisher","key":"` + publisher.kid + `"}}`)
+	doRaw(t, srv, http.MethodPut, "/api/v1/channels/"+slug, json.RawMessage(publisher.sign(t, other, "publisher")), http.StatusBadRequest, false)
+
+	replaced := mustDoRawUnauthenticated(t, srv, http.MethodPut, "/api/v1/channels/"+slug, json.RawMessage(publisher.sign(t, doc("v2"), "publisher")), http.StatusOK)
+	if ok, failed, err := dp1sign.VerifyChannelSignatures(replaced); err != nil || !ok {
+		t.Fatalf("signed PUT response signatures: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+}
+
 func replaceOnce(s, old, repl string) string {
 	for i := 0; i+len(old) <= len(s); i++ {
 		if s[i:i+len(old)] == old {

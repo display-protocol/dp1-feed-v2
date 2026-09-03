@@ -109,6 +109,24 @@ func TestSignPlaylist_preservesEveryOtherMember(t *testing.T) {
 	}
 }
 
+// TestSign_rejectsMalformedInput: every document kind fails cleanly on bytes that are not a JSON object.
+func TestSign_rejectsMalformedInput(t *testing.T) {
+	t.Parallel()
+	svc := newPreserveService(t)
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, in := range [][]byte{[]byte(`not json`), []byte(`[1,2]`), []byte(`{"signatures":"not-an-array"}`)} {
+		if _, err := svc.SignPlaylist(in, ts); err == nil {
+			t.Errorf("SignPlaylist(%s): want error", in)
+		}
+		if _, err := svc.SignPlaylistGroup(in, ts); err == nil {
+			t.Errorf("SignPlaylistGroup(%s): want error", in)
+		}
+		if _, err := svc.SignChannel(in, ts); err == nil {
+			t.Errorf("SignChannel(%s): want error", in)
+		}
+	}
+}
+
 // TestSignPlaylist_replacesOnlyItsOwnKid: re-signing a document that already carries this feed's
 // signature refreshes that one entry and leaves every foreign entry in place.
 func TestSignPlaylist_replacesOnlyItsOwnKid(t *testing.T) {
