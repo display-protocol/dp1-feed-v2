@@ -477,6 +477,78 @@ func TestIntegration_SignedChannel_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegration_SlugConflict: moving a document onto a slug another row holds is a client conflict
+// (409), not an internal error, for creates and for the PUT/PATCH paths that now persist slug moves.
+func TestIntegration_SlugConflict(t *testing.T) {
+	srv := newIntegrationServer(t)
+	mk := func(slug string) map[string]any {
+		return map[string]any{"dpVersion": "1.1.0", "slug": slug, "title": slug, "items": []map[string]any{{"source": "https://cdn.example.com/a.html"}}}
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", mk("taken"), http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", mk("mover"), http.StatusCreated)
+
+	body := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", mk("taken"), http.StatusConflict, true)
+	var resp ErrorResponse
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Error != "conflict" {
+		t.Fatalf("POST duplicate slug: want conflict, got %s", body)
+	}
+	doRaw(t, srv, http.MethodPatch, "/api/v1/playlists/mover", map[string]any{"slug": "taken"}, http.StatusConflict, true)
+	doRaw(t, srv, http.MethodPut, "/api/v1/playlists/mover", mk("taken"), http.StatusConflict, true)
+
+	member := seedLocalPlaylist(t, srv, "conflict-member")
+	group := func(slug string) map[string]any {
+		return map[string]any{"slug": slug, "title": slug, "playlists": []string{member}}
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", group("g-taken"), http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", group("g-mover"), http.StatusCreated)
+	doRaw(t, srv, http.MethodPatch, "/api/v1/playlist-groups/g-mover", map[string]any{"slug": "g-taken"}, http.StatusConflict, true)
+
+	channel := func(slug string) map[string]any {
+		return map[string]any{"slug": slug, "title": slug, "playlists": []string{member}}
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channel("c-taken"), http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channel("c-mover"), http.StatusCreated)
+	doRaw(t, srv, http.MethodPatch, "/api/v1/channels/c-mover", map[string]any{"slug": "c-taken"}, http.StatusConflict, true)
+}
+
+// TestIntegration_LegacySignaturePreservedAndGuarded: a signed submission carrying both a v1.1
+// signatures[] entry and a v1.0.x top-level signature keeps both, and the API-key path treats the
+// legacy signature as foreign.
+func TestIntegration_LegacySignaturePreservedAndGuarded(t *testing.T) {
+	srv := newIntegrationServer(t)
+	curator := newSigner(t)
+	id := uuid.MustParse("e1e1e1e1-2222-4333-8444-555555555555")
+	const slug = "legacy-signed"
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `","title":"Legacy","created":"2020-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + curator.kid + `"}],` +
+		`"items":[{"id":"e2e2e2e2-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]}`)
+	legacy, err := dp1sign.SignLegacyEd25519(unsigned, curator.priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := curator.sign(t, unsigned, playlist.RoleCurator)
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(signed, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["signature"], _ = json.Marshal(legacy)
+	both, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createdRaw := mustDoRawUnauthenticated(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(both), http.StatusCreated)
+	mustVerifyAll(t, "POST with legacy signature", createdRaw)
+	var pl playlist.Playlist
+	if err := json.Unmarshal(mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK), &pl); err != nil {
+		t.Fatal(err)
+	}
+	if pl.Signature != legacy {
+		t.Fatalf("legacy signature not preserved: %q", pl.Signature)
+	}
+	doRaw(t, srv, http.MethodPatch, "/api/v1/playlists/"+slug, map[string]any{"title": "ops"}, http.StatusConflict, true)
+}
+
 func replaceOnce(s, old, repl string) string {
 	for i := 0; i+len(old) <= len(s); i++ {
 		if s[i:i+len(old)] == old {

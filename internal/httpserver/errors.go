@@ -37,6 +37,9 @@ func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrListLimitExceeded) {
 		return http.StatusBadRequest, "bad_request", err.Error()
 	}
+	if errors.Is(err, store.ErrSlugConflict) {
+		return http.StatusConflict, "conflict", err.Error()
+	}
 	return http.StatusInternalServerError, "internal_error", err.Error()
 }
 

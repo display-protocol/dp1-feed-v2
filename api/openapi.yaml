@@ -155,6 +155,7 @@ paths:
       description: Creates a new DP-1 playlist with v1.1+ multisig
       security:
         - ApiKeyAuth: []
+        - {}
       requestBody:
         required: true
         content:
@@ -215,6 +216,7 @@ paths:
         API-key replace of such a document is refused with 409.
       security:
         - ApiKeyAuth: []
+        - {}
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -318,6 +320,7 @@ paths:
       description: Creates a new playlist-group with resolved playlist references
       security:
         - ApiKeyAuth: []
+        - {}
       requestBody:
         required: true
         content:
@@ -377,6 +380,7 @@ paths:
         API-key replace of such a document is refused with 409.
       security:
         - ApiKeyAuth: []
+        - {}
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -482,6 +486,7 @@ paths:
       description: Creates a new channel with resolved playlist references (requires extensions)
       security:
         - ApiKeyAuth: []
+        - {}
       requestBody:
         required: true
         content:
@@ -542,6 +547,7 @@ paths:
         document; an API-key replace of such a document is refused with 409.
       security:
         - ApiKeyAuth: []
+        - {}
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -749,10 +755,12 @@ components:
       type: http
       scheme: bearer
       description: >
-        API key for write operations. Alternatively, omit this header when the JSON body includes a
-        non-empty `signatures` array and the server successfully verifies curator or publisher
-        signatures (POST create; PUT/PATCH replace/update on playlists, playlist-groups, and channels).
-        DELETE and registry PUT require this API key (no signature-only path).
+        API key for write operations. For POST (create) and PUT (replace) of playlists, playlist-groups,
+        and channels this header may be omitted when the JSON body is a signed document (non-empty
+        `signatures` array whose curator or publisher signatures verify); those operations therefore
+        declare an unauthenticated alternative alongside this scheme. PATCH, DELETE, and registry PUT
+        require this API key (no signature-only path: a PATCH is merged server-side, so no client
+        signature can cover the result).
 
   parameters:
     IdOrSlug:
@@ -925,6 +933,13 @@ components:
       required:
         - source
       properties:
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Item identifier. Optional on API-key submissions (the server assigns one when omitted).
+            Required on signed submissions: the feed cannot add it without editing the signed document,
+            and the playlist-item index is keyed by it (400 when absent).
         source:
           type: string
           format: uri

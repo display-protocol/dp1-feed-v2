@@ -230,3 +230,66 @@ func TestReplaceSignedGroupAndChannel_identityMismatch(t *testing.T) {
 		t.Fatalf("channel: want ErrSignedDocumentMismatch, got %v", err)
 	}
 }
+
+// A stored document carrying a legacy v1.0.x top-level "signature" is foreign by definition: the feed
+// never produces one and the API-key builders would drop it. PATCH and API-key PUT must refuse it.
+func TestUpdatePlaylist_legacySignature_isImmutable(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "legacy").Return(&store.PlaylistRecord{
+		ID: uuid.New(), Slug: "legacy",
+		Body: playlist.Playlist{Created: "2020-01-01T00:00:00Z", Signature: "ed25519:abcd"},
+	}, nil).Times(2)
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	title := "x"
+	if _, err := e.UpdatePlaylist(context.Background(), "legacy", &models.PlaylistUpdateRequest{Title: &title}); !errors.Is(err, executor.ErrDocumentImmutable) {
+		t.Fatalf("PATCH: want ErrDocumentImmutable, got %v", err)
+	}
+	if _, err := e.ReplacePlaylist(context.Background(), "legacy", &models.PlaylistReplaceRequest{DPVersion: "1.1.0", Title: "x", Items: []playlist.PlaylistItem{{Source: "https://x"}}}); !errors.Is(err, executor.ErrDocumentImmutable) {
+		t.Fatalf("PUT: want ErrDocumentImmutable, got %v", err)
+	}
+}
+
+// Slug-targeted writes must persist by the ID resolved from the read, never by re-resolving the slug:
+// with slug moves persisted, a concurrent move-and-reuse could otherwise redirect the write — built
+// and authorized for the row that was read — onto a different row.
+func TestSlugTargetedWrites_useResolvedID(t *testing.T) {
+	t.Parallel()
+	rowID := uuid.MustParse("99999999-9999-9999-9999-999999999999")
+	created := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	title := "x"
+
+	t.Run("playlist", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		st, m := mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl)
+		st.EXPECT().GetPlaylist(gomock.Any(), "moving").Return(&store.PlaylistRecord{ID: rowID, Slug: "moving", Body: playlist.Playlist{Created: created}}, nil)
+		signed := []byte(`{"title":"x"}`)
+		m.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
+		m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "x"}, nil)
+		st.EXPECT().UpdatePlaylist(gomock.Any(), rowID.String(), gomock.Any()).Return(nil)
+		e := executor.New(st, m, false, nil, "")
+		if _, err := e.UpdatePlaylist(context.Background(), "moving", &models.PlaylistUpdateRequest{Title: &title}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("playlist-group", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		st, m := mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl)
+		member := uuid.MustParse("aaaaaaaa-1111-1111-1111-111111111111")
+		st.EXPECT().GetPlaylistGroup(gomock.Any(), "moving").Return(&store.PlaylistGroupRecord{ID: rowID, Slug: "moving", Body: playlistgroup.Group{Created: created, Playlists: []string{localPlaylistRef("pl")}}}, nil)
+		st.EXPECT().GetPlaylist(gomock.Any(), "pl").Return(&store.PlaylistRecord{ID: member, Slug: "pl", Raw: []byte(`{"id":"aaaaaaaa-1111-1111-1111-111111111111"}`)}, nil)
+		signed := []byte(`{"title":"x"}`)
+		m.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil)
+		m.EXPECT().ValidatePlaylistGroup(signed).Return(&playlistgroup.Group{Title: "x"}, nil)
+		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), rowID.String(), gomock.Any()).Return(nil)
+		e := executor.New(st, m, false, nil, testPublicBase)
+		if _, err := e.UpdatePlaylistGroup(context.Background(), "moving", &models.PlaylistGroupUpdateRequest{Title: &title}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}

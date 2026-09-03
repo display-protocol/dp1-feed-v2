@@ -42,6 +42,21 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// uniqueViolation is SQLSTATE 23505 (unique_violation); kept as a literal rather than pulling in pgerrcode for one code.
+const uniqueViolation = "23505"
+
+// wrapWriteError turns a slug unique-constraint violation into store.ErrSlugConflict (a client
+// conflict, HTTP 409) and wraps everything else with the operation name. Slug columns are the only
+// UNIQUE constraints on the document tables besides the primary key; the constraint-name check keeps
+// an id collision (a programming error or replayed create) from being reported as a slug clash.
+func wrapWriteError(op string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && strings.Contains(pgErr.ConstraintName, "slug") {
+		return fmt.Errorf("%s: %w", op, store.ErrSlugConflict)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // requireDocument guards the write path: a document is persisted as the raw bytes the executor signed,
 // so an empty payload here is a programming error, not a client error.
 func requireDocument(raw json.RawMessage, label string) error {
@@ -100,7 +115,7 @@ RETURNING created_at`
 
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx, insertPlaylist, id, slug, bodyJSON).Scan(&createdAt); err != nil {
-		return fmt.Errorf("insert playlist: %w", err)
+		return wrapWriteError("insert playlist", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, id, bodyJSON, createdAt); err != nil {
 		return fmt.Errorf("insert playlist_item_index: %w", err)
@@ -470,7 +485,7 @@ WHERE id = $1 RETURNING created_at`
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w", store.ErrNotFound)
 		}
-		return fmt.Errorf("update playlist: %w", err)
+		return wrapWriteError("update playlist", err)
 	}
 	if _, err := tx.Exec(ctx, clearItemIndex, rowID); err != nil {
 		return fmt.Errorf("clear playlist_item_index: %w", err)
@@ -561,7 +576,7 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 		bodies[i] = string(p.Raw)
 	}
 	if _, err := tx.Exec(ctx, upsertPlaylists, ids, slugs, bodies); err != nil {
-		return fmt.Errorf("upsert playlist rows: %w", err)
+		return wrapWriteError("upsert playlist rows", err)
 	}
 	if _, err := tx.Exec(ctx, clearItemIndex, ids); err != nil {
 		return fmt.Errorf("clear playlist item index: %w", err)
@@ -619,7 +634,7 @@ VALUES ($1, $2, $3::jsonb)`
 	groupJSON := []byte(in.Raw)
 
 	if _, err := tx.Exec(ctx, insertGroup, in.ID, in.Slug, groupJSON); err != nil {
-		return fmt.Errorf("insert playlist_group: %w", err)
+		return wrapWriteError("insert playlist_group", err)
 	}
 
 	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
@@ -781,7 +796,7 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 
 	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON)
 	if err != nil {
-		return fmt.Errorf("update playlist_group: %w", err)
+		return wrapWriteError("update playlist_group", err)
 	}
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("%w", store.ErrNotFound)
@@ -928,7 +943,7 @@ VALUES ($1, $2, $3::jsonb)`
 	chJSON := []byte(in.Raw)
 
 	if _, err := tx.Exec(ctx, insertChannel, in.ID, in.Slug, chJSON); err != nil {
-		return fmt.Errorf("insert channel: %w", err)
+		return wrapWriteError("insert channel", err)
 	}
 
 	if err := insertChannelMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
@@ -1090,7 +1105,7 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 
 	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON)
 	if err != nil {
-		return fmt.Errorf("update channel: %w", err)
+		return wrapWriteError("update channel", err)
 	}
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("%w", store.ErrNotFound)

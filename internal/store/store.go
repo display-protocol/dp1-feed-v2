@@ -18,6 +18,10 @@ import (
 // ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrSlugConflict is returned when a write would give a row a slug another row of the same kind
+// already has (slug columns are unique). Surfaces as HTTP 409 rather than an internal error.
+var ErrSlugConflict = errors.New("slug already in use")
+
 // Documents are written and read as raw JSON, never re-marshaled through the typed dp1-go structs.
 //
 // Why: DP-1 §7.1 signs the JCS form of the *entire* document, so every signer's payload_hash is bound

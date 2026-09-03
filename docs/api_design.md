@@ -71,7 +71,8 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
    - The server builds the document from the request: on **create**, when **`id`** or **`created`** are omitted, it assigns a new UUID and the current time respectively; when provided, values are validated (UUID shape; **`created`** RFC3339 and not in the future) and stored. **`slug`** follows **`makeSlug`** rules (optional client slug, else derived from title + short id).
    - Server adds its feed signature to the document.
    - **Only for documents the feed owns.** If the stored document carries a signature from any key other than the feed's, an API-key **PUT** or **PATCH** is refused with **`409` `conflict`**: the edit would keep that signature while changing the bytes it attests. Such a document can only be replaced by a fully signed document (path 2). Known carve-out: group/channel ingest upserts member playlists **by id**, so a referenced remote document with the same `id` replaces a stored playlist wholesale (a validated document swapped for another; no signature is orphaned).
-   - A **PUT/PATCH** that changes `slug` moves the row's slug with the document, so the resource stays addressable by the slug it serves.
+   - A **PUT/PATCH** that changes `slug` moves the row's slug with the document, so the resource stays addressable by the slug it serves. A slug another row already holds is **`409` `conflict`** (create or move). Slug-targeted writes persist by the id resolved from the read, so a concurrent slug move cannot redirect the write to another row.
+   - A stored document carrying a legacy v1.0.x top-level `signature` counts as foreign-signed (the feed never produces one), so it is likewise immutable to API-key **PUT/PATCH**.
 
 2. **Signature-based authentication (user path) — the client is the author and first signer.**
    - **No API key required** when the body includes a **non-empty** `signatures` array and verification succeeds
@@ -85,7 +86,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
    - Server **always adds** its own feed signature regardless of authentication path
    - **DELETE** and **registry PUT** still require an API key only (no signature-only path)
 
-**Strict request decoding (all document writes, both paths):** a JSON member that the request schema does not describe is rejected with **`400` `bad_request`** naming the field (e.g. `json: unknown field "created"` for an `items[].created`). It is never silently dropped: on the signed path a dropped member changes the signed bytes; on the API-key path it is data the client sent and the feed would discard. Clients must send only the members the DP-1 core and enabled-extension schemas define.
+**Strict request decoding (all document writes, both paths):** a JSON member that the request schema does not describe is rejected with **`400` `bad_request`** naming the field (e.g. `json: unknown field "created"` for an `items[].created`). Member names are matched **exactly** (`Summary` is unknown, not `summary`), at every nesting level; only opaque members (`override`, `inlineManifest`, `display.margin`, `display.userOverrides`) are passed through unchecked. It is never silently dropped: on the signed path a dropped member changes the signed bytes; on the API-key path it is data the client sent and the feed would discard. Clients must send only the members the DP-1 core and enabled-extension schemas define.
 
 **Documents are served as stored.** GET, list, and write responses return the persisted bytes (JSONB re-orders keys and normalises numeric text, both of which are JCS-neutral), so every signature on a document verifies against the response that carries it. The ETag on single-resource GETs is over those bytes.
 

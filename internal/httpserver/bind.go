@@ -5,7 +5,10 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"reflect"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -42,10 +45,90 @@ func bindDocument(c *gin.Context, dst any) (json.RawMessage, error) {
 	if !json.Valid(raw) {
 		return nil, errTrailingBody
 	}
+	// encoding/json matches member names case-insensitively even with DisallowUnknownFields, so
+	// "Summary" would silently bind to summary. Check exact spellings first.
+	if err := checkExactMembers(raw, reflect.TypeOf(dst)); err != nil {
+		return nil, err
+	}
 	if err := binding.JSON.BindBody(raw, dst); err != nil {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// checkExactMembers walks the JSON in raw alongside the Go type it will decode into and rejects any
+// object member whose name is not, byte for byte, a JSON tag of the struct at that position. It
+// recurses through pointers, slices, and nested structs; maps, interfaces, and json.RawMessage fields
+// are opaque (their contents are the client's, not modeled). The error text mirrors encoding/json's.
+func checkExactMembers(raw []byte, typ reflect.Type) error {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	return exactMembers(v, typ)
+}
+
+var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
+
+func exactMembers(v any, typ reflect.Type) error {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		if typ == rawMessageType {
+			return nil
+		}
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return nil // a type mismatch is the decoder's error to report
+		}
+		fields := jsonFields(typ)
+		for name, val := range obj {
+			f, known := fields[name]
+			if !known {
+				return fmt.Errorf("json: unknown field %q", name)
+			}
+			if err := exactMembers(val, f); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		if typ == rawMessageType {
+			return nil
+		}
+		arr, ok := v.([]any)
+		if !ok {
+			return nil
+		}
+		for _, item := range arr {
+			if err := exactMembers(item, typ.Elem()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// jsonFields maps a struct's wire names to field types, ignoring "-" fields and using the Go name
+// when a field has no json tag (encoding/json's rule).
+func jsonFields(typ reflect.Type) map[string]reflect.Type {
+	out := make(map[string]reflect.Type, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		switch name {
+		case "-":
+			continue
+		case "":
+			name = f.Name
+		}
+		out[name] = f.Type
+	}
+	return out
 }
 
 // writeDocument writes stored document bytes to the wire unchanged. Re-encoding through the typed

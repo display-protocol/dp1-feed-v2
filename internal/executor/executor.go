@@ -288,9 +288,14 @@ func slugOr(docSlug, rowSlug string) string {
 // by this feed's key is immutable to them. Rebuilding it would keep those foreign entries while
 // changing the bytes they attest, leaving a stored document whose signatures no longer verify.
 //
-// Foreignness is decided by Kid, not role, because role is client-asserted. Operational caveat: after
-// a feed key rotation, documents signed only by the previous feed key also count as foreign.
-func (e *impl) requireFeedOwned(sigs []playlist.Signature) error {
+// Foreignness is decided by Kid, not role, because role is client-asserted. A legacy v1.0.x top-level
+// "signature" is always foreign: the feed never produces one, and the API-key builders do not carry it,
+// so an edit would silently erase it. Operational caveat: after a feed key rotation, documents signed
+// only by the previous feed key also count as foreign.
+func (e *impl) requireFeedOwned(sigs []playlist.Signature, legacySignature string) error {
+	if legacySignature != "" {
+		return ErrDocumentImmutable
+	}
 	if len(sigs) == 0 {
 		return nil
 	}
@@ -503,9 +508,9 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 	if len(req.Signatures) > 0 {
-		return e.replaceSignedPlaylist(ctx, idOrSlug, rec, req)
+		return e.replaceSignedPlaylist(ctx, rec, req)
 	}
-	if err := e.requireFeedOwned(rec.Body.Signatures); err != nil {
+	if err := e.requireFeedOwned(rec.Body.Signatures, rec.Body.Signature); err != nil {
 		return nil, err
 	}
 
@@ -523,14 +528,14 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 	// The store rebuilds playlist_item_index from items[] in the same transaction.
-	if err := e.store.UpdatePlaylist(ctx, idOrSlug, signed); err != nil {
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
 }
 
 // replaceSignedPlaylist is the signed-document path for PUT (see createSignedPlaylist).
-func (e *impl) replaceSignedPlaylist(ctx context.Context, idOrSlug string, rec *store.PlaylistRecord, req *models.PlaylistReplaceRequest) (*store.PlaylistRecord, error) {
+func (e *impl) replaceSignedPlaylist(ctx context.Context, rec *store.PlaylistRecord, req *models.PlaylistReplaceRequest) (*store.PlaylistRecord, error) {
 	si, err := newSignedIdentity(req.ID, req.Created, req.Slug, req.Raw)
 	if err != nil {
 		return nil, err
@@ -548,7 +553,7 @@ func (e *impl) replaceSignedPlaylist(ctx context.Context, idOrSlug string, rec *
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, idOrSlug, signed); err != nil {
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
@@ -562,7 +567,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
-	if err := e.requireFeedOwned(rec.Body.Signatures); err != nil {
+	if err := e.requireFeedOwned(rec.Body.Signatures, rec.Body.Signature); err != nil {
 		return nil, err
 	}
 	existing := &rec.Body
@@ -628,7 +633,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, idOrSlug, signed); err != nil {
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
@@ -813,14 +818,14 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		if err != nil {
 			return nil, err
 		}
-		if err := e.store.UpdatePlaylistGroup(ctx, idOrSlug, &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
+		if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
 			return nil, fmt.Errorf("store: %w", err)
 		}
 		return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
 	}
 
 	// API-key path.
-	if err := e.requireFeedOwned(rec.Body.Signatures); err != nil {
+	if err := e.requireFeedOwned(rec.Body.Signatures, rec.Body.Signature); err != nil {
 		return nil, err
 	}
 	created, err := parseDocumentCreated(rec.Body.Created)
@@ -836,7 +841,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylistGroup(ctx, idOrSlug, &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
+	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
@@ -850,7 +855,7 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return nil, err
 	}
-	if err := e.requireFeedOwned(rec.Body.Signatures); err != nil {
+	if err := e.requireFeedOwned(rec.Body.Signatures, rec.Body.Signature); err != nil {
 		return nil, err
 	}
 	existing := &rec.Body
@@ -907,7 +912,7 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylistGroup(ctx, idOrSlug, &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
+	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
@@ -1084,7 +1089,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		}
 	} else {
 		// API-key path.
-		if err := e.requireFeedOwned(rec.Body.Signatures); err != nil {
+		if err := e.requireFeedOwned(rec.Body.Signatures, rec.Body.Signature); err != nil {
 			return nil, err
 		}
 		created, err := parseDocumentCreated(rec.Body.Created)
@@ -1123,7 +1128,7 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 	if err != nil {
 		return nil, err
 	}
-	if err := e.requireFeedOwned(rec.Body.Signatures); err != nil {
+	if err := e.requireFeedOwned(rec.Body.Signatures, rec.Body.Signature); err != nil {
 		return nil, err
 	}
 	existing := &rec.Body
