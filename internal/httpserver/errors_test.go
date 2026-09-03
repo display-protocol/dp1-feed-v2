@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	dp1 "github.com/display-protocol/dp1-go"
@@ -115,5 +116,18 @@ func TestMapStoreError_listLimitExceeded(t *testing.T) {
 	st, code, _ := mapExecutorError(fmt.Errorf("wrap: %w", store.ErrListLimitExceeded))
 	if st != http.StatusBadRequest || code != "bad_request" {
 		t.Fatalf("got status=%d code=%q", st, code)
+	}
+}
+
+// A write refused because the row changed since it was authorized is a client-retryable conflict, not a
+// 500: the caller should re-read and retry against the new generation.
+func TestMapStoreError_concurrentModification(t *testing.T) {
+	t.Parallel()
+	st, code, msg := mapExecutorError(fmt.Errorf("store: %w", store.ErrConcurrentModification))
+	if st != http.StatusConflict || code != "conflict" {
+		t.Fatalf("got status=%d code=%q", st, code)
+	}
+	if !strings.Contains(msg, "re-read and retry") {
+		t.Fatalf("message should tell the client what to do, got %q", msg)
 	}
 }

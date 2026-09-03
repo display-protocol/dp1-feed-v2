@@ -269,6 +269,7 @@ The `.env` file contains all necessary environment variables for Docker deployme
 
 - `DP1_FEED_DATABASE_URL` — PostgreSQL connection string (use `postgres` as hostname)
 - `DP1_FEED_DELETE_MAX_CLOCK_SKEW` — Freshness window for signed DELETE intents (Go duration, default 5m)
+- `DP1_FEED_MAX_REQUEST_BYTES` — Inbound request body cap in bytes (default 5 MiB)
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging

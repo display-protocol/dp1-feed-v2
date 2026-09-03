@@ -351,7 +351,11 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
+	// Write by stable UUID and conditional on the updated_at observed when this request was authorized:
+	// the ownership decision above was made about that exact row generation, so if anything committed in
+	// between (including a delete and re-create under the same client-chosen id) the write must fail
+	// rather than apply to a different document.
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
@@ -368,9 +372,10 @@ func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylist, entityKeySet(rec.Body.Curators)); err != nil {
 		return err
 	}
-	// Delete by stable UUID, not the caller-supplied slug: authorization was established for rec.ID, so a
-	// slug reused after load cannot redirect the delete to a different row.
-	return e.store.DeletePlaylist(ctx, rec.ID.String())
+	// Delete by stable UUID, not the caller-supplied slug, and conditional on the updated_at this
+	// authorization was made against: a slug reused after load cannot redirect the delete, and a row
+	// re-created under the same id after load is a different document, so the delete fails instead.
+	return e.store.DeletePlaylist(ctx, rec.ID.String(), rec.UpdatedAt)
 }
 
 // ListPlaylistItems returns stored playlist items from playlist_item_index with optional channel or playlist-group scope.
@@ -526,10 +531,12 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err != nil {
 		return nil, err
 	}
+	// Conditional on the updated_at read at authorization. This matters most here: remote playlist-URI
+	// resolution ran between that read and this write, so the window is widest for groups and channels.
 	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{
 		Raw:       signed,
 		Playlists: ingested,
-	}); err != nil {
+	}, rec.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
@@ -545,8 +552,8 @@ func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylistGroup, stringOwnerKeySet(rec.Body.Curator)); err != nil {
 		return err
 	}
-	// Delete by stable UUID, not the caller-supplied slug (see DeletePlaylist).
-	return e.store.DeletePlaylistGroup(ctx, rec.ID.String())
+	// Delete by stable UUID and conditional on the authorized updated_at (see DeletePlaylist).
+	return e.store.DeletePlaylistGroup(ctx, rec.ID.String(), rec.UpdatedAt)
 }
 
 // CreateChannel verifies the client's publisher signature over the received bytes, resolves playlist
@@ -689,11 +696,13 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
+	// Conditional on the updated_at read at authorization; playlist-URI resolution ran in between
+	// (see ReplacePlaylistGroup).
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
 		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{
 			Raw:       signed,
 			Playlists: ingested,
-		})
+		}, rec.UpdatedAt)
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
@@ -714,8 +723,9 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string, req *models.S
 	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetChannel, stringOwnerKeySet(publisherKey(rec.Body.Publisher))); err != nil {
 		return err
 	}
+	// Delete by stable UUID and conditional on the authorized updated_at (see DeletePlaylist).
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.DeleteChannel(mutationCtx, rec.ID.String())
+		return e.store.DeleteChannel(mutationCtx, rec.ID.String(), rec.UpdatedAt)
 	}); err != nil {
 		return err
 	}

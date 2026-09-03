@@ -80,13 +80,14 @@ Three postures, by verb:
    item id → **`400` `bad_request`**). The signer becomes the resource's **owner**.
 
 2. **PUT (replace) — owner-bound and owner-immutable.** The body is a full document (same shapes as
-   create). **Identity is immutable**: the stored `id`, `slug`, and document `created` are preserved (the
-   client must sign over the stored `slug`), and the write is persisted by stored UUID. The **owner set is
+   create). **Identity is immutable and validated, not substituted**: the submitted `id`, `slug`, and
+   document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as an
+   instant, since formatting may differ). The write is persisted by stored UUID. The **owner set is
    immutable** too: `curators` (playlists), `curator` (groups), and `publisher` (channels) must equal the
    stored document's, or the request is refused **`403` `forbidden`** (channel `curators` may change). At
    least one verifying signature's `kid` must be an owner of the **stored** document, else **`403`
-   `forbidden`**; all signatures must cryptographically verify (**`400`**). Because any edit re-derives the
-   bytes, the owner re-signs the whole document and the feed co-signs.
+   `forbidden`**; all signatures must cryptographically verify (**`400`**). The owner re-signs the whole
+   document and the feed co-signs.
 
 3. **DELETE — owner-bound, signed delete-intent.** The body is a `SignedDeleteRequest`
    (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
@@ -94,6 +95,19 @@ Three postures, by verb:
    (`auth.delete_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
    must verify over the intent bytes (JCS, `signatures` stripped), and at least one signer must be an owner
    of the stored resource. DP-1 defines no delete document; this envelope is feed-local.
+
+**Documents are stored and served verbatim.** DP-1 §7.1 binds every signature to the JCS form of the
+whole document, so the feed verifies over the bytes it received, appends its `feed` entry to
+`signatures` over that same payload, and persists and returns those bytes unchanged. It never derives a
+slug, mints item ids, re-formats `created`, injects defaults (the channel `version` is now required), or
+strips a legacy top-level `signature`. Every field the document needs must therefore be present and
+signed by the client. Row `id`/`slug`/`created` are read-only projections of the document. (jsonb
+re-orders keys and normalises numeric text; both are JCS-neutral, so stored bytes stay hash-equivalent.)
+
+**Request bodies are decoded strictly.** An unknown or misspelled JSON member, or a body holding more
+than one JSON value, is a **`400`** naming the field — never silently dropped, because a dropped member
+changes the bytes the client signed. Bodies are also capped by `server.max_request_bytes` (default 5 MiB);
+exceeding it is **`413`** `payload_too_large`, enforced before the body is buffered for authentication.
 
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
 - **Registry is read-only over the API** (`GET /api/v1/registry/channels`); there is no write endpoint. Seed it out-of-band.
@@ -164,6 +178,8 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **403** | `forbidden` | Signature is valid but the signer is not an owner of the resource, or a PUT tried to change the immutable owner set (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
+| **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
+| **413** | `payload_too_large` | Request body exceeds `server.max_request_bytes` (enforced before the body is buffered). |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
 
 Clients should branch on **`error`** (stable) and treat **`message`** as diagnostic text, not a long-term contract.

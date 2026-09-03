@@ -29,10 +29,14 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, ErrorResponse{Error: code, Message: message})
 }
 
-// mapStoreError maps store.ErrNotFound, store.ErrListLimitExceeded, or falls through to 500.
+// mapStoreError maps store.ErrNotFound, store.ErrConcurrentModification, store.ErrListLimitExceeded,
+// or falls through to 500.
 func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrNotFound) {
 		return http.StatusNotFound, "not_found", err.Error()
+	}
+	if errors.Is(err, store.ErrConcurrentModification) {
+		return http.StatusConflict, "conflict", "the resource changed since it was authorized; re-read and retry"
 	}
 	if errors.Is(err, store.ErrListLimitExceeded) {
 		return http.StatusBadRequest, "bad_request", err.Error()

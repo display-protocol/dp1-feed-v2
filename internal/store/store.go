@@ -18,6 +18,18 @@ import (
 // ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrConcurrentModification is returned when a mutation's expected updated_at no longer matches the row:
+// another write (or a delete and re-create) committed between the caller's read and this write.
+//
+// This exists because authorization happens on a record the executor read *before* the write — and for
+// groups and channels, remote playlist-URI resolution runs in between, widening that window. Document
+// ids are client-assigned and reusable after a delete, so an unconditional write by id could apply a
+// decision made about the former owner's document to a different, newly created one. Conditioning every
+// post-authorization write on the observed updated_at binds it to that exact row generation.
+//
+// Surfaces as HTTP 409; the client should re-read and retry.
+var ErrConcurrentModification = errors.New("document was modified concurrently")
+
 // Documents are written and read as raw JSON, never re-marshaled through the typed dp1-go structs.
 //
 // Why: DP-1 §7.1 signs the JCS form of the *entire* document, so every signer's payload_hash is bound
@@ -167,9 +179,11 @@ type Store interface {
 	// UpdatePlaylist replaces the stored document bytes and rebuilds playlist_item_index from its items (same transaction).
 	// The slug column follows the document's "slug" when present (a row must be addressable by the slug it serves);
 	// identity is pinned by the executor, so in practice this re-writes the same slug.
-	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage) error
-	// DeletePlaylist removes a playlist row.
-	DeletePlaylist(ctx context.Context, idOrSlug string) error
+	// Conditional on expectedUpdatedAt — the updated_at the caller read when it authorized the write.
+	// A mismatch returns ErrConcurrentModification (see that sentinel); a missing row returns ErrNotFound.
+	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error
+	// DeletePlaylist removes a playlist row, conditional on expectedUpdatedAt (see UpdatePlaylist).
+	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error
 
 	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
 	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error
@@ -178,11 +192,12 @@ type Store interface {
 	// ListPlaylistGroups returns a page ordered by created_at and Sort.
 	ListPlaylistGroups(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistGroupRecord, string, error)
 	// UpdatePlaylistGroup upserts playlists and item indexes, updates the group row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
-	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *PlaylistGroupInput) error
+	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
+	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *PlaylistGroupInput, expectedUpdatedAt time.Time) error
 	// ListPlaylistsInGroup returns full playlist rows in membership order (position 0 first). ErrNotFound if the group does not exist.
 	ListPlaylistsInGroup(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
-	// DeletePlaylistGroup removes a playlist-group row.
-	DeletePlaylistGroup(ctx context.Context, idOrSlug string) error
+	// DeletePlaylistGroup removes a playlist-group row, conditional on expectedUpdatedAt (see UpdatePlaylist).
+	DeletePlaylistGroup(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error
 
 	// CreateChannel upserts playlists and item indexes, inserts the channel row, and creates ordered membership (single transaction).
 	CreateChannel(ctx context.Context, in *ChannelInput) error
@@ -191,11 +206,12 @@ type Store interface {
 	// ListChannels returns a page ordered by created_at and Sort.
 	ListChannels(ctx context.Context, p *ListPlaylistsParams) ([]ChannelRecord, string, error)
 	// UpdateChannel upserts playlists and item indexes, updates the channel row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
-	UpdateChannel(ctx context.Context, idOrSlug string, in *ChannelInput) error
+	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
+	UpdateChannel(ctx context.Context, idOrSlug string, in *ChannelInput, expectedUpdatedAt time.Time) error
 	// ListPlaylistsInChannel returns full playlist rows in membership order (position 0 first). ErrNotFound if the channel does not exist.
 	ListPlaylistsInChannel(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
-	// DeleteChannel removes a channel row.
-	DeleteChannel(ctx context.Context, idOrSlug string) error
+	// DeleteChannel removes a channel row, conditional on expectedUpdatedAt (see UpdatePlaylist).
+	DeleteChannel(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error
 
 	// GetChannelRegistry returns the curated channel registry (ordered publishers with their channel URLs).
 	GetChannelRegistry(ctx context.Context) ([]RegistryPublisher, []RegistryPublisherChannel, error)

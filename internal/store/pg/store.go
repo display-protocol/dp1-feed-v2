@@ -16,7 +16,6 @@ import (
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
@@ -40,6 +39,26 @@ FROM items, jsonb_array_elements(items.arr) WITH ORDINALITY AS t(elem, ord)`
 // Store is the PostgreSQL-backed store; it does not take ownership of the pool (caller closes it).
 type Store struct {
 	pool *pgxpool.Pool
+}
+
+// classifyConditionalWrite explains a conditional UPDATE/DELETE that matched no row: if the row still
+// exists, the caller's expected updated_at was stale (a concurrent write, or a delete and re-create,
+// landed) → ErrConcurrentModification; if the row is gone → ErrNotFound.
+//
+// table is a fixed internal constant, never client input, so interpolating it into the existence probe
+// carries no injection risk. The probe runs on the same tx/conn as the failed write, so it observes the
+// same snapshot.
+func classifyConditionalWrite(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, rowID uuid.UUID) error {
+	var exists bool
+	if err := q.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM "+table+" WHERE id = $1)", rowID).Scan(&exists); err != nil {
+		return fmt.Errorf("classify conditional write: %w", err)
+	}
+	if exists {
+		return store.ErrConcurrentModification
+	}
+	return store.ErrNotFound
 }
 
 // requireDocument guards the write path: a document is persisted as the raw bytes the executor signed,
@@ -430,11 +449,11 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 }
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage) error {
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
 	const (
 		updateByID = `UPDATE playlists
 SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
-WHERE id = $1 RETURNING created_at`
+WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
@@ -463,10 +482,10 @@ WHERE id = $1 RETURNING created_at`
 	}
 
 	var playlistCreatedAt time.Time
-	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON).Scan(&playlistCreatedAt)
+	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w", store.ErrNotFound)
+			return classifyConditionalWrite(ctx, tx, "playlists", rowID)
 		}
 		return fmt.Errorf("update playlist: %w", err)
 	}
@@ -482,25 +501,46 @@ WHERE id = $1 RETURNING created_at`
 	return nil
 }
 
-// DeletePlaylist implements store.Store.
-func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string) error {
-	const (
-		byID   = `DELETE FROM playlists WHERE id = $1`
-		bySlug = `DELETE FROM playlists WHERE slug = $1`
-	)
+// DeletePlaylist implements store.Store. The delete is conditional on expectedUpdatedAt so a decision
+// made on an earlier read cannot remove a row that has since changed or been re-created (see
+// store.ErrConcurrentModification).
+func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+	return s.deleteDocumentRow(ctx, "playlists", idOrSlug, expectedUpdatedAt)
+}
 
-	id, err := uuid.Parse(idOrSlug)
-	var ct pgconn.CommandTag
-	if err == nil {
-		ct, err = s.pool.Exec(ctx, byID, id)
-	} else {
-		ct, err = s.pool.Exec(ctx, bySlug, idOrSlug)
-	}
+// deleteDocumentRow is the shared conditional delete for the three document tables. It resolves the row
+// id (accepting a UUID or a slug), deletes only when updated_at still matches what the caller authorized
+// against, and classifies a zero-row delete as ErrConcurrentModification or ErrNotFound.
+//
+// table is a fixed internal constant, never client input (see classifyConditionalWrite).
+func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, expectedUpdatedAt time.Time) error {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("delete playlist: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var rowID uuid.UUID
+	if id, perr := uuid.Parse(idOrSlug); perr == nil {
+		rowID = id
+	} else {
+		if err := tx.QueryRow(ctx, "SELECT id FROM "+table+" WHERE slug = $1", idOrSlug).Scan(&rowID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w", store.ErrNotFound)
+			}
+			return fmt.Errorf("lookup %s slug: %w", table, err)
+		}
+	}
+
+	ct, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE id = $1 AND updated_at = $2", rowID, expectedUpdatedAt)
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", table, err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyConditionalWrite(ctx, tx, table, rowID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -735,9 +775,9 @@ LIMIT $1`
 // UpdatePlaylistGroup implements store.Store (updated_at set by trigger; membership replaced).
 //
 // Process (single tx): batch-upsert all referenced playlists, update the group body, clear and rebuild membership.
-func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput) error {
+func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1`
+		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
 		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
 	)
@@ -776,12 +816,12 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 	groupJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON)
+	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("update playlist_group: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyConditionalWrite(ctx, tx, "playlist_groups", rowID)
 	}
 
 	// Replace membership
@@ -853,26 +893,8 @@ ORDER BY m.position`
 }
 
 // DeletePlaylistGroup implements store.Store.
-func (s *Store) DeletePlaylistGroup(ctx context.Context, idOrSlug string) error {
-	const (
-		byID   = `DELETE FROM playlist_groups WHERE id = $1`
-		bySlug = `DELETE FROM playlist_groups WHERE slug = $1`
-	)
-
-	id, err := uuid.Parse(idOrSlug)
-	var ct pgconn.CommandTag
-	if err == nil {
-		ct, err = s.pool.Exec(ctx, byID, id)
-	} else {
-		ct, err = s.pool.Exec(ctx, bySlug, idOrSlug)
-	}
-	if err != nil {
-		return fmt.Errorf("delete playlist_group: %w", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
-	}
-	return nil
+func (s *Store) DeletePlaylistGroup(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+	return s.deleteDocumentRow(ctx, "playlist_groups", idOrSlug, expectedUpdatedAt)
 }
 
 // =============================================================================
@@ -1043,9 +1065,9 @@ LIMIT $1`
 // UpdateChannel implements store.Store (updated_at set by trigger; membership replaced).
 //
 // Process (single tx): batch-upsert all referenced playlists, update the channel body, clear and rebuild membership.
-func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput) error {
+func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1`
+		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM channels WHERE slug = $1`
 		clearMembers   = `DELETE FROM channel_members WHERE channel_id = $1`
 	)
@@ -1084,12 +1106,12 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 	chJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON)
+	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("update channel: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyConditionalWrite(ctx, tx, "channels", rowID)
 	}
 
 	// Replace membership
@@ -1161,26 +1183,8 @@ ORDER BY m.position`
 }
 
 // DeleteChannel implements store.Store.
-func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string) error {
-	const (
-		byID   = `DELETE FROM channels WHERE id = $1`
-		bySlug = `DELETE FROM channels WHERE slug = $1`
-	)
-
-	id, err := uuid.Parse(idOrSlug)
-	var ct pgconn.CommandTag
-	if err == nil {
-		ct, err = s.pool.Exec(ctx, byID, id)
-	} else {
-		ct, err = s.pool.Exec(ctx, bySlug, idOrSlug)
-	}
-	if err != nil {
-		return fmt.Errorf("delete channel: %w", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
-	}
-	return nil
+func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+	return s.deleteDocumentRow(ctx, "channels", idOrSlug, expectedUpdatedAt)
 }
 
 // GetChannelRegistry implements store.Store.
