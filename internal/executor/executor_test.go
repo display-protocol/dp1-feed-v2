@@ -65,12 +65,17 @@ func deleteReq(targetType, id, slug, kid string) *models.SignedDeleteRequest {
 	return r
 }
 
+// testItemID is a fixed UUID so signed submissions carry a deterministic item id (the feed no longer
+// mints one after signing).
+const testItemID = "aaaaaaaa-0000-0000-0000-0000000000a1"
+
 func validCreateReq() *models.PlaylistCreateRequest {
 	return &models.PlaylistCreateRequest{
 		DPVersion: "1.1.0",
 		Title:     "Test playlist",
+		Slug:      "test-playlist",
 		Items: []playlist.PlaylistItem{
-			{Source: "https://example.com/item"},
+			{ID: testItemID, Source: "https://example.com/item"},
 		},
 		ID:         stringPtr("11111111-1111-1111-1111-111111111111"),
 		Created:    stringPtr(testCreatedRFC),
@@ -242,10 +247,11 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	req := &models.PlaylistCreateRequest{
 		DPVersion: "1.1.0",
 		Title:     "Daily",
+		Slug:      "daily",
 		Items: []playlist.PlaylistItem{
-			{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
-			{Source: "https://cdn.example.com/day2.html", DisplayAt: stringPtr("2026-07-22T00:00:00Z")},
-			{Source: "https://cdn.example.com/intro.html"},
+			{ID: "11111111-0000-0000-0000-000000000001", Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+			{ID: "11111111-0000-0000-0000-000000000002", Source: "https://cdn.example.com/day2.html", DisplayAt: stringPtr("2026-07-22T00:00:00Z")},
+			{ID: "11111111-0000-0000-0000-000000000003", Source: "https://cdn.example.com/intro.html"},
 		},
 		ID:         stringPtr("11111111-1111-1111-1111-111111111111"),
 		Created:    stringPtr(testCreatedRFC),
@@ -317,7 +323,7 @@ func TestCreatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 
 	req := validCreateReq()
 	req.Items = []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+		{ID: testItemID, Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 	}
 	signed := []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
 	parsed := mustDecodePlaylist(t, signed)
@@ -347,8 +353,8 @@ func TestCreatePlaylist_preservesItemInlineManifest(t *testing.T) {
 	manifest := inlineManifestJSON("manifest-1")
 	req := validCreateReq()
 	req.Items = []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", InlineManifest: manifest},
-		{Source: "https://cdn.example.com/day2.html"},
+		{ID: "11111111-0000-0000-0000-000000000001", Source: "https://cdn.example.com/day1.html", InlineManifest: manifest},
+		{ID: "11111111-0000-0000-0000-000000000002", Source: "https://cdn.example.com/day2.html"},
 	}
 
 	var preSign []byte
@@ -699,6 +705,42 @@ func TestListPlaylists_filters(t *testing.T) {
 	}
 }
 
+// A create/replace must carry an explicit slug and give every item a UUID id; the feed no longer derives
+// them after signing.
+func TestCreatePlaylist_missingSlug(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	req := validCreateReq()
+	req.Slug = "   "
+	if _, err := e.CreatePlaylist(context.Background(), req); !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want invalid-submission (slug required), got %v", err)
+	}
+}
+
+func TestCreatePlaylist_itemMissingID(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	req := validCreateReq()
+	req.Items = []playlist.PlaylistItem{{Source: "https://example.com/x"}}
+	if _, err := e.CreatePlaylist(context.Background(), req); !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want invalid-submission (item id), got %v", err)
+	}
+}
+
+func TestReplacePlaylist_itemMissingID(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	// requireItemIDs runs before the store is read, so no GetPlaylist expectation is needed.
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	req := validCreateReq()
+	req.Items = []playlist.PlaylistItem{{Source: "https://example.com/x"}}
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req); !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want invalid-submission (item id), got %v", err)
+	}
+}
+
 func TestDeletePlaylist(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -709,7 +751,7 @@ func TestDeletePlaylist(t *testing.T) {
 	body := playlist.Playlist{ID: id.String(), Slug: "id-1", Curators: []identity.Entity{{Key: testCuratorKid}}}
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(&store.PlaylistRecord{ID: id, Slug: "id-1", Body: body}, nil)
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
-	mockStore.EXPECT().DeletePlaylist(gomock.Any(), "id-1").Return(nil)
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), id.String()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
@@ -969,13 +1011,13 @@ func TestReplacePlaylist_success(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), &parsed).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	req := validCreateReq()
 	req.Title = "New title"
 	req.Items = []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+		{ID: testItemID, Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 	}
 	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
 	if err != nil {
@@ -1017,7 +1059,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), &parsed).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := validCreateReq()
@@ -1147,7 +1189,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 
 	req := validCreateReq()
 	req.Items = []playlist.PlaylistItem{
-		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
+		{ID: testItemID, Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 	}
 	signed := []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
 	parsed := mustDecodePlaylist(t, signed)
@@ -1155,7 +1197,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), &parsed).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.ReplacePlaylist(context.Background(), "daily", req)
@@ -1231,6 +1273,7 @@ func localPlaylistRef(slug string) string {
 func validGroupCreateReq(uris ...string) *models.PlaylistGroupCreateRequest {
 	return &models.PlaylistGroupCreateRequest{
 		Title:      "Group title",
+		Slug:       "group-title",
 		Playlists:  uris,
 		ID:         stringPtr("33333333-3333-3333-3333-333333333333"),
 		Created:    stringPtr(testCreatedRFC),
@@ -1347,11 +1390,12 @@ func TestCreatePlaylistGroup_optionalCreate_respectsProvidedID(t *testing.T) {
 func TestCreatePlaylistGroup_emptyPlaylists(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
-	_, err := e.CreatePlaylistGroup(context.Background(), &models.PlaylistGroupCreateRequest{
-		Title:     "x",
-		Playlists: nil,
-	})
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	// Authorization precedes URI resolution, so a signed request is verified before the empty-playlists
+	// check inside resolvePlaylistURIs is reached.
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, nil, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq())
 	if err == nil || !strings.Contains(err.Error(), "playlists must be non-empty") {
 		t.Fatalf("got %v", err)
 	}
@@ -1360,7 +1404,9 @@ func TestCreatePlaylistGroup_emptyPlaylists(t *testing.T) {
 func TestCreatePlaylistGroup_externalURINoFetcher(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
 	if err == nil || !strings.Contains(err.Error(), "fetcher is not configured") {
 		t.Fatalf("got %v", err)
@@ -1372,8 +1418,10 @@ func TestCreatePlaylistGroup_localPlaylistNotFound(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "missing").Return(nil, store.ErrNotFound)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
 
-	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("missing")))
 	if err == nil || !strings.Contains(err.Error(), "local playlist") {
 		t.Fatalf("got %v", err)
@@ -1588,7 +1636,7 @@ func TestDeletePlaylistGroup(t *testing.T) {
 	body := playlistgroup.Group{ID: id.String(), Slug: "gid", Curator: testCuratorKid}
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(&store.PlaylistGroupRecord{ID: id, Slug: "gid", Body: body}, nil)
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
-	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), "gid").Return(nil)
+	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), id.String()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
@@ -1628,7 +1676,7 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), "keep-g", gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput) {
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput) {
 		if in.ID != uuid.Nil || in.Slug != "" {
 			t.Fatalf("update input should not set row id/slug (store resolves from idOrSlug): id=%v slug=%q", in.ID, in.Slug)
 		}
@@ -1684,7 +1732,7 @@ func TestReplacePlaylistGroup_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), "keep-g", gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gid.String(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	req := validGroupCreateReq(localPlaylistRef("pl"))
@@ -2019,7 +2067,18 @@ func TestDeleteChannel_extensionsDisabled(t *testing.T) {
 	}
 }
 
-func TestCreateChannel_whitespaceSlugFallsBackToAuto(t *testing.T) {
+// Slug is required and stored verbatim (no derivation/slugification): the client signs over it.
+func TestCreateChannel_missingSlug(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
+	req := validChannelCreateReq("   ", localPlaylistRef("p")) // whitespace-only slug
+	if _, err := e.CreateChannel(context.Background(), req); !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want invalid-submission (slug required), got %v", err)
+	}
+}
+
+func TestCreateChannel_slugStoredVerbatim(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
@@ -2038,99 +2097,13 @@ func TestCreateChannel_whitespaceSlugFallsBackToAuto(t *testing.T) {
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
 	)
 	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
-		if in.Slug == "" || !strings.HasPrefix(in.Slug, "t-") {
-			t.Fatalf("expected auto slug from title \"T\", got %q", in.Slug)
+		if in.Slug != "My-Channel" {
+			t.Fatalf("slug must be stored verbatim, got %q", in.Slug)
 		}
 	}).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
-		Title:      "T",
-		Slug:       "   ",
-		Playlists:  []string{localPlaylistRef("p")},
-		ID:         stringPtr("44444444-4444-4444-4444-444444444444"),
-		Created:    stringPtr(testCreatedRFC),
-		Publisher:  &identity.Entity{Key: testPublisherKid},
-		Signatures: []playlist.Signature{testSig(testPublisherKid)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCreateChannel_unslugifiableClientSlugFallsBackToTitle(t *testing.T) {
-	t.Parallel()
-	ctrl := gomock.NewController(t)
-	mockStore := mocks.NewMockStore(ctrl)
-	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
-	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
-
-	plID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
-	mockStore.EXPECT().GetPlaylist(gomock.Any(), "p").Return(&store.PlaylistRecord{
-		ID: plID, Slug: "p", Body: mustDecodePlaylist(t, []byte(`{"id":"66666666-6666-6666-6666-666666666666"}`)),
-	}, nil)
-
-	signed := []byte(`{"kind":"signed-channel"}`)
-	wantCh := mustDecodeChannel(t, signed)
-	gomock.InOrder(
-		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
-		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
-	)
-	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
-		if in.Slug == "" || !strings.HasPrefix(in.Slug, "derive-me-") {
-			t.Fatalf("expected auto slug from title, got %q", in.Slug)
-		}
-	}).Return(nil)
-
-	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
-		Title:      "Derive me",
-		Slug:       "@@@",
-		Playlists:  []string{localPlaylistRef("p")},
-		ID:         stringPtr("44444444-4444-4444-4444-444444444444"),
-		Created:    stringPtr(testCreatedRFC),
-		Publisher:  &identity.Entity{Key: testPublisherKid},
-		Signatures: []playlist.Signature{testSig(testPublisherKid)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCreateChannel_unslugifiableTitleUsesChannelPrefix(t *testing.T) {
-	t.Parallel()
-	ctrl := gomock.NewController(t)
-	mockStore := mocks.NewMockStore(ctrl)
-	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
-	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
-
-	plID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
-	mockStore.EXPECT().GetPlaylist(gomock.Any(), "p").Return(&store.PlaylistRecord{
-		ID: plID, Slug: "p", Body: mustDecodePlaylist(t, []byte(`{"id":"55555555-5555-5555-5555-555555555555"}`)),
-	}, nil)
-
-	signed := []byte(`{"kind":"signed-channel"}`)
-	wantCh := mustDecodeChannel(t, signed)
-	gomock.InOrder(
-		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
-		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
-	)
-	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
-		if in.Slug == "" || !strings.HasPrefix(in.Slug, "channel-") {
-			t.Fatalf("expected channel- prefix slug, got %q", in.Slug)
-		}
-	}).Return(nil)
-
-	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
-		Title:      "###",
-		Playlists:  []string{localPlaylistRef("p")},
-		ID:         stringPtr("44444444-4444-4444-4444-444444444444"),
-		Created:    stringPtr(testCreatedRFC),
-		Publisher:  &identity.Entity{Key: testPublisherKid},
-		Signatures: []playlist.Signature{testSig(testPublisherKid)},
-	})
-	if err != nil {
+	if _, err := e.CreateChannel(context.Background(), validChannelCreateReq("My-Channel", localPlaylistRef("p"))); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -2158,8 +2131,8 @@ func TestCreateChannel_success(t *testing.T) {
 	var createdChannelID uuid.UUID
 	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.ChannelInput) {
 		createdChannelID = in.ID
-		if in.ID == uuid.Nil || in.Slug != "my-channel" {
-			t.Fatalf("create expects id and slugified slug, id=%v slug=%q", in.ID, in.Slug)
+		if in.ID == uuid.Nil || in.Slug != "My Channel" {
+			t.Fatalf("create expects id and verbatim slug, id=%v slug=%q", in.ID, in.Slug)
 		}
 		if len(in.Playlists) != 1 || in.Playlists[0].ID != plID {
 			t.Fatalf("playlists: %+v", in.Playlists)
@@ -2358,6 +2331,7 @@ func TestCreateChannel_playlistResolutionPreservesPerFetchTimeoutAcrossBatches(t
 	defer cancel()
 	_, err := e.CreateChannel(ctx, &models.ChannelCreateRequest{
 		Title:      "Second fetch batch",
+		Slug:       "second-fetch-batch",
 		Playlists:  playlists,
 		ID:         stringPtr("44444444-4444-4444-4444-444444444444"),
 		Created:    stringPtr(testCreatedRFC),
@@ -2659,7 +2633,7 @@ func TestDeletePlaylist_storeError(t *testing.T) {
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
-	mockStore.EXPECT().DeletePlaylist(gomock.Any(), "id-1").Return(errors.New("db down"))
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), id.String()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
@@ -2726,7 +2700,7 @@ func TestDeletePlaylistGroup_storeError(t *testing.T) {
 	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
-	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), "gid").Return(errors.New("db down"))
+	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), id.String()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
@@ -2820,7 +2794,7 @@ func TestReplacePlaylist_storeError(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(errors.New("db down"))
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), &parsed).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); err == nil || !strings.Contains(err.Error(), "db down") {
@@ -2843,7 +2817,7 @@ func TestReplacePlaylistGroup_storeError(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), "gid", gomock.Any()).Return(errors.New("db down"))
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), id.String(), gomock.Any()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); err == nil || !strings.Contains(err.Error(), "db down") {
@@ -2942,7 +2916,8 @@ func TestCreatePlaylistWithSignatures_success(t *testing.T) {
 	req := &models.PlaylistCreateRequest{
 		DPVersion:  "1.1.0",
 		Title:      "Test Playlist",
-		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		Slug:       "test-playlist",
+		Items:      []playlist.PlaylistItem{{ID: testItemID, Source: "https://example.com"}},
 		Curators:   []identity.Entity{{Key: kid}},
 		ID:         &id,
 		Created:    &created,
@@ -2991,7 +2966,8 @@ func TestCreatePlaylistWithSignatures_verificationFailure(t *testing.T) {
 	req := &models.PlaylistCreateRequest{
 		DPVersion:  "1.1.0",
 		Title:      "Test",
-		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		Slug:       "test",
+		Items:      []playlist.PlaylistItem{{ID: testItemID, Source: "https://example.com"}},
 		ID:         &id,
 		Created:    &created,
 		Signatures: []playlist.Signature{sig},

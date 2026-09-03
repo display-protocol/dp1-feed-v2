@@ -23,7 +23,7 @@ alwaysApply: true
 
 - Plural segments: `playlists`, `playlist-groups`, `channels`, `playlist-items`.
 - Kebab-case multi-word paths; single resource **`{id}`** path param = UUID **or** slug.
-- Registry: **`GET`** / **`PUT`** `/api/v1/registry/channels` (PUT authenticated).
+- Registry: **`GET`** `/api/v1/registry/channels` only (read-only over the API; no write endpoint).
 
 ## JSON
 

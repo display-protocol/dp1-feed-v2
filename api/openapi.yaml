@@ -700,17 +700,37 @@ components:
 
     PlaylistInput:
       type: object
+      description: >-
+        Create (POST) / replace (PUT) body for a playlist. Authorization is signature-only: `id`,
+        `created`, `slug`, `curators`, and a matching `signatures` entry are all required, and the feed
+        stores them verbatim (it does not derive a slug or mint item ids after signing). On PUT the
+        identity (`id`, `slug`, document `created`) and the `curators` owner set are immutable and must
+        equal the stored document.
       required:
         - dpVersion
+        - id
+        - created
+        - slug
         - title
         - items
+        - curators
+        - signatures
       properties:
         dpVersion:
           type: string
           example: "1.1.0"
-        title:
+        id:
           type: string
+          format: uuid
+          description: Client-assigned UUID; part of the signed document and the resource identity.
+        created:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp, not in the future; part of the signed document.
         slug:
+          type: string
+          description: URL identifier, taken verbatim (not derived); immutable on PUT.
+        title:
           type: string
         items:
           type: array
@@ -718,8 +738,9 @@ components:
             $ref: '#/components/schemas/PlaylistItemInput'
         curators:
           type: array
+          description: Declared owners; a signature whose kid matches a curator key authorizes the write.
           items:
-            type: object
+            $ref: '#/components/schemas/Entity'
         summary:
           type: string
         coverImage:
@@ -731,33 +752,25 @@ components:
           $ref: '#/components/schemas/Note'
         dynamicQuery:
           type: object
-        id:
-          type: string
-          format: uuid
-          description: >-
-            Optional on API-key creates (server generates when omitted). Required with signatures[]
-            for signature-based authentication. When provided with valid curator signatures matching curators[],
-            bypasses API key requirement.
-        created:
-          type: string
-          format: date-time
-          description: >-
-            Optional on API-key creates (server uses current time when omitted). Required with signatures[]
-            for signature-based authentication. RFC3339; must not be in the future when provided.
         signatures:
           type: array
+          minItems: 1
           description: >-
-            Optional. Array of cryptographic signatures for signature-based authentication.
-            When provided with valid curator signatures matching curators[], bypasses API key requirement.
-            Server always adds its feed signature regardless of authentication path.
+            Curator signatures over the document (JCS, signatures stripped). At least one kid must match a
+            `curators` key. The feed always appends its own `feed` signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
     PlaylistItemInput:
       type: object
       required:
+        - id
         - source
       properties:
+        id:
+          type: string
+          format: uuid
+          description: Client-assigned UUID; required because the item is part of the signed document (the feed never mints it).
         source:
           type: string
           format: uri
@@ -871,13 +884,31 @@ components:
 
     PlaylistGroupInput:
       type: object
+      description: >-
+        Create (POST) / replace (PUT) body for a playlist-group. Signature-only: `id`, `created`, `slug`,
+        `curator`, and a matching `signatures` entry are required and stored verbatim. On PUT the identity
+        (`id`, `slug`, document `created`) and the `curator` owner are immutable.
       required:
+        - id
+        - created
+        - slug
         - title
         - playlists
+        - curator
+        - signatures
       properties:
-        title:
+        id:
           type: string
+          format: uuid
+          description: Client-assigned UUID; part of the signed document and identity.
+        created:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp, not in the future; part of the signed document.
         slug:
+          type: string
+          description: URL identifier, taken verbatim (not derived); immutable on PUT.
+        title:
           type: string
         playlists:
           type: array
@@ -886,30 +917,18 @@ components:
             type: string
         curator:
           type: string
+          description: did:key of the owner; a signature whose kid matches it authorizes the write.
         summary:
           type: string
         coverImage:
           type: string
           format: uri
-        id:
-          type: string
-          format: uuid
-          description: >-
-            Optional on API-key creates (server generates when omitted). Required with signatures[]
-            for signature-based authentication. When provided with valid curator signatures,
-            bypasses API key requirement.
-        created:
-          type: string
-          format: date-time
-          description: >-
-            Optional on API-key creates (server uses current time when omitted). Required with signatures[]
-            for signature-based authentication. RFC3339; must not be in the future when provided.
         signatures:
           type: array
+          minItems: 1
           description: >-
-            Optional. Array of cryptographic signatures for signature-based authentication.
-            When provided with valid curator signature matching curator field, bypasses API key requirement.
-            Server always adds its feed signature regardless of authentication path.
+            Curator signatures over the document. At least one kid must equal `curator`. The feed appends
+            its own `feed` signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -932,18 +951,33 @@ components:
 
     ChannelInput:
       type: object
+      description: >-
+        Create (POST) / replace (PUT) body for a channel (requires extensions). Signature-only: `id`,
+        `created`, `slug`, `publisher`, and a matching `signatures` entry are required and stored verbatim.
+        On PUT the identity (`id`, `slug`, document `created`) and the `publisher` owner are immutable;
+        `curators` may change.
       required:
+        - id
+        - created
+        - slug
         - title
         - playlists
+        - publisher
+        - signatures
       properties:
-        title:
+        id:
           type: string
+          format: uuid
+          description: Client-assigned UUID; part of the signed document and identity.
+        created:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp, not in the future; part of the signed document.
         slug:
           type: string
-          description: >-
-            Optional. If omitted, only whitespace, or not slugifiable after normalization, the server derives a
-            unique slug from the title (same pattern as playlist-groups). If the title is also empty or not
-            slugifiable, the server uses a "channel-" prefix with a short id suffix.
+          description: URL identifier, taken verbatim (not derived); immutable on PUT.
+        title:
+          type: string
         version:
           type: string
           default: "1.0.0"
@@ -955,33 +989,22 @@ components:
         curators:
           type: array
           items:
-            type: object
+            $ref: '#/components/schemas/Entity'
         publisher:
-          type: object
+          allOf:
+            - $ref: '#/components/schemas/Entity'
+          description: The channel owner; a signature whose kid matches its key authorizes the write.
         summary:
           type: string
         coverImage:
           type: string
           format: uri
-        id:
-          type: string
-          format: uuid
-          description: >-
-            Optional on API-key creates (server generates when omitted). Required with signatures[]
-            for signature-based authentication. When provided with valid publisher signatures,
-            bypasses API key requirement.
-        created:
-          type: string
-          format: date-time
-          description: >-
-            Optional on API-key creates (server uses current time when omitted). Required with signatures[]
-            for signature-based authentication. RFC3339; must not be in the future when provided.
         signatures:
           type: array
+          minItems: 1
           description: >-
-            Optional. Array of cryptographic signatures for signature-based authentication.
-            When provided with valid publisher signature matching publisher field, bypasses API key requirement.
-            Server always adds its feed signature regardless of authentication path.
+            Publisher signatures over the document. At least one kid must equal the publisher key. The feed
+            appends its own `feed` signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1153,6 +1176,24 @@ components:
           format: float
           description: Display duration in seconds (defaults to 20 when omitted)
           example: 15.0
+
+    Entity:
+      type: object
+      description: >-
+        A curator or publisher identity. `key` is a did:key; it is the value a signature's `kid` must
+        match to authorize a write on the resource that declares this entity as an owner.
+      required:
+        - key
+      properties:
+        name:
+          type: string
+        key:
+          type: string
+          description: did:key identifier of the owner.
+          example: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        url:
+          type: string
+          format: uri
 
   responses:
     BadRequest:

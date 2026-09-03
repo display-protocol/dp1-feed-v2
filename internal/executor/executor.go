@@ -222,7 +222,15 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, id, "playlist")
+	// slug is taken verbatim (the client signed it) and every item must already carry a UUID id; the feed
+	// must not derive a slug or mint item ids after signing.
+	slug, err := requireSlug(req.Slug)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireItemIDs(req.Items); err != nil {
+		return nil, err
+	}
 	raw, err := e.buildPlaylistDocument(req, id, slug, created)
 	if err != nil {
 		return nil, err
@@ -268,12 +276,9 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	if dp == "" {
 		dp = models.DefaultDPVersion
 	}
+	// Items are used exactly as supplied — callers guarantee every item already has a UUID id
+	// (requireItemIDs). Minting an id here would rewrite the document the client signed.
 	items := append([]playlist.PlaylistItem(nil), req.Items...)
-	for i := range items {
-		if strings.TrimSpace(items[i].ID) == "" {
-			items[i].ID = uuid.New().String()
-		}
-	}
 	p := playlist.Playlist{
 		DPVersion: dp,
 		ID:        id.String(),
@@ -306,37 +311,13 @@ func (e *impl) buildPlaylistDocument(req *models.PlaylistCreateRequest, id uuid.
 	return json.Marshal(&p)
 }
 
-// slugify lowercases, replaces non-alphanumeric runs with '-', trims edges (empty → "").
+// slugify lowercases, replaces non-alphanumeric runs with '-', trims edges (empty → ""). Used by playlist
+// URI resolution to match local slugs; mutation slugs are taken verbatim from the client (see requireSlug).
 func slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 	return s
-}
-
-// shortID returns the first 8 characters of the UUID for slug generation.
-func shortID(id uuid.UUID) string {
-	return id.String()[:8]
-}
-
-// makeSlug generates a URL-friendly slug for playlists, groups, and channels.
-// Priority: 1) client-provided slug, 2) title-based slug, 3) default+id.
-func makeSlug(clientSlug, title string, id uuid.UUID, defaultName string) string {
-	// First: try using the client-provided slug
-	if clientSlug != "" {
-		slug := slugify(clientSlug)
-		if slug != "" {
-			return slug
-		}
-	}
-
-	// Second: generate from title
-	base := slugify(title)
-	if base == "" {
-		base = defaultName
-	}
-
-	return fmt.Sprintf("%s-%s", base, shortID(id))
 }
 
 // documentCreatedRFC3339Nano formats a timestamp for DP-1 JSON "created" (date-time).
@@ -385,15 +366,18 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 	return out, nextCur, nil
 }
 
-// ReplacePlaylist replaces a playlist by id/slug (full body); id and document "created" follow the stored
-// row; JSON slug comes from request slug/title + id (see makeSlug), not from rec.Slug alone.
+// ReplacePlaylist replaces a playlist by id/slug (full body); id, slug, and document "created" follow the
+// stored row (identity is immutable), so the client must sign over the stored slug.
 //
-// Owner-bound and owner-immutable: signatures[] is required; the curator (owner) set may not change from
-// the stored document; the new document must be validly self-signed by its curators; and at least one
-// verifying signature must come from a stored owner key. Any edit re-derives the bytes, so the owner
-// re-signs and the feed co-signs.
+// Owner-bound and owner-immutable: signatures[] is required; identity is fixed (stored id, slug, and
+// document created are preserved), the curator (owner) set may not change, every item must carry a UUID
+// id, and at least one verifying signature must come from a stored owner key. Any edit re-derives the
+// bytes, so the owner re-signs and the feed co-signs.
 func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
+	if err := requireItemIDs(req.Items); err != nil {
 		return nil, err
 	}
 
@@ -407,12 +391,14 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 
-	// 2) Build the new playlist document.
+	// 2) Build the new playlist document. id and slug are immutable — the stored values are preserved so
+	// the signed body, the routing slug, and the relational row stay consistent (the client signs over the
+	// stored slug). created follows the stored document.
 	created, err := parseDocumentCreated(rec.Body.Created)
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, rec.ID, "playlist")
+	slug := rec.Slug
 	raw, err := e.buildPlaylistDocument(req, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -448,8 +434,10 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, fmt.Errorf("post-sign validation: nil playlist")
 	}
 
-	// 5) Persist validated document; DB also builds playlist_item_index from items[].
-	if err := e.store.UpdatePlaylist(ctx, idOrSlug, pl); err != nil {
+	// 5) Persist validated document by stable UUID (never the caller-supplied slug): authorization was
+	// established for rec.ID, so writing by id prevents a slug that was reused after load from redirecting
+	// the write to a different row. DB also rebuilds playlist_item_index from items[].
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), pl); err != nil {
 		return nil, err
 	}
 	return pl, nil
@@ -466,7 +454,9 @@ func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylist, entityKeySet(rec.Body.Curators)); err != nil {
 		return err
 	}
-	return e.store.DeletePlaylist(ctx, idOrSlug)
+	// Delete by stable UUID, not the caller-supplied slug: authorization was established for rec.ID, so a
+	// slug reused after load cannot redirect the delete to a different row.
+	return e.store.DeletePlaylist(ctx, rec.ID.String())
 }
 
 // ListPlaylistItems returns stored playlist items from playlist_item_index with optional channel or playlist-group scope.
@@ -533,12 +523,8 @@ func (e *impl) buildPlaylistGroupDocument(req *models.PlaylistGroupCreateRequest
 func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGroupCreateRequest) (*playlistgroup.Group, error) {
 	uris := req.Playlists
 
-	// 1. Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
-	if err != nil {
-		return nil, err
-	}
-
+	// Authorize BEFORE resolving playlist URIs: resolution can make outbound HTTP fetches, so an
+	// unauthorized request must be rejected first (RequireSignatures only proves the array is non-empty).
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
 	}
@@ -550,13 +536,22 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, id, "group")
+	slug, err := requireSlug(req.Slug)
+	if err != nil {
+		return nil, err
+	}
 	raw, err := e.buildPlaylistGroupDocument(req, uris, id, slug, created)
 	if err != nil {
 		return nil, err
 	}
 	if err := e.verifyPlaylistGroupCuratorSignatures(raw, req.Signatures, req.Curator); err != nil {
 		return nil, fmt.Errorf("curator signature verification: %w", err)
+	}
+
+	// Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	if err != nil {
+		return nil, err
 	}
 
 	signed, err := e.dp1.SignPlaylistGroup(raw, created)
@@ -631,25 +626,21 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	ownerKeys := stringOwnerKeySet(rec.Body.Curator)
 	uris := req.Playlists
 
-	// 2. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
-	if err != nil {
-		return nil, err
-	}
-
-	// 3. Build the group document.
+	// 2. Build the group document. id and slug are immutable — the stored slug is preserved so the signed
+	// body, routing slug, and relational row stay consistent; created follows the stored document.
 	created, err := parseDocumentCreated(rec.Body.Created)
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, rec.ID, "group")
+	slug := rec.Slug
 	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
 	}
 
-	// Authorize the replace: crypto-verify all signatures (400), then require a stored-owner signature
-	// (403). Owner-immutability pins the declared curator to the stored one; see ReplacePlaylist.
+	// 3. Authorize BEFORE resolving playlist URIs (resolution can fetch remote URLs): crypto-verify all
+	// signatures (400), then require a stored-owner signature (403). Owner-immutability pins the declared
+	// curator to the stored one; see ReplacePlaylist.
 	ok, failed, err := e.dp1.VerifyPlaylistGroupSignatures(raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
@@ -661,7 +652,13 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		return nil, err
 	}
 
-	// 4. Sign with v1.1+ multisig (feed role).
+	// 4. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	if err != nil {
+		return nil, err
+	}
+
+	// 5. Sign with v1.1+ multisig (feed role).
 	signed, err := e.dp1.SignPlaylistGroup(raw, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
@@ -676,8 +673,8 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		return nil, fmt.Errorf("post-sign validation: nil playlist-group")
 	}
 
-	// 6. Persist validated document.
-	if err := e.store.UpdatePlaylistGroup(ctx, idOrSlug, &store.PlaylistGroupInput{
+	// 6. Persist validated document by stable UUID (never the caller-supplied slug); see ReplacePlaylist.
+	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{
 		Body:      *group,
 		Playlists: ingested,
 	}); err != nil {
@@ -696,7 +693,8 @@ func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylistGroup, stringOwnerKeySet(rec.Body.Curator)); err != nil {
 		return err
 	}
-	return e.store.DeletePlaylistGroup(ctx, idOrSlug)
+	// Delete by stable UUID, not the caller-supplied slug (see DeletePlaylist).
+	return e.store.DeletePlaylistGroup(ctx, rec.ID.String())
 }
 
 // buildChannelDocument maps API input to channels.Channel (extensions schema) including curators/publisher entities.
@@ -739,12 +737,7 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	}
 	uris := req.Playlists
 
-	// 1. Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
-	if err != nil {
-		return nil, err
-	}
-
+	// Authorize BEFORE resolving playlist URIs (resolution can fetch remote URLs); see CreatePlaylistGroup.
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
 	}
@@ -756,13 +749,22 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, id, "channel")
+	slug, err := requireSlug(req.Slug)
+	if err != nil {
+		return nil, err
+	}
 	raw, err := e.buildChannelDocument(req, uris, id, slug, created)
 	if err != nil {
 		return nil, err
 	}
 	if err := e.verifyChannelPublisherSignatures(raw, req.Signatures, req.Publisher); err != nil {
 		return nil, fmt.Errorf("publisher signature verification: %w", err)
+	}
+
+	// Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	if err != nil {
+		return nil, err
 	}
 
 	signed, err := e.dp1.SignChannel(raw, created)
@@ -848,18 +850,13 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	ownerKeys := stringOwnerKeySet(publisherKey(rec.Body.Publisher))
 	uris := req.Playlists
 
-	// 2. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
-	if err != nil {
-		return nil, err
-	}
-
-	// 3. Build the channel document.
+	// 2. Build the channel document. id and slug are immutable — the stored slug is preserved; created
+	// follows the stored document.
 	created, err := parseDocumentCreated(rec.Body.Created)
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, rec.ID, "channel")
+	slug := rec.Slug
 	raw, err := e.buildChannelDocument(req, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -878,7 +875,14 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		return nil, err
 	}
 
-	// 4. Sign with v1.1+ multisig (feed role).
+	// 4. Fresh fetch/lookup for every URI (only after authorization); membership rows are replaced in the
+	// same store transaction.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	if err != nil {
+		return nil, err
+	}
+
+	// 5. Sign with v1.1+ multisig (feed role).
 	signed, err := e.dp1.SignChannel(raw, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)

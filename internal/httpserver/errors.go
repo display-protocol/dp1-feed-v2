@@ -56,6 +56,9 @@ func mapExecutorError(err error) (status int, code, msg string) {
 	if executor.IsDeleteRequestError(err) {
 		return http.StatusBadRequest, "bad_request", err.Error()
 	}
+	if executor.IsInvalidSubmissionError(err) {
+		return http.StatusBadRequest, "bad_request", err.Error()
+	}
 	if executor.IsDP1SignError(err) {
 		return http.StatusBadRequest, "signature_invalid", err.Error()
 	}

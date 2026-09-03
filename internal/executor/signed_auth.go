@@ -31,7 +31,33 @@ var (
 	// ErrDeleteRequestInvalid is returned when a signed delete-intent is malformed or does not match the
 	// resource it targets (wrong action, wrong target type, or id/slug that disagree with the stored row).
 	ErrDeleteRequestInvalid = errors.New("invalid delete request")
+	// ErrSlugRequired is returned when a create omits slug. The client signs over the document's slug, so
+	// the feed cannot derive or normalize one after signing without invalidating the signature.
+	ErrSlugRequired = errors.New("slug is required")
+	// ErrItemIDRequired is returned when a playlist item lacks a UUID id. The feed used to assign missing
+	// ids, but that would rewrite the document after the client signed it; the client must supply them.
+	ErrItemIDRequired = errors.New("every playlist item requires a UUID id")
 )
+
+// requireSlug returns the client-provided slug verbatim (only whitespace-emptiness is rejected). It is
+// deliberately not slugified: normalizing after the client has signed would change the signed bytes.
+func requireSlug(slug string) (string, error) {
+	if strings.TrimSpace(slug) == "" {
+		return "", ErrSlugRequired
+	}
+	return slug, nil
+}
+
+// requireItemIDs rejects any playlist item without a parseable UUID id, so the feed never has to mint one
+// after signing (which would orphan the client's signature).
+func requireItemIDs(items []playlist.PlaylistItem) error {
+	for i := range items {
+		if _, err := uuid.Parse(strings.TrimSpace(items[i].ID)); err != nil {
+			return fmt.Errorf("%w: items[%d]", ErrItemIDRequired, i)
+		}
+	}
+	return nil
+}
 
 // requireSignatures rejects a mutating request that carries no signatures.
 func requireSignatures(sigs []playlist.Signature) error {
@@ -192,4 +218,10 @@ func IsForbiddenError(err error) bool {
 // IsDeleteRequestError reports whether err is a malformed/mismatched delete-intent (maps to 400 bad_request).
 func IsDeleteRequestError(err error) bool {
 	return err != nil && errors.Is(err, ErrDeleteRequestInvalid)
+}
+
+// IsInvalidSubmissionError reports whether err is a client-correctable defect in a signed create/replace
+// submission (missing slug, or an item without a UUID id). Maps to 400 bad_request.
+func IsInvalidSubmissionError(err error) bool {
+	return err != nil && (errors.Is(err, ErrSlugRequired) || errors.Is(err, ErrItemIDRequired))
 }

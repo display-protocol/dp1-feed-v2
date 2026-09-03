@@ -75,14 +75,18 @@ Three postures, by verb:
 1. **POST (create) — open.** Any client may create. The body must include `id` (UUID), `created`
    (RFC3339, not in the future), `slug`, and a non-empty `signatures` array with a signature whose `kid`
    matches a curator `key` (playlists/groups) or the publisher `key` (channels) declared in the document.
-   The signer becomes the resource's **owner**.
+   These are all part of the signed document and are stored **verbatim** — the feed does not derive a slug
+   or mint item ids after signing, so every playlist item must already carry a UUID `id` (missing slug or
+   item id → **`400` `bad_request`**). The signer becomes the resource's **owner**.
 
 2. **PUT (replace) — owner-bound and owner-immutable.** The body is a full document (same shapes as
-   create). The **owner set is immutable**: `curators` (playlists), `curator` (groups), and `publisher`
-   (channels) must equal the stored document's, or the request is refused **`403` `forbidden`**. At least
-   one verifying signature's `kid` must be an owner of the **stored** document, else **`403` `forbidden`**.
-   The server preserves the stored `id` and document `created`; because any edit re-derives the bytes, the
-   owner re-signs the whole document and the feed co-signs.
+   create). **Identity is immutable**: the stored `id`, `slug`, and document `created` are preserved (the
+   client must sign over the stored `slug`), and the write is persisted by stored UUID. The **owner set is
+   immutable** too: `curators` (playlists), `curator` (groups), and `publisher` (channels) must equal the
+   stored document's, or the request is refused **`403` `forbidden`** (channel `curators` may change). At
+   least one verifying signature's `kid` must be an owner of the **stored** document, else **`403`
+   `forbidden`**; all signatures must cryptographically verify (**`400`**). Because any edit re-derives the
+   bytes, the owner re-signs the whole document and the feed co-signs.
 
 3. **DELETE — owner-bound, signed delete-intent.** The body is a `SignedDeleteRequest`
    (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
