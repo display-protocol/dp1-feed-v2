@@ -57,6 +57,21 @@ func wrapWriteError(op string, err error) error {
 	return fmt.Errorf("%s: %w", op, err)
 }
 
+// classifyMissingUpdate explains a conditional UPDATE that matched no row: if the row still exists, the
+// caller's expected updated_at was stale (a concurrent write landed) → ErrConcurrentModification; if the
+// row is gone → ErrNotFound. table is a fixed internal constant, never client input, so interpolating it
+// into the existence probe carries no injection risk.
+func classifyMissingUpdate(ctx context.Context, tx pgx.Tx, table string, rowID uuid.UUID) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM "+table+" WHERE id = $1)", rowID).Scan(&exists); err != nil {
+		return fmt.Errorf("classify update: %w", err)
+	}
+	if exists {
+		return store.ErrConcurrentModification
+	}
+	return store.ErrNotFound
+}
+
 // requireDocument guards the write path: a document is persisted as the raw bytes the executor signed,
 // so an empty payload here is a programming error, not a client error.
 func requireDocument(raw json.RawMessage, label string) error {
@@ -447,11 +462,11 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
 // The slug column follows the document's "slug" when present, so the row is addressable by the slug it
 // serves; a document without a slug keeps the row's.
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage) error {
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
 	const (
 		updateByID = `UPDATE playlists
 SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
-WHERE id = $1 RETURNING created_at`
+WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
@@ -480,10 +495,10 @@ WHERE id = $1 RETURNING created_at`
 	}
 
 	var playlistCreatedAt time.Time
-	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON).Scan(&playlistCreatedAt)
+	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w", store.ErrNotFound)
+			return classifyMissingUpdate(ctx, tx, "playlists", rowID)
 		}
 		return wrapWriteError("update playlist", err)
 	}
@@ -753,9 +768,9 @@ LIMIT $1`
 //
 // Process (single tx): batch-upsert all referenced playlists, update the group body (slug column follows
 // the document's slug, see UpdatePlaylist), clear and rebuild membership.
-func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput) error {
+func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1`
+		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
 		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
 	)
@@ -794,12 +809,12 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 	groupJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON)
+	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON, expectedUpdatedAt)
 	if err != nil {
 		return wrapWriteError("update playlist_group", err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyMissingUpdate(ctx, tx, "playlist_groups", rowID)
 	}
 
 	// Replace membership
@@ -1062,9 +1077,9 @@ LIMIT $1`
 //
 // Process (single tx): batch-upsert all referenced playlists, update the channel body (slug column follows
 // the document's slug, see UpdatePlaylist), clear and rebuild membership.
-func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput) error {
+func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1`
+		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM channels WHERE slug = $1`
 		clearMembers   = `DELETE FROM channel_members WHERE channel_id = $1`
 	)
@@ -1103,12 +1118,12 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 	chJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON)
+	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON, expectedUpdatedAt)
 	if err != nil {
 		return wrapWriteError("update channel", err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyMissingUpdate(ctx, tx, "channels", rowID)
 	}
 
 	// Replace membership

@@ -100,7 +100,10 @@ POST /api/v1/playlists  (body carries signatures[])
 ```
 
 The executor never rebuilds a signed document; see `docs/api_design.md` (Authentication) for the
-immutability and identity rules that follow from this.
+immutability and identity rules that follow from this. Updates carry the `updated_at` the executor read
+as an optimistic-concurrency token: the store applies the write only if the row is unchanged, so the
+foreign-signature immutability guard (checked on the read) is atomic with the write. A racing write
+returns `409` (`store.ErrConcurrentModification`).
 
 ### Read playlist
 

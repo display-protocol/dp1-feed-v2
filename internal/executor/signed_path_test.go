@@ -269,7 +269,7 @@ func TestSlugTargetedWrites_useResolvedID(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "x"}, nil)
-		st.EXPECT().UpdatePlaylist(gomock.Any(), rowID.String(), gomock.Any()).Return(nil)
+		st.EXPECT().UpdatePlaylist(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil)
 		e := executor.New(st, m, false, nil, "")
 		if _, err := e.UpdatePlaylist(context.Background(), "moving", &models.PlaylistUpdateRequest{Title: &title}); err != nil {
 			t.Fatal(err)
@@ -286,10 +286,63 @@ func TestSlugTargetedWrites_useResolvedID(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylistGroup(signed).Return(&playlistgroup.Group{Title: "x"}, nil)
-		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), rowID.String(), gomock.Any()).Return(nil)
+		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil)
 		e := executor.New(st, m, false, nil, testPublicBase)
 		if _, err := e.UpdatePlaylistGroup(context.Background(), "moving", &models.PlaylistGroupUpdateRequest{Title: &title}); err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+// The immutability guard is atomic with the write: the executor passes the updated_at it read as an
+// optimistic-concurrency token, so a signed PUT that commits between the API-key read and its write
+// makes the store reject the stale write (ErrConcurrentModification → HTTP 409) rather than clobbering
+// the now-foreign document. This pins the token threading and the conflict propagation; the store test
+// TestStore_updateIsConditionalOnUpdatedAt proves the SQL condition itself.
+func TestUpdate_passesReadUpdatedAtAndSurfacesConflict(t *testing.T) {
+	t.Parallel()
+	readAt := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+	const feedKid = "did:key:feed"
+
+	t.Run("playlist PATCH", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		st, m := mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl)
+		st.EXPECT().GetPlaylist(gomock.Any(), "p").Return(&store.PlaylistRecord{
+			ID: uuid.New(), Slug: "p", Body: playlist.Playlist{Created: "2020-01-01T00:00:00Z"}, UpdatedAt: readAt,
+		}, nil)
+		m.EXPECT().Kid().Return(feedKid).AnyTimes()
+		signed := []byte(`{"title":"x"}`)
+		m.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
+		m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "x"}, nil)
+		// The store must receive exactly the updated_at that was read, and its conflict must propagate.
+		st.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), readAt).Return(store.ErrConcurrentModification)
+		e := executor.New(st, m, false, nil, "")
+		title := "x"
+		_, err := e.UpdatePlaylist(context.Background(), "p", &models.PlaylistUpdateRequest{Title: &title})
+		if !errors.Is(err, store.ErrConcurrentModification) {
+			t.Fatalf("want ErrConcurrentModification, got %v", err)
+		}
+	})
+
+	t.Run("channel replace", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		st, m := mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl)
+		member := uuid.MustParse("bbbbbbbb-1111-1111-1111-111111111111")
+		st.EXPECT().GetChannel(gomock.Any(), "c").Return(&store.ChannelRecord{
+			ID: uuid.New(), Slug: "c", Body: channels.Channel{Created: "2020-01-01T00:00:00Z", Playlists: []string{localPlaylistRef("pl")}}, UpdatedAt: readAt,
+		}, nil)
+		st.EXPECT().GetPlaylist(gomock.Any(), "pl").Return(&store.PlaylistRecord{ID: member, Slug: "pl", Raw: []byte(`{"id":"bbbbbbbb-1111-1111-1111-111111111111"}`)}, nil)
+		m.EXPECT().Kid().Return(feedKid).AnyTimes()
+		signed := []byte(`{"title":"x"}`)
+		m.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil)
+		m.EXPECT().ValidateChannel(signed).Return(&channels.Channel{Title: "x"}, nil)
+		st.EXPECT().UpdateChannel(gomock.Any(), gomock.Any(), gomock.Any(), readAt).Return(store.ErrConcurrentModification)
+		e := executor.New(st, m, true, nil, testPublicBase)
+		_, err := e.ReplaceChannel(context.Background(), "c", &models.ChannelReplaceRequest{Title: "x", Playlists: []string{localPlaylistRef("pl")}})
+		if !errors.Is(err, store.ErrConcurrentModification) {
+			t.Fatalf("want ErrConcurrentModification, got %v", err)
 		}
 	})
 }

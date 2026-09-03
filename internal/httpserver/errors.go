@@ -40,6 +40,9 @@ func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrSlugConflict) {
 		return http.StatusConflict, "conflict", err.Error()
 	}
+	if errors.Is(err, store.ErrConcurrentModification) {
+		return http.StatusConflict, "conflict", "the document was modified concurrently; re-read and retry"
+	}
 	return http.StatusInternalServerError, "internal_error", err.Error()
 }
 

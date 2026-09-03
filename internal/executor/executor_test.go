@@ -689,7 +689,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	req := validCreateReq()
@@ -743,7 +743,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := validCreateReq()
@@ -789,7 +789,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.ReplacePlaylist(context.Background(), "daily", req)
@@ -914,7 +914,7 @@ func TestUpdatePlaylist_preservesPlaylistLevelNote(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -973,7 +973,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	newTitle := "Daily Updated"
@@ -1018,7 +1018,7 @@ func TestUpdatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	items := []playlist.PlaylistItem{
 		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
@@ -1077,7 +1077,7 @@ func TestUpdatePlaylist_preservesItemInlineManifest(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	newTitle := "Daily Updated"
@@ -1127,7 +1127,7 @@ func TestUpdatePlaylist_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1218,7 +1218,7 @@ func TestUpdatePlaylist_feedOnlySignatures_isMutable(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1261,7 +1261,7 @@ func TestUpdatePlaylist_success_multipleFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), json.RawMessage(signed), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1709,7 +1709,7 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput) {
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput, _ time.Time) {
 		if in.ID != uuid.Nil || in.Slug != "" {
 			t.Fatalf("update input should not set row id/slug (store resolves from idOrSlug): id=%v slug=%q", in.ID, in.Slug)
 		}
@@ -1767,7 +1767,7 @@ func TestReplacePlaylistGroup_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput) {
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput, _ time.Time) {
 		if !bytes.Equal(in.Raw, signed) || len(in.Playlists) != 1 || !bytes.Equal(in.Playlists[0].Raw, plBody) {
 			t.Fatalf("input: %+v", in)
 		}
@@ -1840,7 +1840,7 @@ func TestUpdatePlaylistGroup_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	newTitle := "Updated Group Title"
@@ -1887,7 +1887,7 @@ func TestUpdatePlaylistGroup_success_updatePlaylists(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput) {
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gid.String(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput, _ time.Time) {
 		if len(in.Playlists) != 1 || in.Playlists[0].ID != newPlID {
 			t.Fatalf("expected new playlist, got: %+v", in.Playlists)
 		}
@@ -2470,7 +2470,7 @@ func TestReplaceChannel_success(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput) {
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput, _ time.Time) {
 		if in.ID != uuid.Nil || in.Slug != "" {
 			t.Fatalf("update input should not set row id/slug: id=%v slug=%q", in.ID, in.Slug)
 		}
@@ -2532,7 +2532,7 @@ func TestReplaceChannel_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput) {
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput, _ time.Time) {
 		if !bytes.Equal(in.Raw, signed) {
 			t.Fatalf("raw: %s", in.Raw)
 		}
@@ -2615,7 +2615,7 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any(), gomock.Any()).Return(nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -2673,7 +2673,7 @@ func TestUpdateChannel_success_updateMultipleFields(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput) {
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput, _ time.Time) {
 		if len(in.Playlists) != 2 {
 			t.Fatalf("expected 2 playlists, got: %+v", in.Playlists)
 		}

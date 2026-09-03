@@ -71,3 +71,16 @@ func TestMapExecutorError_notFound(t *testing.T) {
 		t.Fatalf("got status=%d code=%q", st, code)
 	}
 }
+
+func TestMapExecutorError_storeConflicts(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ err error }{
+		{store.ErrSlugConflict},
+		{store.ErrConcurrentModification},
+	} {
+		st, code, _ := mapExecutorError(fmt.Errorf("store: %w", tc.err))
+		if st != http.StatusConflict || code != "conflict" {
+			t.Fatalf("%v: got status=%d code=%q", tc.err, st, code)
+		}
+	}
+}

@@ -528,7 +528,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 	// The store rebuilds playlist_item_index from items[] in the same transaction.
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
@@ -553,7 +553,7 @@ func (e *impl) replaceSignedPlaylist(ctx context.Context, rec *store.PlaylistRec
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
@@ -633,7 +633,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed); err != nil {
+	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
@@ -818,7 +818,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		if err != nil {
 			return nil, err
 		}
-		if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
+		if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: %w", err)
 		}
 		return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
@@ -841,7 +841,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
+	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
@@ -912,7 +912,7 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}); err != nil {
+	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
@@ -1108,7 +1108,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 
 	// Write by UUID so the committed row and the notification identity cannot diverge on slug reuse.
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested})
+		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
@@ -1194,7 +1194,7 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 		return nil, err
 	}
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested})
+		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}

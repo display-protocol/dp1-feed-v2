@@ -146,7 +146,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 			{ID: updatedItemID.String(), Source: "https://y"},
 		},
 	}
-	if err := st.UpdatePlaylist(ctx, slug, rawDoc(t, &plUpdated)); err != nil {
+	if err := st.UpdatePlaylist(ctx, slug, rawDoc(t, &plUpdated), currentPlaylistUpdatedAt(t, st, slug)); err != nil {
 		t.Fatalf("UpdatePlaylist: %v", err)
 	}
 	after, _ := st.GetPlaylist(ctx, id.String())
@@ -733,7 +733,7 @@ func TestIntegration_UpdatePlaylist_notFound(t *testing.T) {
 	st := newStore(t)
 	// Missing id/slug → ErrNotFound, no partial write.
 	empty := playlist.Playlist{}
-	err := st.UpdatePlaylist(context.Background(), uuid.New().String(), rawDoc(t, &empty))
+	err := st.UpdatePlaylist(context.Background(), uuid.New().String(), rawDoc(t, &empty), time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -871,7 +871,7 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, groupSlug, updatedInput); err != nil {
+	if err := st.UpdatePlaylistGroup(ctx, groupSlug, updatedInput, currentGroupUpdatedAt(t, st, groupSlug)); err != nil {
 		t.Fatalf("UpdatePlaylistGroup: %v", err)
 	}
 
@@ -944,7 +944,7 @@ func TestIntegration_UpdatePlaylistGroup_notFound(t *testing.T) {
 		Raw:       rawDoc(t, playlistgroup.Group{Title: "Missing"}),
 		Playlists: []store.IngestedPlaylist{},
 	}
-	err := st.UpdatePlaylistGroup(context.Background(), uuid.New().String(), input)
+	err := st.UpdatePlaylistGroup(context.Background(), uuid.New().String(), input, time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 			{ID: playlistID, Slug: "added-later", Raw: rawDoc(t, pl)},
 		},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), updateInput); err != nil {
+	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), updateInput, currentGroupUpdatedAt(t, st, groupID.String())); err != nil {
 		t.Fatalf("UpdatePlaylistGroup to add playlists: %v", err)
 	}
 
@@ -1163,7 +1163,7 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 			Playlists: []string{},
 		}), Playlists: []store.IngestedPlaylist{},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), emptyAgain); err != nil {
+	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), emptyAgain, currentGroupUpdatedAt(t, st, groupID.String())); err != nil {
 		t.Fatalf("UpdatePlaylistGroup to remove all playlists: %v", err)
 	}
 
@@ -1295,7 +1295,7 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	if err := st.UpdatePlaylistGroup(ctx, group.Slug, &store.PlaylistGroupInput{
 		Raw:       rawDoc(t, group),
 		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Raw: rawDoc(t, replacement)}},
-	}); err != nil {
+	}, currentGroupUpdatedAt(t, st, group.Slug)); err != nil {
 		t.Fatalf("UpdatePlaylistGroup: %v", err)
 	}
 
@@ -1482,7 +1482,7 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 			{ID: playlistID1, Slug: "ch-playlist-1", Raw: rawDoc(t, pl1)},
 		},
 	}
-	if err := st.UpdateChannel(ctx, channelSlug, updatedInput); err != nil {
+	if err := st.UpdateChannel(ctx, channelSlug, updatedInput, currentChannelUpdatedAt(t, st, channelSlug)); err != nil {
 		t.Fatalf("UpdateChannel: %v", err)
 	}
 
@@ -1549,7 +1549,7 @@ func TestIntegration_UpdateChannel_notFound(t *testing.T) {
 		Raw:       rawDoc(t, channels.Channel{Title: "Missing"}),
 		Playlists: []store.IngestedPlaylist{},
 	}
-	err := st.UpdateChannel(context.Background(), uuid.New().String(), input)
+	err := st.UpdateChannel(context.Background(), uuid.New().String(), input, time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1752,7 +1752,7 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 			{ID: playlistID, Slug: "temporary", Raw: rawDoc(t, pl)},
 		},
 	}
-	if err := st.UpdateChannel(ctx, channelID.String(), updateInput); err != nil {
+	if err := st.UpdateChannel(ctx, channelID.String(), updateInput, currentChannelUpdatedAt(t, st, channelID.String())); err != nil {
 		t.Fatalf("UpdateChannel to add playlists: %v", err)
 	}
 
@@ -1771,7 +1771,7 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 			Playlists: []string{},
 		}), Playlists: []store.IngestedPlaylist{},
 	}
-	if err := st.UpdateChannel(ctx, channelID.String(), emptyAgain); err != nil {
+	if err := st.UpdateChannel(ctx, channelID.String(), emptyAgain, currentChannelUpdatedAt(t, st, channelID.String())); err != nil {
 		t.Fatalf("UpdateChannel to remove all playlists: %v", err)
 	}
 
@@ -2016,19 +2016,19 @@ func TestStore_rejectsEmptyDocument(t *testing.T) {
 	if err := st.CreatePlaylist(ctx, id, "empty-create", nil); err == nil {
 		t.Fatal("CreatePlaylist(nil raw): want error")
 	}
-	if err := st.UpdatePlaylist(ctx, id.String(), json.RawMessage{}); err == nil {
+	if err := st.UpdatePlaylist(ctx, id.String(), json.RawMessage{}, time.Time{}); err == nil {
 		t.Fatal("UpdatePlaylist(empty raw): want error")
 	}
 	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: id, Slug: "empty-group"}); err == nil {
 		t.Fatal("CreatePlaylistGroup(empty raw): want error")
 	}
-	if err := st.UpdatePlaylistGroup(ctx, id.String(), &store.PlaylistGroupInput{}); err == nil {
+	if err := st.UpdatePlaylistGroup(ctx, id.String(), &store.PlaylistGroupInput{}, time.Time{}); err == nil {
 		t.Fatal("UpdatePlaylistGroup(empty raw): want error")
 	}
 	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: id, Slug: "empty-channel"}); err == nil {
 		t.Fatal("CreateChannel(empty raw): want error")
 	}
-	if err := st.UpdateChannel(ctx, id.String(), &store.ChannelInput{}); err == nil {
+	if err := st.UpdateChannel(ctx, id.String(), &store.ChannelInput{}, time.Time{}); err == nil {
 		t.Fatal("UpdateChannel(empty raw): want error")
 	}
 	// A member playlist without bytes is refused inside the ingest transaction.
@@ -2040,4 +2040,75 @@ func TestStore_rejectsEmptyDocument(t *testing.T) {
 		t.Fatal("ingest with empty member raw: want error")
 	}
 	_ = pl
+}
+
+// current*UpdatedAt reads the row's updated_at so a store update can pass the CAS token it expects.
+func currentPlaylistUpdatedAt(t testing.TB, st store.Store, key string) time.Time {
+	t.Helper()
+	rec, err := st.GetPlaylist(context.Background(), key)
+	if err != nil {
+		t.Fatalf("read playlist updated_at: %v", err)
+	}
+	return rec.UpdatedAt
+}
+
+func currentGroupUpdatedAt(t testing.TB, st store.Store, key string) time.Time {
+	t.Helper()
+	rec, err := st.GetPlaylistGroup(context.Background(), key)
+	if err != nil {
+		t.Fatalf("read group updated_at: %v", err)
+	}
+	return rec.UpdatedAt
+}
+
+func currentChannelUpdatedAt(t testing.TB, st store.Store, key string) time.Time {
+	t.Helper()
+	rec, err := st.GetChannel(context.Background(), key)
+	if err != nil {
+		t.Fatalf("read channel updated_at: %v", err)
+	}
+	return rec.UpdatedAt
+}
+
+// TestStore_updateIsConditionalOnUpdatedAt pins optimistic concurrency: an update whose expected
+// updated_at no longer matches the row returns ErrConcurrentModification and writes nothing. This is
+// what makes the executor's foreign-signature immutability guard atomic with the write — a signed PUT
+// that lands between an API-key request's read and its write invalidates the stale token.
+func TestStore_updateIsConditionalOnUpdatedAt(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	id := uuid.New()
+
+	body := func(title string) json.RawMessage {
+		return rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", ID: id.String(), Slug: "cas", Title: title, Items: []playlist.PlaylistItem{}})
+	}
+	if err := st.CreatePlaylist(ctx, id, "cas", body("v1")); err != nil {
+		t.Fatal(err)
+	}
+	token := currentPlaylistUpdatedAt(t, st, "cas")
+
+	// A stale token (any value other than the current one) is rejected as a concurrent modification.
+	if err := st.UpdatePlaylist(ctx, id.String(), body("stale"), token.Add(-time.Second)); !errors.Is(err, store.ErrConcurrentModification) {
+		t.Fatalf("stale token: want ErrConcurrentModification, got %v", err)
+	}
+	// The write did not happen.
+	if rec, _ := st.GetPlaylist(ctx, "cas"); rec.Body.Title != "v1" {
+		t.Fatalf("stale update must not write, title=%q", rec.Body.Title)
+	}
+
+	// The current token succeeds and moves the row forward, invalidating the old token.
+	if err := st.UpdatePlaylist(ctx, id.String(), body("v2"), token); err != nil {
+		t.Fatalf("current token: %v", err)
+	}
+	if err := st.UpdatePlaylist(ctx, id.String(), body("v3"), token); !errors.Is(err, store.ErrConcurrentModification) {
+		t.Fatalf("reused token after a write: want ErrConcurrentModification, got %v", err)
+	}
+	if rec, _ := st.GetPlaylist(ctx, "cas"); rec.Body.Title != "v2" {
+		t.Fatalf("second stale update must not write, title=%q", rec.Body.Title)
+	}
+
+	// A stale token against a missing row is still ErrNotFound, not a spurious conflict.
+	if err := st.UpdatePlaylist(ctx, uuid.New().String(), body("x"), token); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing row: want ErrNotFound, got %v", err)
+	}
 }
