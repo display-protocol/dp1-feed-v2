@@ -16,6 +16,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -96,7 +97,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 	}
 
 	// Insert row + build playlist_item_index from body.items.
-	if err := st.CreatePlaylist(ctx, id, slug, &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, id, slug, rawDoc(t, &pl)); err != nil {
 		t.Fatalf("CreatePlaylist: %v", err)
 	}
 
@@ -145,7 +146,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 			{ID: updatedItemID.String(), Source: "https://y"},
 		},
 	}
-	if err := st.UpdatePlaylist(ctx, slug, &plUpdated); err != nil {
+	if err := st.UpdatePlaylist(ctx, slug, rawDoc(t, &plUpdated)); err != nil {
 		t.Fatalf("UpdatePlaylist: %v", err)
 	}
 	after, _ := st.GetPlaylist(ctx, id.String())
@@ -228,12 +229,12 @@ func TestIntegration_ListPlaylists_paginationCursor(t *testing.T) {
 		Title:     "Second",
 		Items:     []playlist.PlaylistItem{{ID: item2.String(), Source: "https://b"}},
 	}
-	if err := st.CreatePlaylist(ctx, id1, "p-first", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, id1, "p-first", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
 	// Stagger created_at so asc sort order is deterministic (both rows distinct in time).
 	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylist(ctx, id2, "p-second", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, id2, "p-second", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,10 +290,10 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 		Title:     "Filter P2",
 		Items:     []playlist.PlaylistItem{{ID: item2.String(), Source: "https://fp2"}},
 	}
-	if err := st.CreatePlaylist(ctx, plID1, "filter-pl-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, plID1, "filter-pl-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, plID2, "filter-pl-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, plID2, "filter-pl-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -307,9 +308,9 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: groupSlug,
-		Body: groupBody,
+		Raw:  rawDoc(t, groupBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: plID1, Slug: "filter-pl-1", Body: pl1},
+			{ID: plID1, Slug: "filter-pl-1", Raw: rawDoc(t, pl1)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
@@ -354,10 +355,10 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 	chInput := &store.ChannelInput{
 		ID:   chID,
 		Slug: chSlug,
-		Body: chBody,
+		Raw:  rawDoc(t, chBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: plID1, Slug: "filter-pl-1", Body: pl1},
-			{ID: plID2, Slug: "filter-pl-2", Body: pl2},
+			{ID: plID1, Slug: "filter-pl-1", Raw: rawDoc(t, pl1)},
+			{ID: plID2, Slug: "filter-pl-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreateChannel(ctx, chInput); err != nil {
@@ -428,15 +429,15 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		},
 	}
 
-	if err := st.CreatePlaylist(ctx, pid1, "pl-items-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, pid1, "pl-items-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylist(ctx, pid2, "pl-items-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, pid2, "pl-items-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylist(ctx, pid3, "pl-items-3", &pl3); err != nil {
+	if err := st.CreatePlaylist(ctx, pid3, "pl-items-3", rawDoc(t, &pl3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -591,8 +592,8 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		in := &store.PlaylistGroupInput{
 			ID:        gid,
 			Slug:      "grp-for-items",
-			Body:      gbody,
-			Playlists: []store.IngestedPlaylist{{ID: pid1, Slug: "pl-items-1", Body: pl1}},
+			Raw:       rawDoc(t, gbody),
+			Playlists: []store.IngestedPlaylist{{ID: pid1, Slug: "pl-items-1", Raw: rawDoc(t, pl1)}},
 		}
 		if err := st.CreatePlaylistGroup(ctx, in); err != nil {
 			t.Fatal(err)
@@ -642,10 +643,10 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		chin := &store.ChannelInput{
 			ID:   chid,
 			Slug: "ch-for-items",
-			Body: chbody,
+			Raw:  rawDoc(t, chbody),
 			Playlists: []store.IngestedPlaylist{
-				{ID: pid2, Slug: "pl-items-2", Body: pl2},
-				{ID: pid3, Slug: "pl-items-3", Body: pl3},
+				{ID: pid2, Slug: "pl-items-2", Raw: rawDoc(t, pl2)},
+				{ID: pid3, Slug: "pl-items-3", Raw: rawDoc(t, pl3)},
 			},
 		}
 		if err := st.CreateChannel(ctx, chin); err != nil {
@@ -732,7 +733,7 @@ func TestIntegration_UpdatePlaylist_notFound(t *testing.T) {
 	st := newStore(t)
 	// Missing id/slug → ErrNotFound, no partial write.
 	empty := playlist.Playlist{}
-	err := st.UpdatePlaylist(context.Background(), uuid.New().String(), &empty)
+	err := st.UpdatePlaylist(context.Background(), uuid.New().String(), rawDoc(t, &empty))
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -760,10 +761,10 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 	playlistID2 := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "P1"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "P2"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "playlist-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "playlist-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "playlist-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "playlist-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -779,10 +780,10 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: groupSlug,
-		Body: groupBody,
+		Raw:  rawDoc(t, groupBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "playlist-1", Body: pl1},
-			{ID: playlistID2, Slug: "playlist-2", Body: pl2},
+			{ID: playlistID1, Slug: "playlist-1", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 
@@ -865,9 +866,9 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 		Playlists: []string{"playlist-2"},
 	}
 	updatedInput := &store.PlaylistGroupInput{
-		Body: updatedGroupBody,
+		Raw: rawDoc(t, updatedGroupBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID2, Slug: "playlist-2", Body: pl2},
+			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.UpdatePlaylistGroup(ctx, groupSlug, updatedInput); err != nil {
@@ -940,7 +941,7 @@ func TestIntegration_GetPlaylistGroup_notFound(t *testing.T) {
 func TestIntegration_UpdatePlaylistGroup_notFound(t *testing.T) {
 	st := newStore(t)
 	input := &store.PlaylistGroupInput{
-		Body:      playlistgroup.Group{Title: "Missing"},
+		Raw:       rawDoc(t, playlistgroup.Group{Title: "Missing"}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	err := st.UpdatePlaylistGroup(context.Background(), uuid.New().String(), input)
@@ -966,10 +967,10 @@ func TestIntegration_ListPlaylistsInGroup(t *testing.T) {
 	playlistID2 := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "First"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Second"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "pl-first", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "pl-first", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "pl-second", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "pl-second", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -978,15 +979,15 @@ func TestIntegration_ListPlaylistsInGroup(t *testing.T) {
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "membership-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "membership-group",
 			Title:     "Membership Test",
 			Playlists: []string{"pl-first", "pl-second"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "pl-first", Body: pl1},
-			{ID: playlistID2, Slug: "pl-second", Body: pl2},
+			{ID: playlistID1, Slug: "pl-first", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "pl-second", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
@@ -1029,23 +1030,23 @@ func TestIntegration_ListPlaylistGroups_pagination(t *testing.T) {
 	group1 := &store.PlaylistGroupInput{
 		ID:   groupID1,
 		Slug: "group-first",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID1.String(),
 			Slug:      "group-first",
 			Title:     "First Group",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	group2 := &store.PlaylistGroupInput{
 		ID:   groupID2,
 		Slug: "group-second",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID2.String(),
 			Slug:      "group-second",
 			Title:     "Second Group",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreatePlaylistGroup(ctx, group1); err != nil {
@@ -1102,12 +1103,12 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 	emptyGroupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "empty-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "empty-group",
 			Title:     "Empty Group",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreatePlaylistGroup(ctx, emptyGroupInput); err != nil {
@@ -1135,19 +1136,19 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 	// Update to add a playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Added Later"}
-	if err := st.CreatePlaylist(ctx, playlistID, "added-later", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "added-later", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
 	updateInput := &store.PlaylistGroupInput{
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "empty-group",
 			Title:     "No Longer Empty",
 			Playlists: []string{"added-later"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "added-later", Body: pl},
+			{ID: playlistID, Slug: "added-later", Raw: rawDoc(t, pl)},
 		},
 	}
 	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), updateInput); err != nil {
@@ -1166,12 +1167,12 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 
 	// Update back to empty
 	emptyAgain := &store.PlaylistGroupInput{
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "empty-group",
 			Title:     "Empty Again",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), emptyAgain); err != nil {
@@ -1211,16 +1212,16 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 	dupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "dup-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "dup-group",
 			Title:     "Duplicate Test",
 			Playlists: []string{"repeated", "repeated", "repeated"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "repeated", Body: pl},
-			{ID: playlistID, Slug: "repeated-later", Body: later},
-			{ID: playlistID, Slug: "repeated-later", Body: later},
+			{ID: playlistID, Slug: "repeated", Raw: rawDoc(t, pl)},
+			{ID: playlistID, Slug: "repeated-later", Raw: rawDoc(t, later)},
+			{ID: playlistID, Slug: "repeated-later", Raw: rawDoc(t, later)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, dupInput); err != nil {
@@ -1283,8 +1284,8 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
 		ID:        groupID,
 		Slug:      group.Slug,
-		Body:      group,
-		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Body: original}},
+		Raw:       rawDoc(t, group),
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Raw: rawDoc(t, original)}},
 	}); err != nil {
 		t.Fatalf("CreatePlaylistGroup: %v", err)
 	}
@@ -1306,8 +1307,8 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 		},
 	}
 	if err := st.UpdatePlaylistGroup(ctx, group.Slug, &store.PlaylistGroupInput{
-		Body:      group,
-		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Body: replacement}},
+		Raw:       rawDoc(t, group),
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Raw: rawDoc(t, replacement)}},
 	}); err != nil {
 		t.Fatalf("UpdatePlaylistGroup: %v", err)
 	}
@@ -1331,7 +1332,7 @@ func TestIntegration_PlaylistGroup_cannotDeleteReferencedPlaylist(t *testing.T) 
 	// Create playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000005")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced"}
-	if err := st.CreatePlaylist(ctx, playlistID, "referenced-pl", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "referenced-pl", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1340,14 +1341,14 @@ func TestIntegration_PlaylistGroup_cannotDeleteReferencedPlaylist(t *testing.T) 
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "referencing-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "referencing-group",
 			Title:     "Referencing Group",
 			Playlists: []string{"referenced-pl"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "referenced-pl", Body: pl},
+			{ID: playlistID, Slug: "referenced-pl", Raw: rawDoc(t, pl)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
@@ -1392,10 +1393,10 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 	playlistID2 := uuid.MustParse("99999999-9999-9999-9999-999999999999")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch P1"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch P2"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "ch-playlist-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "ch-playlist-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "ch-playlist-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "ch-playlist-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1412,10 +1413,10 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: channelSlug,
-		Body: channelBody,
+		Raw:  rawDoc(t, channelBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "ch-playlist-1", Body: pl1},
-			{ID: playlistID2, Slug: "ch-playlist-2", Body: pl2},
+			{ID: playlistID1, Slug: "ch-playlist-1", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "ch-playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreateChannel(ctx, channelInput); err != nil {
@@ -1492,9 +1493,9 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 		Playlists: []string{"ch-playlist-1"},
 	}
 	updatedInput := &store.ChannelInput{
-		Body: updatedChannelBody,
+		Raw: rawDoc(t, updatedChannelBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "ch-playlist-1", Body: pl1},
+			{ID: playlistID1, Slug: "ch-playlist-1", Raw: rawDoc(t, pl1)},
 		},
 	}
 	if err := st.UpdateChannel(ctx, channelSlug, updatedInput); err != nil {
@@ -1561,7 +1562,7 @@ func TestIntegration_GetChannel_notFound(t *testing.T) {
 func TestIntegration_UpdateChannel_notFound(t *testing.T) {
 	st := newStore(t)
 	input := &store.ChannelInput{
-		Body:      channels.Channel{Title: "Missing"},
+		Raw:       rawDoc(t, channels.Channel{Title: "Missing"}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	err := st.UpdateChannel(context.Background(), uuid.New().String(), input)
@@ -1587,10 +1588,10 @@ func TestIntegration_ListPlaylistsInChannel(t *testing.T) {
 	playlistID2 := uuid.MustParse("bbbbbbbb-2222-2222-2222-222222222222")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch First"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch Second"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "ch-pl-first", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "ch-pl-first", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "ch-pl-second", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "ch-pl-second", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1599,16 +1600,16 @@ func TestIntegration_ListPlaylistsInChannel(t *testing.T) {
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "membership-channel",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "membership-channel",
 			Title:     "Membership Test",
 			Version:   "1.0.0",
 			Playlists: []string{"ch-pl-first", "ch-pl-second"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "ch-pl-first", Body: pl1},
-			{ID: playlistID2, Slug: "ch-pl-second", Body: pl2},
+			{ID: playlistID1, Slug: "ch-pl-first", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "ch-pl-second", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreateChannel(ctx, channelInput); err != nil {
@@ -1651,25 +1652,25 @@ func TestIntegration_ListChannels_pagination(t *testing.T) {
 	channel1 := &store.ChannelInput{
 		ID:   channelID1,
 		Slug: "channel-first",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID1.String(),
 			Slug:      "channel-first",
 			Title:     "First Channel",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	channel2 := &store.ChannelInput{
 		ID:   channelID2,
 		Slug: "channel-second",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID2.String(),
 			Slug:      "channel-second",
 			Title:     "Second Channel",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreateChannel(ctx, channel1); err != nil {
@@ -1726,13 +1727,13 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	emptyChannelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "empty-channel",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "empty-channel",
 			Title:     "Empty Channel",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreateChannel(ctx, emptyChannelInput); err != nil {
@@ -1760,21 +1761,21 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	// Update back to empty after adding (test removal)
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000008")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Temporary"}
-	if err := st.CreatePlaylist(ctx, playlistID, "temporary", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "temporary", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
 	// Add playlist
 	updateInput := &store.ChannelInput{
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "empty-channel",
 			Title:     "Not Empty",
 			Version:   "1.0.0",
 			Playlists: []string{"temporary"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "temporary", Body: pl},
+			{ID: playlistID, Slug: "temporary", Raw: rawDoc(t, pl)},
 		},
 	}
 	if err := st.UpdateChannel(ctx, channelID.String(), updateInput); err != nil {
@@ -1789,13 +1790,13 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 
 	// Remove all
 	emptyAgain := &store.ChannelInput{
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "empty-channel",
 			Title:     "Empty Again",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.UpdateChannel(ctx, channelID.String(), emptyAgain); err != nil {
@@ -1819,7 +1820,7 @@ func TestIntegration_Channel_cannotDeleteReferencedPlaylist(t *testing.T) {
 	// Create playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000009")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced by Channel"}
-	if err := st.CreatePlaylist(ctx, playlistID, "ref-by-channel", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "ref-by-channel", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1828,15 +1829,15 @@ func TestIntegration_Channel_cannotDeleteReferencedPlaylist(t *testing.T) {
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "referencing-channel",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "referencing-channel",
 			Title:     "Referencing Channel",
 			Version:   "1.0.0",
 			Playlists: []string{"ref-by-channel"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "ref-by-channel", Body: pl},
+			{ID: playlistID, Slug: "ref-by-channel", Raw: rawDoc(t, pl)},
 		},
 	}
 	if err := st.CreateChannel(ctx, channelInput); err != nil {
@@ -2022,4 +2023,15 @@ func TestIntegration_Registry_ReplaceIsAtomic(t *testing.T) {
 	if gotChans[0].ChannelURL != "https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" {
 		t.Errorf("unexpected channel URL: %s", gotChans[0].ChannelURL)
 	}
+}
+
+// rawDoc marshals a typed document into the raw JSON the store persists. Tests build documents as
+// typed structs for readability; the store contract takes bytes (see store.PlaylistRecord).
+func rawDoc(t testing.TB, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal document: %v", err)
+	}
+	return b
 }

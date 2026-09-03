@@ -10,14 +10,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// writeJSONIndividualGET JSON-encodes body, sets a strong ETag over the exact UTF-8 response bytes
-// (quoted SHA-256 hex digest), and returns 304 Not Modified with an empty body when If-None-Match
-// matches. Intended for single-resource GET handlers only (not list or registry aggregate GETs).
+// writeJSONIndividualGET JSON-encodes body and serves it via writeBytesIndividualGET.
+// Intended for single-resource GET handlers only (not list or registry aggregate GETs).
 func writeJSONIndividualGET(c *gin.Context, body any) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
+	writeBytesIndividualGET(c, b)
+	return nil
+}
+
+// writeBytesIndividualGET serves b unchanged, sets a strong ETag over those exact UTF-8 bytes (quoted
+// SHA-256 hex digest), and returns 304 Not Modified with an empty body when If-None-Match matches.
+// Documents are served from their stored bytes (see writeDocument), so the ETag is over what the
+// client receives and any other representation of the same document would be a different tag.
+func writeBytesIndividualGET(c *gin.Context, b []byte) {
 	etag := strongETagFromJSONBytes(b)
 	c.Header("ETag", etag)
 	if ifNoneMatchNotModified(c.Request, etag) {
@@ -25,10 +33,9 @@ func writeJSONIndividualGET(c *gin.Context, body any) error {
 		// Gin defers flushing status until first write; 304 has no body, so flush explicitly so clients
 		// and httptest see the correct status code.
 		c.Writer.WriteHeaderNow()
-		return nil
+		return
 	}
 	c.Data(http.StatusOK, "application/json; charset=utf-8", b)
-	return nil
 }
 
 func strongETagFromJSONBytes(b []byte) string {

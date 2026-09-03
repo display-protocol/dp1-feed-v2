@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -57,7 +58,9 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		if err != nil {
 			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
 		}
-		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Body: rec.Body}, nil
+		// Carry the stored bytes verbatim: re-marshaling the typed body would orphan the member's own
+		// curator signatures when the upsert writes it back.
+		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
 	}
 
 	if e.fetch == nil {
@@ -86,7 +89,9 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	} else {
 		slug = slugify(slug)
 	}
-	return store.IngestedPlaylist{ID: id, Slug: slug, Body: *p}, nil
+	// Keep the fetched bytes exactly as served: the remote document's signatures are bound to them, so a
+	// typed re-marshal here would store a member whose own signatures no longer verify.
+	return store.IngestedPlaylist{ID: id, Slug: slug, Raw: append(json.RawMessage(nil), body...)}, nil
 }
 
 // resolvePlaylistURIs resolves every URI in uris. The returned slice has the same length and order

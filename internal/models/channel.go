@@ -1,13 +1,11 @@
 package models
 
 import (
+	"encoding/json"
+
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 )
-
-// DefaultChannelVersion is used when POST /channels omits version (semver).
-
-const DefaultChannelVersion = "1.0.0"
 
 // ChannelCreateRequest is the JSON body for POST /api/v1/channels (extensions).
 // Playlists is an ordered list of playlist URIs, resolved the same way as for playlist-groups.
@@ -22,11 +20,17 @@ type ChannelCreateRequest struct {
 	Summary    string            `json:"summary,omitempty"`
 	CoverImage string            `json:"coverImage,omitempty"`
 
-	// Trusted model fields: user-provided id, created timestamp, and publisher signatures.
-	// When signatures are present and valid, API key authentication is bypassed.
+	// Identity and authorization: the client supplies id, created and the publisher signatures over the
+	// document. All three are part of the signed payload and are required (there is no API key).
 	ID         *string              `json:"id,omitempty"`
 	Created    *string              `json:"created,omitempty"`
 	Signatures []playlist.Signature `json:"signatures,omitempty"`
+
+	// Signature is the deprecated v1.0.x single signature; see PlaylistCreateRequest.Signature.
+	Signature string `json:"signature,omitempty"`
+
+	// Raw is the request body exactly as received; see PlaylistCreateRequest.Raw.
+	Raw json.RawMessage `json:"-"`
 }
 
 // ChannelReplaceRequest is the JSON body for PUT /api/v1/channels/{id}.

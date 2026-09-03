@@ -37,6 +37,11 @@ func New(cfg *config.Config, log *zap.Logger, exec executor.Executor, version st
 	r.Use(gin.Recovery())
 	r.Use(newCORSMiddleware(cfg))
 	r.Use(ZapLogger(log))
+	maxBody := cfg.Server.MaxRequestBytes
+	if maxBody <= 0 {
+		maxBody = config.DefaultMaxRequestBytes
+	}
+	r.Use(LimitBody(maxBody))
 
 	h := &Handler{Exec: exec, Log: log, Version: version}
 	RegisterRoutes(r, h, cfg, log)

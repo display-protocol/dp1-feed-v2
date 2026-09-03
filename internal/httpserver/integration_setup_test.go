@@ -206,8 +206,9 @@ func signedGroupBody(t *testing.T, priv ed25519.PrivateKey, kid, id, slug, title
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No dpVersion: the playlist-group schema (and playlistgroup.Group) does not define it, and the body
+	// must be byte-identical to what was signed above.
 	return map[string]any{
-		"dpVersion":  "1.1.0",
 		"id":         id,
 		"created":    created,
 		"slug":       slug,

@@ -6,6 +6,7 @@ package executor
 // and the owner set may not change on replace.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,7 +38,73 @@ var (
 	// ErrItemIDRequired is returned when a playlist item lacks a UUID id. The feed used to assign missing
 	// ids, but that would rewrite the document after the client signed it; the client must supply them.
 	ErrItemIDRequired = errors.New("every playlist item requires a UUID id")
+	// ErrPublisherRequired is returned when a channel submission has no publisher key. The publisher is the
+	// channel owner, so its absence is a client error (400), not an internal fault.
+	ErrPublisherRequired = errors.New("channel requires a publisher with a non-empty key")
+	// ErrSignedDocumentMismatch is returned when a PUT's document id, slug, or created disagree with the
+	// stored resource. Identity is immutable and is validated, never silently replaced: substituting stored
+	// values would change bytes the client signed and orphan the signature.
+	ErrSignedDocumentMismatch = errors.New("signed document does not match the stored resource")
+	// errMissingRawBody means the HTTP layer did not attach the request bytes to a submission (programming error).
+	errMissingRawBody = errors.New("signed submission is missing the raw request body")
 )
+
+// signedIdentity is the resource identity a client-signed document asserts about itself. All three
+// values are read from the document and used as row projections; none is ever written back into it.
+type signedIdentity struct {
+	id      uuid.UUID
+	slug    string
+	created time.Time
+}
+
+// newSignedIdentity validates the identity fields of a signed submission. slug is taken verbatim
+// (no slugify): normalising it would change the signed bytes.
+func newSignedIdentity(idStr, createdStr *string, slug string, raw json.RawMessage) (signedIdentity, error) {
+	if len(raw) == 0 {
+		return signedIdentity{}, errMissingRawBody
+	}
+	id, err := parseUserProvidedID(idStr)
+	if err != nil {
+		return signedIdentity{}, err
+	}
+	created, err := parseUserProvidedCreated(createdStr)
+	if err != nil {
+		return signedIdentity{}, err
+	}
+	verbatim, err := requireSlug(slug)
+	if err != nil {
+		return signedIdentity{}, err
+	}
+	return signedIdentity{id: id, slug: verbatim, created: created}, nil
+}
+
+// mustMatchStored enforces that a PUT replaces the resource it targets: the document's id and slug must
+// equal the stored row's, and created must denote the same instant as the stored document's (compared as
+// times, since the two may be formatted differently). Changing identity means a new document.
+func (si signedIdentity) mustMatchStored(rowID uuid.UUID, rowSlug, storedCreated string) error {
+	if si.id != rowID {
+		return fmt.Errorf("%w: id %q does not match stored id %q", ErrSignedDocumentMismatch, si.id, rowID)
+	}
+	if si.slug != rowSlug {
+		return fmt.Errorf("%w: slug %q does not match stored slug %q", ErrSignedDocumentMismatch, si.slug, rowSlug)
+	}
+	stored, err := parseDocumentCreated(storedCreated)
+	if err != nil {
+		return err
+	}
+	if !si.created.Equal(stored) {
+		return fmt.Errorf("%w: created %q does not match stored created %q", ErrSignedDocumentMismatch, si.created.Format(time.RFC3339Nano), storedCreated)
+	}
+	return nil
+}
+
+// requirePublisherKey returns the channel publisher key or ErrPublisherRequired when it is absent/blank.
+func requirePublisherKey(key string) error {
+	if strings.TrimSpace(key) == "" {
+		return ErrPublisherRequired
+	}
+	return nil
+}
 
 // requireSlug returns the client-provided slug verbatim (only whitespace-emptiness is rejected). It is
 // deliberately not slugified: normalizing after the client has signed would change the signed bytes.
@@ -221,7 +288,11 @@ func IsDeleteRequestError(err error) bool {
 }
 
 // IsInvalidSubmissionError reports whether err is a client-correctable defect in a signed create/replace
-// submission (missing slug, or an item without a UUID id). Maps to 400 bad_request.
+// submission (missing slug, an item without a UUID id, a channel without a publisher, or a PUT whose
+// document identity does not match the stored resource). Maps to 400.
 func IsInvalidSubmissionError(err error) bool {
-	return err != nil && (errors.Is(err, ErrSlugRequired) || errors.Is(err, ErrItemIDRequired))
+	return err != nil && (errors.Is(err, ErrSlugRequired) ||
+		errors.Is(err, ErrItemIDRequired) ||
+		errors.Is(err, ErrPublisherRequired) ||
+		errors.Is(err, ErrSignedDocumentMismatch))
 }

@@ -66,7 +66,15 @@ type ServerConfig struct {
 	WriteTimeout         time.Duration `yaml:"write_timeout"`
 	ResponseWriteReserve time.Duration `yaml:"response_write_reserve"`
 	IdleTimeout          time.Duration `yaml:"idle_timeout"`
+	// MaxRequestBytes caps an inbound request body. It bounds memory a client can force the server to
+	// buffer before authentication (the signature middleware reads the whole body). Zero falls back to
+	// DefaultMaxRequestBytes.
+	MaxRequestBytes int64 `yaml:"max_request_bytes"`
 }
+
+// DefaultMaxRequestBytes is the inbound request-body cap used when config leaves it unset. It comfortably
+// holds a signed playlist/group/channel document while bounding pre-auth memory use.
+const DefaultMaxRequestBytes = 5 << 20 // 5 MiB
 
 // DatabaseConfig holds PostgreSQL connection settings.
 type DatabaseConfig struct {
@@ -155,6 +163,7 @@ func defaultConfig() *Config {
 			WriteTimeout:         60 * time.Second,
 			ResponseWriteReserve: time.Second,
 			IdleTimeout:          120 * time.Second,
+			MaxRequestBytes:      DefaultMaxRequestBytes,
 		},
 		Database: DatabaseConfig{
 			URL:             "postgres://postgres:postgres@localhost:5432/dp1_feed?sslmode=disable", // #nosec G101 -- local development default; production config comes from YAML/env.
@@ -184,6 +193,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("delete max clock skew env: %w", err)
 		}
 		cfg.Auth.DeleteMaxClockSkew = d
+	}
+	if v := os.Getenv(envPrefix + "MAX_REQUEST_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("max request bytes env: %w", err)
+		}
+		cfg.Server.MaxRequestBytes = n
 	}
 	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
 		cfg.Sentry.DSN = v
@@ -241,6 +257,9 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.DeleteMaxClockSkew < 0 {
 		return fmt.Errorf("auth delete max clock skew must not be negative")
+	}
+	if c.Server.MaxRequestBytes < 0 {
+		return fmt.Errorf("server max request bytes must not be negative")
 	}
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")

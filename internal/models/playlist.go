@@ -2,13 +2,12 @@
 package models
 
 import (
+	"encoding/json"
+
 	"github.com/display-protocol/dp1-go/extension/identity"
 	dp1playlists "github.com/display-protocol/dp1-go/extension/playlists"
 	"github.com/display-protocol/dp1-go/playlist"
 )
-
-// DefaultDPVersion is the operator default when the client omits dpVersion (DP-1 v1.1.0+).
-const DefaultDPVersion = "1.1.0"
 
 // PlaylistCreateRequest is the JSON body for POST /api/v1/playlists (aligned with OpenAPI PlaylistInput).
 // Gin binds and validates required fields before the executor runs schema validation via dp1-go.
@@ -25,11 +24,20 @@ type PlaylistCreateRequest struct {
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
 
-	// Trusted model fields: user-provided id, created timestamp, and curator signatures.
-	// When signatures are present and valid, API key authentication is bypassed.
+	// Identity and authorization: the client supplies id, created and the curator signatures over the
+	// document. All three are part of the signed payload and are required (there is no API key).
 	ID         *string              `json:"id,omitempty"`
 	Created    *string              `json:"created,omitempty"`
 	Signatures []playlist.Signature `json:"signatures,omitempty"`
+
+	// Signature is the deprecated v1.0.x single signature. Accepted so a signed document carrying one is
+	// not rejected as an unknown field; it is preserved verbatim in Raw.
+	Signature string `json:"signature,omitempty"`
+
+	// Raw is the request body exactly as received, set by the HTTP layer (never decoded from JSON).
+	// The executor verifies, co-signs, and stores these bytes verbatim; the decoded fields above are
+	// only read (identity projections, owner checks), never used to rebuild the document.
+	Raw json.RawMessage `json:"-"`
 }
 
 // PlaylistReplaceRequest is the JSON body for PUT /api/v1/playlists/{id} (full replacement, same shape as create).
