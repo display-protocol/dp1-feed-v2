@@ -3,6 +3,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -292,61 +293,40 @@ func TestIntegration_APIKeyPlaylist_StillMutable(t *testing.T) {
 	mustVerifyAll(t, "GET after API-key PATCH", gotRaw)
 }
 
-// TestIntegration_SlugFollowsDocument: an API-key PATCH that changes slug must move the row's slug
-// with it. Otherwise GET by the served slug 404s, and a curator who signs the served document and PUTs
-// it back is rejected for a slug mismatch it cannot observe or fix.
-func TestIntegration_SlugFollowsDocument(t *testing.T) {
+// TestIntegration_SlugImmutableOnUpdate: slug is assigned at creation and does not change on update.
+// This keeps a document's own slug and its row address in agreement (no drift for a curator re-signing
+// the served document) and keeps same-origin playlist URLs embedded in signed group/channel documents
+// from being orphaned by a rename.
+func TestIntegration_SlugImmutableOnUpdate(t *testing.T) {
 	srv := newIntegrationServer(t)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kid, err := dp1sign.Ed25519DIDKey(pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	post := map[string]any{
-		"dpVersion": "1.1.0", "slug": "slug-v1", "title": "Slug drift",
-		"curators": []map[string]any{{"name": "Curator", "key": kid}},
-		"items":    []map[string]any{{"id": "b2b2b2b2-2222-4333-8444-555555555555", "source": "https://cdn.example.com/a.html"}},
+		"dpVersion": "1.1.0", "slug": "stable", "title": "v1",
+		"items": []map[string]any{{"id": "b2b2b2b2-2222-4333-8444-555555555555", "source": "https://cdn.example.com/a.html"}},
 	}
 	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", post, http.StatusCreated)
 
-	patched := mustDoRaw(t, srv, http.MethodPatch, "/api/v1/playlists/slug-v1", map[string]any{"slug": "slug-v2"}, http.StatusOK)
+	// An API-key PATCH that supplies a different slug does not move the row; the slug stays as created.
+	patched := mustDoRaw(t, srv, http.MethodPatch, "/api/v1/playlists/stable", map[string]any{"slug": "renamed", "title": "v2"}, http.StatusOK)
 	var pl playlist.Playlist
 	if err := json.Unmarshal(patched, &pl); err != nil {
 		t.Fatal(err)
 	}
-	if pl.Slug != "slug-v2" {
-		t.Fatalf("PATCH response slug = %q", pl.Slug)
+	if pl.Slug != "stable" || pl.Title != "v2" {
+		t.Fatalf("slug must be immutable and other fields updatable: slug=%q title=%q", pl.Slug, pl.Title)
 	}
-	// The row is addressable by the slug it serves, and no longer by the old one.
-	served := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/slug-v2", nil, http.StatusOK)
-	doRaw(t, srv, http.MethodGet, "/api/v1/playlists/slug-v1", nil, http.StatusNotFound, false)
+	mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/stable", nil, http.StatusOK)
+	doRaw(t, srv, http.MethodGet, "/api/v1/playlists/renamed", nil, http.StatusNotFound, false)
 
-	// A curator takes the served document, signs it, and PUTs it back by the slug it was served under.
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(served, &doc); err != nil {
+	// The same holds for an API-key PUT: the row keeps its creation slug regardless of the body slug/title.
+	put := map[string]any{"dpVersion": "1.1.0", "slug": "another", "title": "v3", "items": []map[string]any{{"source": "https://cdn.example.com/b.html"}}}
+	replaced := mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlists/stable", put, http.StatusOK)
+	if err := json.Unmarshal(replaced, &pl); err != nil {
 		t.Fatal(err)
 	}
-	delete(doc, "signatures")
-	unsigned, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
+	if pl.Slug != "stable" {
+		t.Fatalf("PUT slug = %q, want stable", pl.Slug)
 	}
-	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, "2020-01-02T03:04:05Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc["signatures"], _ = json.Marshal([]playlist.Signature{sig})
-	signed, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replaced := mustDoRawUnauthenticated(t, srv, http.MethodPut, "/api/v1/playlists/slug-v2", json.RawMessage(signed), http.StatusOK)
-	mustVerifyAll(t, "signed PUT of the served document", replaced)
 }
 
 // signer is a curator/publisher key pair for the group and channel round-trips below.
@@ -477,38 +457,57 @@ func TestIntegration_SignedChannel_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestIntegration_SlugConflict: moving a document onto a slug another row holds is a client conflict
-// (409), not an internal error, for creates and for the PUT/PATCH paths that now persist slug moves.
+// TestIntegration_SlugConflict: creating a document with a slug another row of the same kind already
+// holds is a client conflict (409), not an internal error. (Slug is immutable after creation, so a
+// move-into-a-taken-slug cannot occur; see TestIntegration_SlugImmutableOnUpdate.)
 func TestIntegration_SlugConflict(t *testing.T) {
 	srv := newIntegrationServer(t)
-	mk := func(slug string) map[string]any {
+
+	playlistDoc := func(slug string) map[string]any {
 		return map[string]any{"dpVersion": "1.1.0", "slug": slug, "title": slug, "items": []map[string]any{{"source": "https://cdn.example.com/a.html"}}}
 	}
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", mk("taken"), http.StatusCreated)
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", mk("mover"), http.StatusCreated)
-
-	body := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", mk("taken"), http.StatusConflict, true)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", playlistDoc("taken"), http.StatusCreated)
+	body := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", playlistDoc("taken"), http.StatusConflict, true)
 	var resp ErrorResponse
 	if err := json.Unmarshal(body, &resp); err != nil || resp.Error != "conflict" {
-		t.Fatalf("POST duplicate slug: want conflict, got %s", body)
+		t.Fatalf("POST duplicate playlist slug: want conflict, got %s", body)
 	}
-	doRaw(t, srv, http.MethodPatch, "/api/v1/playlists/mover", map[string]any{"slug": "taken"}, http.StatusConflict, true)
-	doRaw(t, srv, http.MethodPut, "/api/v1/playlists/mover", mk("taken"), http.StatusConflict, true)
 
 	member := seedLocalPlaylist(t, srv, "conflict-member")
-	group := func(slug string) map[string]any {
+	membered := func(slug string) map[string]any {
 		return map[string]any{"slug": slug, "title": slug, "playlists": []string{member}}
 	}
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", group("g-taken"), http.StatusCreated)
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", group("g-mover"), http.StatusCreated)
-	doRaw(t, srv, http.MethodPatch, "/api/v1/playlist-groups/g-mover", map[string]any{"slug": "g-taken"}, http.StatusConflict, true)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", membered("g-taken"), http.StatusCreated)
+	doRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", membered("g-taken"), http.StatusConflict, true)
 
-	channel := func(slug string) map[string]any {
-		return map[string]any{"slug": slug, "title": slug, "playlists": []string{member}}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", membered("c-taken"), http.StatusCreated)
+	doRaw(t, srv, http.MethodPost, "/api/v1/channels", membered("c-taken"), http.StatusConflict, true)
+}
+
+// TestIntegration_ListServesStoredBytes: list responses emit each document's bytes as stored, so a
+// value containing JSON-significant characters (`<`, `&`) is not HTML-escaped the way gin's c.JSON
+// would, and matches the single-resource GET representation.
+func TestIntegration_ListServesStoredBytes(t *testing.T) {
+	srv := newIntegrationServer(t)
+	const slug = "escape-me"
+	post := map[string]any{
+		"dpVersion": "1.1.0", "slug": slug, "title": "a <b> & c",
+		"items": []map[string]any{{"source": "https://cdn.example.com/a.html"}},
 	}
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channel("c-taken"), http.StatusCreated)
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channel("c-mover"), http.StatusCreated)
-	doRaw(t, srv, http.MethodPatch, "/api/v1/channels/c-mover", map[string]any{"slug": "c-taken"}, http.StatusConflict, true)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", post, http.StatusCreated)
+
+	getRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
+	if !bytes.Contains(getRaw, []byte(`"a <b> & c"`)) {
+		t.Fatalf("single GET escaped the title: %s", getRaw)
+	}
+	listRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists?limit=100", nil, http.StatusOK)
+	if !bytes.Contains(listRaw, []byte(`"a <b> & c"`)) {
+		t.Fatalf("list did not serve the title as stored: %s", listRaw)
+	}
+	// The literal `<` and `&` are correct; gin's c.JSON would instead emit the escaped < / &.
+	if bytes.Contains(listRaw, []byte(`\u003c`)) || bytes.Contains(listRaw, []byte(`\u0026`)) {
+		t.Fatalf("list HTML-escaped document bytes (must match stored): %s", listRaw)
+	}
 }
 
 // TestIntegration_LegacySignaturePreservedAndGuarded: a signed submission carrying both a v1.1

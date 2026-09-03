@@ -275,15 +275,6 @@ func requireSignedItemIDs(items []playlist.PlaylistItem) error {
 	return nil
 }
 
-// slugOr is the row slug after a write: the document's slug when it has one (the store's Update calls
-// make the slug column follow the document), else the existing row slug.
-func slugOr(docSlug, rowSlug string) string {
-	if strings.TrimSpace(docSlug) != "" {
-		return docSlug
-	}
-	return rowSlug
-}
-
 // requireFeedOwned guards the API-key and PATCH paths: a stored document with any signature not made
 // by this feed's key is immutable to them. Rebuilding it would keep those foreign entries while
 // changing the bytes they attest, leaving a stored document whose signatures no longer verify.
@@ -518,7 +509,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, rec.ID, "playlist")
+	slug := rec.Slug // slug is immutable after creation; see immutability note on the Executor interface
 	raw, err := e.buildPlaylistDocument(req, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -531,7 +522,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
-	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
 }
 
 // replaceSignedPlaylist is the signed-document path for PUT (see createSignedPlaylist).
@@ -556,7 +547,7 @@ func (e *impl) replaceSignedPlaylist(ctx context.Context, rec *store.PlaylistRec
 	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
-	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
 }
 
 // UpdatePlaylist performs a partial update (API-key path only): merges non-nil fields from req with the
@@ -622,7 +613,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "playlist")
+	slug := rec.Slug // slug is immutable after creation
 	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -636,7 +627,7 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
 		return nil, err
 	}
-	return &store.PlaylistRecord{ID: rec.ID, Slug: slugOr(pl.Slug, rec.Slug), Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
 }
 
 // DeletePlaylist removes a playlist.
@@ -821,7 +812,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: %w", err)
 		}
-		return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
+		return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
 	}
 
 	// API-key path.
@@ -832,7 +823,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(req.Slug, req.Title, rec.ID, "group")
+	slug := rec.Slug // slug is immutable after creation; see immutability note on the Executor interface
 	raw, err := e.buildPlaylistGroupDocument(req, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -844,7 +835,7 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
+	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
 }
 
 // UpdatePlaylistGroup performs a partial update (API-key path only): merges non-nil fields from req with
@@ -901,7 +892,7 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "group")
+	slug := rec.Slug // slug is immutable after creation
 	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -915,7 +906,7 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: slugOr(group.Slug, rec.Slug), Raw: signed, Body: *group}, nil
+	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
 }
 
 // DeletePlaylistGroup removes a playlist-group.
@@ -1096,7 +1087,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		if err != nil {
 			return nil, err
 		}
-		slug := makeSlug(req.Slug, req.Title, rec.ID, "channel")
+		slug := rec.Slug // slug is immutable after creation; see immutability note on the Executor interface
 		raw, err := e.buildChannelDocument(req, uris, rec.ID, slug, created)
 		if err != nil {
 			return nil, err
@@ -1113,7 +1104,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
-	return &store.ChannelRecord{ID: rec.ID, Slug: slugOr(ch.Slug, rec.Slug), Raw: signed, Body: *ch}, nil
+	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *ch}, nil
 }
 
 // UpdateChannel performs a partial update (API-key path only): merges non-nil fields from req with the
@@ -1182,7 +1173,7 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 	if err != nil {
 		return nil, err
 	}
-	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "channel")
+	slug := rec.Slug // slug is immutable after creation
 	raw, err := e.buildChannelDocument(mergedReq, uris, rec.ID, slug, created)
 	if err != nil {
 		return nil, err
@@ -1199,7 +1190,7 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
-	return &store.ChannelRecord{ID: rec.ID, Slug: slugOr(ch.Slug, rec.Slug), Raw: signed, Body: *ch}, nil
+	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *ch}, nil
 }
 
 // DeleteChannel removes a channel.

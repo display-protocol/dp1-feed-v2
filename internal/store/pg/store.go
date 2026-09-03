@@ -465,7 +465,7 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
 	const (
 		updateByID = `UPDATE playlists
-SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
+SET body = $2::jsonb
 WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
@@ -770,7 +770,7 @@ LIMIT $1`
 // the document's slug, see UpdatePlaylist), clear and rebuild membership.
 func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
+		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
 		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
 	)
@@ -1079,7 +1079,7 @@ LIMIT $1`
 // the document's slug, see UpdatePlaylist), clear and rebuild membership.
 func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
+		updateByID     = `UPDATE channels SET body = $2::jsonb WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM channels WHERE slug = $1`
 		clearMembers   = `DELETE FROM channel_members WHERE channel_id = $1`
 	)

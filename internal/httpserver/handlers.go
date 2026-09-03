@@ -92,7 +92,7 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 		writeError(c.Writer, st, code, msg)
 		return
 	}
-	c.JSON(http.StatusOK, NewListResponse(playlistDocuments(pl), next))
+	writeDocumentList(c, playlistDocuments(pl), next)
 }
 
 // CreatePlaylist POST /api/v1/playlists.
@@ -267,7 +267,7 @@ func (h *Handler) ListPlaylistGroups(c *gin.Context) {
 		writeError(c.Writer, st, code, msg)
 		return
 	}
-	c.JSON(http.StatusOK, NewListResponse(playlistGroupDocuments(bodies), next))
+	writeDocumentList(c, playlistGroupDocuments(bodies), next)
 }
 
 // CreatePlaylistGroup POST /api/v1/playlist-groups.
@@ -387,7 +387,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		writeError(c.Writer, st, code, msg)
 		return
 	}
-	c.JSON(http.StatusOK, NewListResponse(channelDocuments(bodies), next))
+	writeDocumentList(c, channelDocuments(bodies), next)
 }
 
 // CreateChannel POST /api/v1/channels.

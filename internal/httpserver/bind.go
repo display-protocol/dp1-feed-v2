@@ -3,6 +3,7 @@ package httpserver
 // Strict request decoding and verbatim document responses for the document endpoints.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -136,6 +137,26 @@ func jsonFields(typ reflect.Type) map[string]reflect.Type {
 // verify against its own signatures (see store.PlaylistRecord).
 func writeDocument(c *gin.Context, status int, raw json.RawMessage) {
 	c.Data(status, "application/json; charset=utf-8", raw)
+}
+
+// writeDocumentList writes a list envelope whose item documents are emitted byte-for-byte as stored.
+// gin's c.JSON HTML-escapes `<`, `>`, and `&` inside json.RawMessage values, which would make list
+// bodies diverge from the stored bytes and from single-resource GET — breaking the "served as stored"
+// contract that lets every signature verify against the response carrying it. Encoding with HTML
+// escaping disabled preserves the (already compact) jsonb bytes.
+func writeDocumentList(c *gin.Context, docs []json.RawMessage, nextCursor string) {
+	if docs == nil {
+		docs = []json.RawMessage{}
+	}
+	env := ListResponse[json.RawMessage]{Items: docs, Cursor: nextCursor, HasMore: nextCursor != ""}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(env); err != nil {
+		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", bytes.TrimRight(buf.Bytes(), "\n"))
 }
 
 // documents projects a page of records onto their stored bytes for list envelopes.
