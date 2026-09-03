@@ -287,7 +287,7 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20))
+	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20, fetcher.AllowPrivateDestinations(true)))
 
 	gpriv, gkid := newCuratorKeypair(t)
 	groupBody := signedGroupBody(t, gpriv, gkid,

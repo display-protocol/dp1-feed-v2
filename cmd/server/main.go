@@ -78,7 +78,12 @@ func main() {
 	if err != nil {
 		zlog.Fatal("dp1svc", zap.Error(err))
 	}
-	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes)
+	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes,
+		fetcher.AllowPrivateDestinations(cfg.Playlist.AllowPrivateFetchDestinations))
+	if cfg.Playlist.AllowPrivateFetchDestinations {
+		zlog.Warn("playlist fetch may reach private addresses; this must not be enabled in production",
+			zap.String("setting", "playlist.allow_private_fetch_destinations"))
+	}
 
 	execOptions := []executor.Option{executor.WithIntentClockSkew(cfg.Auth.IntentMaxClockSkew)}
 	if len(cfg.Notifications.Clients) > 0 {

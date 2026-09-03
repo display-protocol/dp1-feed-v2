@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -262,15 +261,6 @@ func (e *impl) parseValidatedPlaylist(raw []byte) (*playlist.Playlist, error) {
 		return e.dp1.ValidatePlaylistWithExtension(raw)
 	}
 	return e.dp1.ValidatePlaylist(raw)
-}
-
-// slugify lowercases, replaces non-alphanumeric runs with '-', trims edges (empty → ""). Used by playlist
-// URI resolution to match local slugs; mutation slugs are taken verbatim from the client (see requireSlug).
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	return s
 }
 
 // parseDocumentCreated parses JSON "created" from a stored DP-1 document body (RFC3339 / RFC3339Nano).

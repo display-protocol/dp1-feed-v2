@@ -123,6 +123,12 @@ type PlaylistConfig struct {
 	// SigningKid is set at load time from the signing key (did:key:…).
 	SigningKid    string `yaml:"-"`
 	PublicBaseURL string `yaml:"public_base_url"` // Used to build playlist URIs referenced from groups
+	// AllowPrivateFetchDestinations lets playlist ingestion reach loopback and other private addresses.
+	//
+	// Off by default and intended for tests and local development only. Group and channel creation is open
+	// to any client, so whoever names a playlist URL decides where the feed sends a request; with this on,
+	// that becomes a probe of everything the feed can reach (loopback, cloud metadata, internal services).
+	AllowPrivateFetchDestinations bool `yaml:"allow_private_fetch_destinations"`
 }
 
 // Load reads YAML from path (if non-empty), merges DP1_FEED_* environment overrides, validates
@@ -225,6 +231,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv(envPrefix + "PUBLIC_BASE_URL"); v != "" {
 		cfg.Playlist.PublicBaseURL = strings.TrimRight(v, "/")
+	}
+	if v := os.Getenv(envPrefix + "ALLOW_PRIVATE_FETCH_DESTINATIONS"); v != "" {
+		cfg.Playlist.AllowPrivateFetchDestinations = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv(envPrefix + "CORS_ALLOW_ORIGINS"); v != "" {
 		var origins []string

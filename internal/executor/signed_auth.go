@@ -16,6 +16,7 @@ import (
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/google/uuid"
 
+	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/models"
 )
 
@@ -322,6 +323,12 @@ func IsForbiddenError(err error) bool {
 // IsIntentError reports whether err is a malformed/mismatched signed mutation intent (400 bad_request).
 func IsIntentError(err error) bool {
 	return err != nil && errors.Is(err, ErrIntentInvalid)
+}
+
+// IsBlockedFetchDestinationError reports whether err is a refused playlist-fetch destination. The
+// requester chose the URL, so this is their input being wrong rather than an internal fault: 400.
+func IsBlockedFetchDestinationError(err error) bool {
+	return err != nil && errors.Is(err, fetcher.ErrBlockedDestination)
 }
 
 // IsInvalidSubmissionError reports whether err is a client-correctable defect in a signed create/replace

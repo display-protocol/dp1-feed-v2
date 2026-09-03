@@ -2,12 +2,14 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
@@ -49,8 +52,52 @@ const (
 	tombstoneExists = `SELECT EXISTS (SELECT 1 FROM deleted_documents WHERE resource_type = $1 AND id = $2)`
 )
 
+// lockDocumentID serializes every path that creates, deletes or ingests one (resource_type, id) against
+// the others, for the remainder of the caller's transaction.
+//
+// Without it the tombstone guard is check-then-act and can be stepped over: a replaying create reads no
+// tombstone, then blocks on the unique-key conflict with the row a concurrent delete is removing; when
+// that delete commits — writing its tombstone — the blocked insert proceeds against a now-empty key and
+// succeeds, never re-reading the tombstone. That resurrects a document immediately after a successful
+// owner delete, which is precisely the guarantee tombstones exist to provide. Taking the lock *before*
+// the check makes check and write atomic with respect to each other.
+//
+// Deadlock safety: a transaction takes at most one container lock (its own new group/channel id, unique
+// to it) and then playlist locks in sorted order, so no two transactions can hold each other's next lock.
+// The lock is advisory and transaction-scoped, so it is released on commit or rollback either way.
+const documentLockKey = `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2::text, 0))`
+
+func lockDocumentID(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, table string, id uuid.UUID) error {
+	if _, err := q.Exec(ctx, documentLockKey, table, id); err != nil {
+		return fmt.Errorf("lock %s %s: %w", table, id, err)
+	}
+	return nil
+}
+
+// lockDocumentIDs takes lockDocumentID for a batch, in ascending id order so concurrent batches that
+// overlap cannot deadlock by acquiring the same pair in opposite orders.
+func lockDocumentIDs(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, table string, ids []uuid.UUID) error {
+	sorted := append([]uuid.UUID(nil), ids...)
+	slices.SortFunc(sorted, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	var prev uuid.UUID
+	for i, id := range sorted {
+		if i > 0 && id == prev {
+			continue // membership may repeat an id; one lock is enough
+		}
+		if err := lockDocumentID(ctx, q, table, id); err != nil {
+			return err
+		}
+		prev = id
+	}
+	return nil
+}
+
 // requireNotTombstoned fails a create whose id this feed has already deleted. It runs on the caller's
-// transaction so the check and the insert commit together.
+// transaction so the check and the insert commit together, and callers must hold lockDocumentID first.
 func requireNotTombstoned(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, table string, id uuid.UUID) error {
@@ -162,6 +209,9 @@ RETURNING created_at`
 	// Commit succeeds → Rollback becomes no-op. On failure, Rollback aborts the tx.
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockDocumentID(ctx, tx, "playlists", id); err != nil {
+		return err
+	}
 	if err := requireNotTombstoned(ctx, tx, "playlists", id); err != nil {
 		return err
 	}
@@ -581,6 +631,12 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 		}
 	}
 
+	// Lock before deleting so a concurrent replaying create waits here rather than on the row key, and
+	// therefore re-reads the tombstone this transaction is about to write.
+	if err := lockDocumentID(ctx, tx, table, rowID); err != nil {
+		return err
+	}
+
 	ct, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE id = $1 AND updated_at = $2", rowID, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", table, err)
@@ -654,6 +710,9 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	}
 	// A tombstoned id is one this feed deleted, so no row exists and the statement below would insert it.
 	// Ingestion must not become a side door around the create-path tombstone guard.
+	if err := lockDocumentIDs(ctx, tx, "playlists", ids); err != nil {
+		return err
+	}
 	if err := requireNoneTombstoned(ctx, tx, "playlists", ids); err != nil {
 		return err
 	}
@@ -700,6 +759,9 @@ VALUES ($1, $2, $3::jsonb)`
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockDocumentID(ctx, tx, "playlist_groups", in.ID); err != nil {
+		return err
+	}
 	if err := requireNotTombstoned(ctx, tx, "playlist_groups", in.ID); err != nil {
 		return err
 	}
@@ -994,6 +1056,9 @@ VALUES ($1, $2, $3::jsonb)`
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockDocumentID(ctx, tx, "channels", in.ID); err != nil {
+		return err
+	}
 	if err := requireNotTombstoned(ctx, tx, "channels", in.ID); err != nil {
 		return err
 	}

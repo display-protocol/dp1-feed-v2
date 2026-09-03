@@ -87,15 +87,25 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	if err := e.verifyPlaylistCuratorSignatures(body, p.Signatures, p.Curators); err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: curator signature verification: %w", uri, err)
 	}
+	// Materializing a remote document is a create, so it must satisfy exactly what POST requires. The feed
+	// previously synthesized a missing slug and slugified a supplied one while storing the signed body
+	// untouched, which left the row's routing slug disagreeing with the slug inside the document: the
+	// document served at that URL contradicted its own address, and a later replace — which requires the
+	// submitted identity to equal the stored row's — could never match. Reject instead of repairing;
+	// repairing is exactly what verbatim storage forbids.
 	id, err := uuid.Parse(strings.TrimSpace(p.ID))
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: id: %w", uri, err)
 	}
-	slug := strings.TrimSpace(p.Slug)
-	if slug == "" {
-		slug = fmt.Sprintf("ingested-%s", id.String()[:8])
-	} else {
-		slug = slugify(slug)
+	slug, err := requireSlug(p.Slug)
+	if err != nil {
+		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
+	}
+	if err := requireItemIDs(p.Items); err != nil {
+		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
+	}
+	if _, err := parseUserProvidedCreated(&p.Created); err != nil {
+		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
 	}
 	// Keep the fetched bytes exactly as served: the remote document's signatures are bound to them, so a
 	// typed re-marshal here would store a member whose own signatures no longer verify.

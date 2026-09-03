@@ -40,13 +40,18 @@ type Handler struct {
 // bindDeleteRequest decodes a signed delete-intent body and captures the exact bytes in Raw. The
 // executor verifies the signatures over Raw (§7.1 digest, signatures stripped), so the raw form — not
 // the re-encoded struct — is what must be preserved. RequireSignatures has already restored the body.
+//
+// Decoding is strict, like every other write: encoding/json matches member names case-insensitively and
+// ignores unknown ones, so a plain Unmarshal would accept {"Action":"delete"} or extra members and then
+// execute the delete anyway. Deletion is the least forgiving thing this API does; it should be the last
+// place to guess at what the client meant.
 func bindDeleteRequest(c *gin.Context) (*models.SignedDeleteRequest, error) {
 	raw, err := c.GetRawData()
 	if err != nil {
 		return nil, err
 	}
 	var req models.SignedDeleteRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if err := decodeDocument(raw, &req); err != nil {
 		return nil, err
 	}
 	req.Raw = raw

@@ -891,9 +891,11 @@ components:
             This feed does not fetch `ref`, merge the two, or apply the §3.6
             precedence (a fetched `ref` manifest wins over the inline copy) — players resolve that.
             The manifest is part of the signed payload, with no `refHash` counterpart of its own.
-            No inbound body limit applies, but
-            `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed fetches when
-            ingesting a group or channel by URL.
+            Two distinct size limits apply. Inbound request bodies are capped by
+            `server.max_request_bytes` (default 5 MiB); exceeding it is `413`. Separately,
+            `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed *fetches* when
+            ingesting a group or channel by URL — so a playlist with large inline manifests can be
+            publishable directly yet too large for another deployment to ingest.
 
     Playlist:
       type: object

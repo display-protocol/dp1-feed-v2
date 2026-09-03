@@ -990,6 +990,49 @@ func TestDeletePlaylist_malformedBody(t *testing.T) {
 	assert.Equal(t, "bad_request", resp.Error)
 }
 
+// TestDeletePlaylist_strictDecoding covers the delete handler applying the same strict decoding as every
+// other write. encoding/json matches member names case-insensitively and ignores unknown ones, so without
+// the strict pass {"Action":"delete"} or a stray member would bind and the delete would proceed — on the
+// least forgiving route in the API.
+func TestDeletePlaylist_strictDecoding(t *testing.T) {
+	playlistID := uuid.New().String()
+	sig := `[{"alg":"ed25519","kid":"did:key:z6Mk","ts":"2026-01-01T00:00:00Z","payload_hash":"sha256:x","role":"curator","sig":"s"}]`
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "case variant member",
+			body: `{"Action":"delete","target":{"type":"playlist","id":"` + playlistID + `","slug":"s"},"created":"2026-01-01T00:00:00Z","signatures":` + sig + `}`,
+		},
+		{
+			name: "unknown member",
+			body: `{"action":"delete","target":{"type":"playlist","id":"` + playlistID + `","slug":"s"},"created":"2026-01-01T00:00:00Z","signatures":` + sig + `,"extra":1}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockExec := mocks.NewMockExecutor(ctrl) // no DeletePlaylist call expected
+
+			h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, bytes.NewReader([]byte(tc.body)))
+			c.Params = gin.Params{{Key: "id", Value: playlistID}}
+
+			h.DeletePlaylist(c)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, "bad_request", resp.Error)
+		})
+	}
+}
+
 func TestListPlaylistGroups(t *testing.T) {
 	tests := []struct {
 		name           string

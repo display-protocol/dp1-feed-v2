@@ -45,7 +45,7 @@ func serveSignedPlaylist(t *testing.T, priv []byte, doc playlist.Playlist) strin
 // victim's playlist id and have the feed upsert it — overwriting the victim's body, slug, owner set and
 // item index. Ingestion may now only *link* a playlist that already exists.
 func TestIntegration_IngestCannotHijackAnotherOwnersPlaylist(t *testing.T) {
-	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20))
+	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20, fetcher.AllowPrivateDestinations(true)))
 
 	// Owner A publishes a playlist through the front door.
 	apriv, akid := newCuratorKeypair(t)
@@ -126,7 +126,7 @@ func TestIntegration_IngestCannotHijackAnotherOwnersPlaylist(t *testing.T) {
 // A remote playlist the feed does not already hold is created by the ingest, so it must clear the same
 // bar as POST — an unsigned document must not be published here on a referencing party's say-so.
 func TestIntegration_IngestRejectsUnsignedRemotePlaylist(t *testing.T) {
-	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20))
+	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20, fetcher.AllowPrivateDestinations(true)))
 
 	unsigned := playlist.Playlist{
 		DPVersion: "1.1.0",

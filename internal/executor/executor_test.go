@@ -1514,6 +1514,54 @@ func TestCreatePlaylistGroup_remotePlaylistMustBeSelfSigned(t *testing.T) {
 	}
 }
 
+// Materializing a remote playlist is a create, so it must satisfy POST's identity rules too. The feed used
+// to repair these — synthesizing a missing slug, slugifying a supplied one — which left the row's routing
+// slug disagreeing with the slug inside the signed document, so the document served at that URL
+// contradicted its own address and could never be replaced (replace requires identity equality).
+func TestCreatePlaylistGroup_remotePlaylistMustSatisfyPOSTIdentityRules(t *testing.T) {
+	t.Parallel()
+	const remoteID = "77777777-7777-4777-8777-777777777777"
+
+	cases := []struct {
+		name   string
+		remote *playlist.Playlist
+	}{
+		{
+			name:   "missing slug is rejected rather than synthesized",
+			remote: &playlist.Playlist{ID: remoteID, Created: testCreatedRFC},
+		},
+		{
+			name:   "item without a UUID id",
+			remote: &playlist.Playlist{ID: remoteID, Slug: "remote", Created: testCreatedRFC, Items: []playlist.PlaylistItem{{Source: "https://x"}}},
+		},
+		{
+			name:   "created in the future",
+			remote: &playlist.Playlist{ID: remoteID, Slug: "remote", Created: "2999-01-01T00:00:00Z"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+			mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+			tc.remote.Curators = []identity.Entity{{Key: testCuratorKid}}
+			tc.remote.Signatures = []playlist.Signature{testSig(testCuratorKid)}
+			mockDP1.EXPECT().ValidatePlaylist(gomock.Any()).Return(tc.remote, nil)
+			mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil)
+
+			e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, staticFetcher{body: []byte(`{"remote":true}`)}, testPublicBase)
+			_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
+			if err == nil {
+				t.Fatal("want the group mutation to fail")
+			}
+			if !executor.IsInvalidSubmissionError(err) && !executor.IsInvalidTimestampError(err) {
+				t.Fatalf("want a client-correctable identity error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestCreatePlaylistGroup_remotePlaylistFailingCryptoIsRejected(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -2428,9 +2476,11 @@ func TestCreateChannel_playlistResolutionPreservesPerFetchTimeoutAcrossBatches(t
 	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 	// A referenced remote playlist this feed does not hold is created by the ingest, so it must be
 	// self-signed by a declared curator (same bar as POST) — see resolveOnePlaylistRef.
+	// It must also satisfy POST's identity rules: a verbatim slug, item UUIDs, and a non-future created.
 	remotePlaylist := &playlist.Playlist{
 		ID:         "77777777-7777-4777-8777-777777777777",
 		Slug:       "remote",
+		Created:    testCreatedRFC,
 		Curators:   []identity.Entity{{Key: testCuratorKid}},
 		Signatures: []playlist.Signature{testSig(testCuratorKid)},
 	}

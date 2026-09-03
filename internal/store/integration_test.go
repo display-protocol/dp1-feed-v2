@@ -18,8 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -2213,6 +2215,61 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 	// A conditional write against a row that no longer exists is ErrNotFound, not a concurrency error.
 	if err := st.DeletePlaylist(ctx, id.String(), fresh); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("delete of missing row: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestIntegration_Tombstone_survivesConcurrentDelete pins the race the sequential test cannot reach.
+//
+// The tombstone guard used to be check-then-act: a replaying create read no tombstone, then blocked on the
+// unique-key conflict with the row a concurrent delete was removing. When that delete committed — writing
+// its tombstone — the blocked insert proceeded against a now-empty key and succeeded, never re-reading the
+// tombstone, resurrecting the document immediately after a successful owner delete. Both paths now take a
+// transaction-scoped advisory lock on (resource_type, id) before the check, so the two serialize.
+//
+// The interleaving is timing-dependent, so this runs the pair repeatedly and asserts the invariant that
+// actually matters: a delete and a re-create of the same id can never both succeed.
+func TestIntegration_Tombstone_survivesConcurrentDelete(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "racy",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+
+	const rounds = 25
+	for i := range rounds {
+		id := uuid.New()
+		slug := fmt.Sprintf("race-%d-%s", i, id.String()[:8])
+		if err := st.CreatePlaylist(ctx, id, slug, rawDoc(t, &pl)); err != nil {
+			t.Fatalf("seed CreatePlaylist: %v", err)
+		}
+		updatedAt := plUpdatedAt(t, ctx, st, id.String())
+
+		var wg sync.WaitGroup
+		var delErr, createErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			delErr = st.DeletePlaylist(ctx, id.String(), updatedAt)
+		}()
+		go func() {
+			defer wg.Done()
+			// The replay: the same id, the same still-valid public bytes, a different slug.
+			createErr = st.CreatePlaylist(ctx, id, slug+"-replay", rawDoc(t, &pl))
+		}()
+		wg.Wait()
+
+		if delErr == nil && createErr == nil {
+			t.Fatalf("round %d: delete and re-create both succeeded — the id was resurrected", i)
+		}
+		if delErr == nil {
+			// Whatever the interleaving, a committed delete must leave the resource gone.
+			if _, err := st.GetPlaylist(ctx, id.String()); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("round %d: resource survived a successful delete: %v", i, err)
+			}
+		}
 	}
 }
 
