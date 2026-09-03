@@ -2005,3 +2005,39 @@ func rawDoc(t testing.TB, v any) json.RawMessage {
 	}
 	return b
 }
+
+// TestStore_rejectsEmptyDocument pins the write-path guard: every document write takes the bytes the
+// executor signed, and an empty payload is a programming error surfaced before any SQL runs.
+func TestStore_rejectsEmptyDocument(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	id := uuid.New()
+
+	if err := st.CreatePlaylist(ctx, id, "empty-create", nil); err == nil {
+		t.Fatal("CreatePlaylist(nil raw): want error")
+	}
+	if err := st.UpdatePlaylist(ctx, id.String(), json.RawMessage{}); err == nil {
+		t.Fatal("UpdatePlaylist(empty raw): want error")
+	}
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: id, Slug: "empty-group"}); err == nil {
+		t.Fatal("CreatePlaylistGroup(empty raw): want error")
+	}
+	if err := st.UpdatePlaylistGroup(ctx, id.String(), &store.PlaylistGroupInput{}); err == nil {
+		t.Fatal("UpdatePlaylistGroup(empty raw): want error")
+	}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: id, Slug: "empty-channel"}); err == nil {
+		t.Fatal("CreateChannel(empty raw): want error")
+	}
+	if err := st.UpdateChannel(ctx, id.String(), &store.ChannelInput{}); err == nil {
+		t.Fatal("UpdateChannel(empty raw): want error")
+	}
+	// A member playlist without bytes is refused inside the ingest transaction.
+	pl := rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "m", Items: []playlist.PlaylistItem{}})
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID: id, Slug: "empty-member", Raw: rawDoc(t, playlistgroup.Group{ID: id.String(), Title: "g", Playlists: []string{}, Created: "2020-01-01T00:00:00Z"}),
+		Playlists: []store.IngestedPlaylist{{ID: uuid.New(), Slug: "member"}},
+	}); err == nil {
+		t.Fatal("ingest with empty member raw: want error")
+	}
+	_ = pl
+}
