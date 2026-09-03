@@ -50,6 +50,10 @@ playlist:
   # outbound fetch, so this bounds fan-out per request; over the cap is a 400. Env:
   # DP1_FEED_MAX_PLAYLIST_REFERENCES.
   max_playlist_references: 1000
+  # max_resolved_bytes caps the TOTAL size of resolved playlist documents held in memory for one
+  # group/channel write. The reference count and fetch_max_body_bytes do not bound memory between them,
+  # they multiply, so this is the setting that actually bounds it. Env: DP1_FEED_MAX_RESOLVED_BYTES.
+  max_resolved_bytes: 67108864
   # Ed25519 seed: 32 bytes = 64 hex chars. Required — generate: openssl rand -hex 32 (or set DP1_FEED_SIGNING_KEY_HEX)
   signing_key_hex: ""
   # Set DP1_FEED_PUBLIC_BASE_URL to an externally reachable URL when clients are enabled.

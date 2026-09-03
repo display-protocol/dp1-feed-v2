@@ -138,7 +138,21 @@ type PlaylistConfig struct {
 	// request into that many outbound ones. The SSRF guard constrains *where* those requests may go; it
 	// does nothing about how many there are. Zero falls back to DefaultMaxPlaylistReferences.
 	MaxPlaylistReferences int `yaml:"max_playlist_references"`
+	// MaxResolvedBytes caps the total size of resolved playlist documents held in memory for one
+	// group/channel mutation.
+	//
+	// The reference count and the per-fetch size cap do not bound memory between them, they multiply:
+	// resolution keeps every resolved body until the whole set is ready to persist, so the default 1000
+	// references at 4 MiB each is ~4 GiB from a single unauthenticated request (and persistence copies the
+	// bodies again). The eight-way concurrency limit paces downloads without bounding what is retained.
+	// This is the budget that actually bounds it. Zero falls back to DefaultMaxResolvedBytes.
+	MaxResolvedBytes int64 `yaml:"max_resolved_bytes"`
 }
+
+// DefaultMaxResolvedBytes bounds retained resolved-playlist bytes per mutation when config leaves it
+// unset. Comfortably fits a large curated collection while keeping one request's peak far below what a
+// modest deployment can absorb, including the copy made at persistence time.
+const DefaultMaxResolvedBytes = 64 << 20 // 64 MiB
 
 // DefaultMaxPlaylistReferences bounds playlist references per group/channel when config leaves it unset.
 // Chosen to sit far above any realistic curated collection while keeping worst-case fan-out per request
@@ -200,6 +214,7 @@ func defaultConfig() *Config {
 			FetchTimeout:          30 * time.Second,
 			FetchMaxBodyBytes:     4 << 20, // 4 MiB
 			MaxPlaylistReferences: DefaultMaxPlaylistReferences,
+			MaxResolvedBytes:      DefaultMaxResolvedBytes,
 		},
 		Notifications: NotificationConfig{Timeout: 15 * time.Second},
 	}
@@ -230,6 +245,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("max playlist references env: %w", err)
 		}
 		cfg.Playlist.MaxPlaylistReferences = n
+	}
+	if v := os.Getenv(envPrefix + "MAX_RESOLVED_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("max resolved bytes env: %w", err)
+		}
+		cfg.Playlist.MaxResolvedBytes = n
 	}
 	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
 		cfg.Sentry.DSN = v
@@ -317,6 +339,17 @@ func (c *Config) validate() error {
 	}
 	if c.Playlist.MaxPlaylistReferences < 0 {
 		return fmt.Errorf("max playlist references must not be negative")
+	}
+	// A budget below one document's fetch cap could not resolve even a single reference, so the deployment
+	// would reject every group/channel write that fetches. Checked here rather than discovered in
+	// production. The budget is deliberately NOT required to cover references x fetch cap: that product is
+	// the unbounded figure this budget exists to replace, and requiring it would force an unusably small
+	// reference limit.
+	if c.Playlist.MaxResolvedBytes > 0 && c.Playlist.MaxResolvedBytes < c.Playlist.FetchMaxBodyBytes {
+		return fmt.Errorf("max resolved bytes must be at least the per-playlist fetch cap (%d)", c.Playlist.FetchMaxBodyBytes)
+	}
+	if c.Playlist.MaxResolvedBytes < 0 {
+		return fmt.Errorf("max resolved bytes must not be negative")
 	}
 	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
 		return fmt.Errorf("notification timeout must be positive")

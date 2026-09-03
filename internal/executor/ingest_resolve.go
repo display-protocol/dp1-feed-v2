@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
@@ -222,6 +223,16 @@ func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.
 		positions[key] = append(positions[key], i)
 	}
 
+	// Aggregate retained-bytes budget, charged as each document is resolved.
+	//
+	// The reference cap and the per-fetch size cap do not bound memory between them, they multiply: every
+	// resolved body is held until the whole set is ready to persist, so 1000 references at the 4 MiB fetch
+	// cap is ~4 GiB from one unauthenticated request, and persistence copies the bodies again. The
+	// eight-way concurrency limit paces downloads without bounding what accumulates behind them. Charging
+	// here — before the result is retained, and once per distinct URI rather than per position — is what
+	// actually bounds it; exceeding the budget cancels the errgroup, so in-flight fetches stop too.
+	var resolved atomic.Int64
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(8)
 	out := make([]store.IngestedPlaylist, len(uris))
@@ -230,6 +241,11 @@ func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.
 			ing, err := e.resolveOnePlaylistRef(ctx, uri)
 			if err != nil {
 				return err
+			}
+			if budget := e.maxResolvedBytes; budget > 0 {
+				if total := resolved.Add(int64(len(ing.Raw))); total > budget {
+					return fmt.Errorf("%w: resolved playlists exceed the %d byte budget for one request", ErrResolvedTooLarge, budget)
+				}
 			}
 			for _, i := range positions[uri] {
 				out[i] = ing

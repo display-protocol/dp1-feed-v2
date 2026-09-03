@@ -1657,6 +1657,45 @@ func TestCreatePlaylistGroup_knownRemoteReferenceResolvesDuringOriginOutage(t *t
 	}
 }
 
+// The reference cap bounds how MANY playlists a mutation resolves; it says nothing about how BIG they
+// are, and the two multiply. Every resolved body is retained until the set is ready to persist, so the
+// default 1000 references at the 4 MiB fetch cap is ~4 GiB from one unauthenticated request. This pins
+// the aggregate budget that actually bounds it: a reference count well inside the cap must still be
+// refused once the documents behind it exceed the budget.
+func TestCreatePlaylistGroup_resolvedBytesBudget(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	// Four stored playlists of 400 bytes each against a 1000-byte budget: only three references, far
+	// under any reference cap, yet together over the memory bound.
+	big := make([]byte, 400)
+	for i := range big {
+		big[i] = 'x'
+	}
+	body := append(append([]byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl","pad":"`), big...), []byte(`"}`)...)
+	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	plDoc := mustDecodePlaylist(t, body)
+	mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), gomock.Any()).Return(&store.PlaylistRecord{
+		ID: plID, Slug: "pl", Raw: body, Body: plDoc,
+	}, nil).AnyTimes()
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase,
+		executor.WithMaxResolvedBytes(1000))
+	refs := []string{"https://a.test/1.json", "https://a.test/2.json", "https://a.test/3.json"}
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(refs...))
+	if !errors.Is(err, executor.ErrResolvedTooLarge) {
+		t.Fatalf("want ErrResolvedTooLarge once resolved bodies exceed the budget, got %v", err)
+	}
+	// The client chose the reference list, so this is their input being too large, not a server fault.
+	if !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want a 400-class submission error, got %v", err)
+	}
+}
+
 // countingFetcher records how many times each URI was fetched.
 type countingFetcher struct {
 	mu   sync.Mutex

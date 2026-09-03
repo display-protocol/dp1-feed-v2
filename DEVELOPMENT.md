@@ -163,6 +163,7 @@ auth:
 playlist:
   fetch_timeout: 30s
   max_playlist_references: 1000   # fan-out cap: playlist refs per group/channel
+  max_resolved_bytes: 67108864    # memory cap: total resolved playlist bytes per write
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
   public_base_url: https://feed.example
 
@@ -272,6 +273,7 @@ The `.env` file contains all necessary environment variables for Docker deployme
 - `DP1_FEED_INTENT_MAX_CLOCK_SKEW` — Freshness window for signed mutation intents, both PUT replace and DELETE (Go duration, default 5m)
 - `DP1_FEED_MAX_REQUEST_BYTES` — Inbound request body cap in bytes (default 5 MiB)
 - `DP1_FEED_MAX_PLAYLIST_REFERENCES` — Max playlist URIs one group/channel may reference (default 1000)
+- `DP1_FEED_MAX_RESOLVED_BYTES` — Total resolved-playlist bytes one group/channel write may hold (default 64 MiB)
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging

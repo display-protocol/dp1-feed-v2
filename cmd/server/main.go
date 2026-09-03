@@ -88,6 +88,7 @@ func main() {
 	execOptions := []executor.Option{
 		executor.WithIntentClockSkew(cfg.Auth.IntentMaxClockSkew),
 		executor.WithMaxPlaylistReferences(cfg.Playlist.MaxPlaylistReferences),
+		executor.WithMaxResolvedBytes(cfg.Playlist.MaxResolvedBytes),
 	}
 	if len(cfg.Notifications.Clients) > 0 {
 		privateKey, err := notification.ParseP256PrivateKeyHex(cfg.Notifications.PrivateKeyHex)

@@ -106,6 +106,7 @@ type impl struct {
 	notificationClient notification.Client
 	intentSkew         time.Duration
 	maxRefs            int
+	maxResolvedBytes   int64
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -138,6 +139,16 @@ func WithMaxPlaylistReferences(n int) Option {
 	}
 }
 
+// WithMaxResolvedBytes caps the total resolved-playlist bytes retained for one mutation. A non-positive
+// value leaves the executor default (defaultMaxResolvedBytes) in place.
+func WithMaxResolvedBytes(n int64) Option {
+	return func(e *impl) {
+		if n > 0 {
+			e.maxResolvedBytes = n
+		}
+	}
+}
+
 // New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
 func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
@@ -149,6 +160,7 @@ func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetc
 		publicBase:        strings.TrimSpace(publicBaseURL),
 		intentSkew:        defaultIntentSkew,
 		maxRefs:           defaultMaxRefs,
+		maxResolvedBytes:  defaultMaxResolvedBytes,
 	}
 	for _, option := range options {
 		option(e)
@@ -164,6 +176,11 @@ const defaultIntentSkew = 5 * time.Minute
 // Mirrors config.DefaultMaxPlaylistReferences; duplicated rather than imported so the executor package
 // stays free of the config package (see docs/architecture.md on dependency direction).
 const defaultMaxRefs = 1000
+
+// defaultMaxResolvedBytes bounds retained resolved-playlist bytes per mutation when WithMaxResolvedBytes
+// is not set. Mirrors config.DefaultMaxResolvedBytes; duplicated rather than imported so the executor
+// package stays free of the config package.
+const defaultMaxResolvedBytes = 64 << 20
 
 func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {

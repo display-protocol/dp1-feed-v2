@@ -43,6 +43,7 @@ alwaysApply: true
 - **Replay bound:** the per-signature `ts` is NOT covered by the signature, so freshness lives in the intent's own signed `created`. Writes/deletes are conditional on the generation read at authorization (`409` on mismatch).
 - **Content-preserving:** documents are verified, co-signed, stored and served with no field added, dropped or rewritten. Not byte-identical: feed signing re-encodes and jsonb re-orders keys, both JCS-neutral, so compare via JCS/signing digest rather than raw bytes. Bodies are decoded strictly and capped (`413`).
 - **Reference-only ingest:** a referenced playlist is linked, never modified. An already-ingested remote URI resolves from the recorded URI→id mapping without contacting the origin (so an outage cannot block a group write); an unknown one is fetched and held to the full POST bar.
+- **Memory bound:** resolved playlist documents for one write are capped in aggregate by `playlist.max_resolved_bytes` (default 64 MiB); the reference cap bounds count, not size, and the two multiply. Over it is `400`.
 - **Fan-out bound:** a group/channel may reference at most `playlist.max_playlist_references` playlists (default 1000), checked before resolution; over it is `400`. Reference-resolving mutations carry a request deadline.
 - **No PATCH.** Registry is read-only over the API. Ownership is document-declared; no global key allowlist.
 - Reads public unless network-restricted; no built-in OAuth.

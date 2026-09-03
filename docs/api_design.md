@@ -240,6 +240,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | ----------- | ----------------- | ---- |
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
 | **400** | `bad_request` | A group or channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
+| **400** | `bad_request` | The playlists a group or channel references exceed `playlist.max_resolved_bytes` in total (`ErrResolvedTooLarge`). The reference cap bounds the count, this bounds their combined size — the two multiply, so both are needed. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |

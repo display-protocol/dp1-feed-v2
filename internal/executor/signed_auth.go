@@ -52,6 +52,11 @@ var (
 	// becomes an outbound fetch, and creation is open, so the count has to be capped before resolution
 	// begins. The client chose the list, so it is a 400.
 	ErrTooManyReferences = errors.New("too many playlist references")
+	// ErrResolvedTooLarge is returned when the playlists a group or channel references add up to more bytes
+	// than one request may hold in memory. Distinct from ErrTooManyReferences: the count can be well within
+	// the cap while the documents behind it are not, which is the combination that made the reference cap
+	// alone an insufficient bound. The client chose the references, so it is a 400.
+	ErrResolvedTooLarge = errors.New("referenced playlists are too large to resolve in one request")
 	// errMissingRawBody means the HTTP layer did not attach the request bytes to a submission (programming error).
 	errMissingRawBody = errors.New("signed submission is missing the raw request body")
 )
@@ -368,5 +373,6 @@ func IsInvalidSubmissionError(err error) bool {
 		errors.Is(err, ErrItemIDRequired) ||
 		errors.Is(err, ErrPublisherRequired) ||
 		errors.Is(err, ErrTooManyReferences) ||
+		errors.Is(err, ErrResolvedTooLarge) ||
 		errors.Is(err, ErrSignedDocumentMismatch))
 }
