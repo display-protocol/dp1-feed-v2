@@ -21,9 +21,11 @@ info:
 
     Because an owner's signatures live inside the document and are public via GET, a previously published
     document could otherwise be replayed. PUT and DELETE therefore also carry a **signed mutation-intent**
-    (`SignedIntent`) whose `created` is inside the signed payload — the per-signature `ts` is not covered
-    by the signature and so cannot bound replay. PUT sends `SignedReplaceRequest` (the document plus an
-    intent bound to its `payloadHash`); DELETE sends `SignedDeleteRequest`. Intents must be fresh within
+    whose `created` is inside the signed payload — the per-signature `ts` is not covered by the
+    signature and so cannot bound replay. The envelopes are route-specific (`PlaylistReplaceRequest`,
+    `ChannelDeleteRequest`, and so on) so each pins its document shape, action and target type. PUT sends
+    the document plus an intent bound to its `payloadHash`; DELETE sends the intent alone. Intents must be
+    fresh within
     `auth.intent_max_clock_skew`. Deleted ids are tombstoned and cannot be re-created (`409`), which is
     what stops a captured document from resurrecting a deleted resource; CREATE itself stays open so
     cross-feed mirroring keeps working.
@@ -232,7 +234,7 @@ paths:
       tags: [playlists]
       summary: Replace playlist
       description: >-
-        Fully replaces a playlist. The body is a `SignedReplaceRequest`: the full re-signed `document`
+        Fully replaces a playlist. The body is a `PlaylistReplaceRequest`: the full re-signed `document`
         plus an `authorization` intent bound to that document's `payloadHash`. Owner-bound and immutable:
         the document must be signed by a key the stored playlist lists in `curators`, the `curators` set
         may not change, and the identity (`id`, `slug`, `created`) must equal the stored resource's. The
@@ -245,7 +247,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignedReplaceRequest'
+              $ref: '#/components/schemas/PlaylistReplaceRequest'
       responses:
         '200':
           description: Playlist replaced
@@ -271,7 +273,7 @@ paths:
       summary: Delete playlist
       description: >-
         Deletes a playlist (fails if referenced by groups/channels). The request body is a signed
-        delete-intent (`SignedDeleteRequest`) that must target this playlist and be signed by one of its
+        delete-intent (`PlaylistDeleteRequest`) that must target this playlist and be signed by one of its
         curators within the freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
@@ -280,7 +282,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignedDeleteRequest'
+              $ref: '#/components/schemas/PlaylistDeleteRequest'
       responses:
         '204':
           description: Playlist deleted
@@ -383,7 +385,7 @@ paths:
       tags: [playlist-groups]
       summary: Replace playlist-group
       description: >-
-        Fully replaces a playlist-group. The body is a `SignedReplaceRequest`: the full re-signed
+        Fully replaces a playlist-group. The body is a `PlaylistGroupReplaceRequest`: the full re-signed
         `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound and immutable:
         the document and the intent must both be signed by the stored `curator`, which may not change, and
         the identity must equal the stored resource's. 403 if the signer is not the owner or the owner
@@ -395,7 +397,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignedReplaceRequest'
+              $ref: '#/components/schemas/PlaylistGroupReplaceRequest'
       responses:
         '200':
           description: Playlist-group replaced
@@ -421,7 +423,7 @@ paths:
       summary: Delete playlist-group
       description: >-
         Deletes a playlist-group (cascades membership). The request body is a signed delete-intent
-        (`SignedDeleteRequest`) that must target this group and be signed by its `curator` within the
+        (`PlaylistGroupDeleteRequest`) that must target this group and be signed by its `curator` within the
         freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
@@ -430,7 +432,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignedDeleteRequest'
+              $ref: '#/components/schemas/PlaylistGroupDeleteRequest'
       responses:
         '204':
           description: Playlist-group deleted
@@ -537,7 +539,7 @@ paths:
       tags: [channels]
       summary: Replace channel
       description: >-
-        Fully replaces a channel (requires extensions). The body is a `SignedReplaceRequest`: the full
+        Fully replaces a channel (requires extensions). The body is a `ChannelReplaceRequest`: the full
         re-signed `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound and
         immutable: the document and the intent must both be signed by the stored `publisher`, which may not
         change, and the identity must equal the stored resource's (`curators` may change). 403 if the signer
@@ -549,7 +551,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignedReplaceRequest'
+              $ref: '#/components/schemas/ChannelReplaceRequest'
       responses:
         '200':
           description: Channel replaced
@@ -575,7 +577,7 @@ paths:
       summary: Delete channel
       description: >-
         Deletes a channel (cascades membership, requires extensions). The request body is a signed
-        delete-intent (`SignedDeleteRequest`) that must target this channel and be signed by its
+        delete-intent (`ChannelDeleteRequest`) that must target this channel and be signed by its
         `publisher` within the freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
@@ -584,7 +586,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SignedDeleteRequest'
+              $ref: '#/components/schemas/ChannelDeleteRequest'
       responses:
         '204':
           description: Channel deleted
@@ -1205,60 +1207,54 @@ components:
           description: Base64-encoded signature
           example: "dGVzdC1zaWduYXR1cmU="
 
-    IntentTarget:
+    # Mutation envelopes are route-specific: each PUT/DELETE below pins the document shape, the action,
+    # and the target type it accepts, so a client generated from this document cannot construct a request
+    # the server will reject.
+    #
+    # Why an intent exists at all: an owner's signatures live inside the document and are public via GET,
+    # so a previously published document could be replayed — PUT to roll a resource back, POST to
+    # resurrect it after a delete. The per-signature `ts` cannot bound that, because `ts` is not covered
+    # by the signature (`sig` is over the JCS document with `signatures` stripped) and can be rewritten on
+    # a replayed body. The intent therefore carries its own `created`, inside its own signed payload.
+    # Because that bound is wall-clock rather than per-feed bookkeeping, a stale intent is stale on every
+    # feed, which is what makes it hold for documents mirrored across feeds.
+
+    PlaylistIntentTarget:
       type: object
-      description: Binds an intent to exactly one stored resource; every field is checked against the stored row.
+      description: Identifies the playlist this intent acts on; every field is checked against the stored row.
       required: [type, id, slug]
       properties:
         type:
           type: string
-          enum: ["playlist", "playlist-group", "channel"]
+          enum: ["playlist"]
         id:
           type: string
           format: uuid
         slug:
           type: string
 
-    SignedIntent:
+    PlaylistReplaceIntent:
       type: object
       description: >-
-        A signed mutation-intent: the feed-local envelope that authorizes a mutation of an EXISTING
-        resource (DP-1 defines no such document, so this shape is the feed's).
-
-
-        Why it exists: an owner's signatures live inside the document and are public via GET, so an
-        observer could replay a previously published document — PUT it to roll a resource back to an older
-        version, or POST it after a delete to resurrect it. The per-signature `ts` cannot bound that
-        replay, because `ts` is NOT covered by the signature (`sig` is computed over the JCS form of the
-        document with `signatures` stripped), so it can be rewritten on a replayed body. Only a value
-        inside a signed payload is trustworthy — hence the intent carries its own `created` and is signed
-        as its own small document. Because the bound is wall-clock rather than per-feed bookkeeping, a
-        stale intent is stale on every feed, which is what makes this hold for documents mirrored across
-        feeds.
-
-
-        The server verifies the signatures over the intent bytes (§7.1 digest, `signatures` stripped),
-        requires a signer whose kid is an owner of the STORED resource (curator for playlists/groups,
-        publisher for channels), and rejects a `created` outside `auth.intent_max_clock_skew`.
-      required: [action, target, created, signatures]
+        Authorizes replacing this playlist. Must be signed by a key the stored resource already names as an
+        owner, and `created` must be within `auth.intent_max_clock_skew`.
+      required: [action, target, payloadHash, created, signatures]
       properties:
         action:
           type: string
-          enum: ["replace", "delete"]
-          description: The mutation this intent authorizes; must match the request method.
+          enum: ["replace"]
         target:
-          $ref: '#/components/schemas/IntentTarget'
+          $ref: '#/components/schemas/PlaylistIntentTarget'
         payloadHash:
           type: string
           description: >-
-            DP-1 signing digest of the document this intent authorizes, binding the intent to that exact
-            content so a captured intent cannot install different bytes. Required when `action` is
-            "replace"; omitted for "delete", which carries no document.
+            DP-1 signing digest of the accompanying `document`, binding this intent to that exact content
+            so a captured intent cannot be reused to install different bytes. Required for replace.
           example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         created:
           type: string
           format: date-time
-          description: RFC3339; must be within `auth.intent_max_clock_skew` of server time.
+          description: RFC3339; inside the signed payload, so it cannot be forged on a replayed body.
           example: "2025-06-01T12:00:00Z"
         signatures:
           type: array
@@ -1267,31 +1263,201 @@ components:
           items:
             $ref: '#/components/schemas/Signature'
 
-    SignedDeleteRequest:
-      description: >-
-        The DELETE body — a bare signed intent whose `action` is "delete", with no `payloadHash`.
-      allOf:
-        - $ref: '#/components/schemas/SignedIntent'
-
-    SignedReplaceRequest:
+    PlaylistReplaceRequest:
       type: object
       description: >-
-        The PUT body. It pairs the full signed replacement document with the intent that authorizes
-        replacing this resource with it. Both are verified independently: the document by its own owner
-        signatures (and stored verbatim), the intent by its signatures plus freshness and `payloadHash`
-        binding. One without the other authorizes nothing.
+        PUT body for a playlist: the full re-signed document plus the intent authorizing its installation.
+        Both halves are verified independently — one without the other authorizes nothing.
       required: [document, authorization]
       properties:
         document:
-          description: >-
-            The complete signed replacement document (`PlaylistInput` / `PlaylistGroupInput` /
-            `ChannelInput` shape for the route). Stored and served verbatim.
-          type: object
+          $ref: '#/components/schemas/PlaylistInput'
         authorization:
-          allOf:
-            - $ref: '#/components/schemas/SignedIntent'
+          $ref: '#/components/schemas/PlaylistReplaceIntent'
+
+    PlaylistDeleteRequest:
+      type: object
+      description: >-
+        DELETE body for a playlist: a signed intent with no `payloadHash`, since a delete carries no
+        document. Must be signed by a stored owner and be fresh.
+      required: [action, target, created, signatures]
+      properties:
+        action:
+          type: string
+          enum: ["delete"]
+        target:
+          $ref: '#/components/schemas/PlaylistIntentTarget'
+        created:
+          type: string
+          format: date-time
+          description: RFC3339; within `auth.intent_max_clock_skew` of server time.
+          example: "2025-06-01T12:00:00Z"
+        signatures:
+          type: array
+          minItems: 1
+          description: Owner signatures over the intent (JCS with `signatures` removed).
+          items:
+            $ref: '#/components/schemas/Signature'
+
+    PlaylistGroupIntentTarget:
+      type: object
+      description: Identifies the playlist-group this intent acts on; every field is checked against the stored row.
+      required: [type, id, slug]
+      properties:
+        type:
+          type: string
+          enum: ["playlist-group"]
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+
+    PlaylistGroupReplaceIntent:
+      type: object
+      description: >-
+        Authorizes replacing this playlist-group. Must be signed by a key the stored resource already names as an
+        owner, and `created` must be within `auth.intent_max_clock_skew`.
+      required: [action, target, payloadHash, created, signatures]
+      properties:
+        action:
+          type: string
+          enum: ["replace"]
+        target:
+          $ref: '#/components/schemas/PlaylistGroupIntentTarget'
+        payloadHash:
+          type: string
           description: >-
-            Signed intent whose `action` is "replace", with `payloadHash` set to the document's digest.
+            DP-1 signing digest of the accompanying `document`, binding this intent to that exact content
+            so a captured intent cannot be reused to install different bytes. Required for replace.
+          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        created:
+          type: string
+          format: date-time
+          description: RFC3339; inside the signed payload, so it cannot be forged on a replayed body.
+          example: "2025-06-01T12:00:00Z"
+        signatures:
+          type: array
+          minItems: 1
+          description: Owner signatures over the intent (JCS with `signatures` removed).
+          items:
+            $ref: '#/components/schemas/Signature'
+
+    PlaylistGroupReplaceRequest:
+      type: object
+      description: >-
+        PUT body for a playlist-group: the full re-signed document plus the intent authorizing its installation.
+        Both halves are verified independently — one without the other authorizes nothing.
+      required: [document, authorization]
+      properties:
+        document:
+          $ref: '#/components/schemas/PlaylistGroupInput'
+        authorization:
+          $ref: '#/components/schemas/PlaylistGroupReplaceIntent'
+
+    PlaylistGroupDeleteRequest:
+      type: object
+      description: >-
+        DELETE body for a playlist-group: a signed intent with no `payloadHash`, since a delete carries no
+        document. Must be signed by a stored owner and be fresh.
+      required: [action, target, created, signatures]
+      properties:
+        action:
+          type: string
+          enum: ["delete"]
+        target:
+          $ref: '#/components/schemas/PlaylistGroupIntentTarget'
+        created:
+          type: string
+          format: date-time
+          description: RFC3339; within `auth.intent_max_clock_skew` of server time.
+          example: "2025-06-01T12:00:00Z"
+        signatures:
+          type: array
+          minItems: 1
+          description: Owner signatures over the intent (JCS with `signatures` removed).
+          items:
+            $ref: '#/components/schemas/Signature'
+
+    ChannelIntentTarget:
+      type: object
+      description: Identifies the channel this intent acts on; every field is checked against the stored row.
+      required: [type, id, slug]
+      properties:
+        type:
+          type: string
+          enum: ["channel"]
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+
+    ChannelReplaceIntent:
+      type: object
+      description: >-
+        Authorizes replacing this channel. Must be signed by a key the stored resource already names as an
+        owner, and `created` must be within `auth.intent_max_clock_skew`.
+      required: [action, target, payloadHash, created, signatures]
+      properties:
+        action:
+          type: string
+          enum: ["replace"]
+        target:
+          $ref: '#/components/schemas/ChannelIntentTarget'
+        payloadHash:
+          type: string
+          description: >-
+            DP-1 signing digest of the accompanying `document`, binding this intent to that exact content
+            so a captured intent cannot be reused to install different bytes. Required for replace.
+          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        created:
+          type: string
+          format: date-time
+          description: RFC3339; inside the signed payload, so it cannot be forged on a replayed body.
+          example: "2025-06-01T12:00:00Z"
+        signatures:
+          type: array
+          minItems: 1
+          description: Owner signatures over the intent (JCS with `signatures` removed).
+          items:
+            $ref: '#/components/schemas/Signature'
+
+    ChannelReplaceRequest:
+      type: object
+      description: >-
+        PUT body for a channel: the full re-signed document plus the intent authorizing its installation.
+        Both halves are verified independently — one without the other authorizes nothing.
+      required: [document, authorization]
+      properties:
+        document:
+          $ref: '#/components/schemas/ChannelInput'
+        authorization:
+          $ref: '#/components/schemas/ChannelReplaceIntent'
+
+    ChannelDeleteRequest:
+      type: object
+      description: >-
+        DELETE body for a channel: a signed intent with no `payloadHash`, since a delete carries no
+        document. Must be signed by a stored owner and be fresh.
+      required: [action, target, created, signatures]
+      properties:
+        action:
+          type: string
+          enum: ["delete"]
+        target:
+          $ref: '#/components/schemas/ChannelIntentTarget'
+        created:
+          type: string
+          format: date-time
+          description: RFC3339; within `auth.intent_max_clock_skew` of server time.
+          example: "2025-06-01T12:00:00Z"
+        signatures:
+          type: array
+          minItems: 1
+          description: Owner signatures over the intent (JCS with `signatures` removed).
+          items:
+            $ref: '#/components/schemas/Signature'
 
     Note:
       type: object

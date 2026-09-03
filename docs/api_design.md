@@ -79,8 +79,8 @@ Three postures, by verb:
    or mint item ids after signing, so every playlist item must already carry a UUID `id` (missing slug or
    item id → **`400` `bad_request`**). The signer becomes the resource's **owner**.
 
-2. **PUT (replace) — owner-bound, owner-immutable, replay-bound.** The body is a **`SignedReplaceRequest`**
-   envelope: `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
+2. **PUT (replace) — owner-bound, owner-immutable, replay-bound.** The body is a route-specific replace envelope
+   (**`PlaylistReplaceRequest`**, **`PlaylistGroupReplaceRequest`**, **`ChannelReplaceRequest`**): `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
    are verified independently — one without the other authorizes nothing.
    - **Document:** **identity is immutable and validated, not substituted** — the submitted `id`, `slug`,
      and document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as
@@ -102,7 +102,8 @@ Three postures, by verb:
    signed payload, and because the bound is wall-clock rather than per-feed bookkeeping, a stale intent is
    stale on **every** feed — which is what makes this hold for documents mirrored across feeds.
 
-3. **DELETE — owner-bound, signed delete-intent.** The body is a `SignedDeleteRequest`
+3. **DELETE — owner-bound, signed delete-intent.** The body is a route-specific delete intent
+   (`PlaylistDeleteRequest`, `PlaylistGroupDeleteRequest`, `ChannelDeleteRequest`)
    (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
    exact stored resource (`id` and `slug`), its `created` must fall within the server's freshness window
    (`auth.intent_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
@@ -173,7 +174,7 @@ exceeding it is **`413`** `payload_too_large`, enforced before the body is buffe
 - **POST** — create (open); body must be validly self-signed by its declared curator/publisher.
 - **GET** — fetch one or list.
 - **PUT** — full replacement of the document body (playlist, group, channel); owner-bound and owner-immutable (see Authentication).
-- **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a signed delete-intent (`SignedDeleteRequest`).
+- **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
 - **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 
 **Registry `GET` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). The registry is **read-only over the API** — there is no write endpoint; seed it out-of-band.

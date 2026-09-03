@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -184,5 +185,39 @@ func TestHTTPFetcher_FetchPlaylist_capsRedirects(t *testing.T) {
 	f := NewHTTPFetcher(5*time.Second, 1024, AllowPrivateDestinations(true))
 	if _, err := f.FetchPlaylist(context.Background(), srv.URL); err == nil {
 		t.Fatal("expected redirect cap error")
+	}
+}
+
+// A proxy performs the request on this process's behalf, so the dial guard — which only ever sees the
+// address this process connects to — would vet the proxy and never the attacker-supplied destination.
+// http.DefaultTransport carries ProxyFromEnvironment, so cloning it silently reopens the SSRF path on any
+// deployment that sets HTTP_PROXY; this pins the transport to direct dialling.
+func TestNewHTTPFetcher_neverUsesAnEnvironmentProxy(t *testing.T) {
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("ALL_PROXY", proxy.URL)
+
+	f := NewHTTPFetcher(2*time.Second, 1<<20)
+
+	tr, ok := f.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want *http.Transport", f.client.Transport)
+	}
+	if tr.Proxy != nil {
+		t.Fatal("fetcher transport must not consult a proxy: the proxy would reach the destination for us, bypassing the dial guard")
+	}
+
+	// Behaviourally: the metadata endpoint is refused by the guard rather than forwarded to the proxy.
+	if _, err := f.FetchPlaylist(context.Background(), "http://169.254.169.254/latest/meta-data"); !errors.Is(err, ErrBlockedDestination) {
+		t.Fatalf("FetchPlaylist error = %v, want ErrBlockedDestination", err)
+	}
+	if n := proxyHits.Load(); n != 0 {
+		t.Fatalf("proxy received %d requests; untrusted playlist fetches must never be proxied", n)
 	}
 }

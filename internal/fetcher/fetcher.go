@@ -76,6 +76,12 @@ func NewHTTPFetcher(timeout time.Duration, maxBodyBytes int64, opts ...Option) *
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = dialer.DialContext
+	// Never route these fetches through an environment proxy. The dial guard vets the address this
+	// process connects to; with a proxy configured that address is the proxy's, and the proxy — not this
+	// process — would then connect to the attacker-supplied destination, reaching private ranges and
+	// metadata endpoints the guard exists to refuse. Playlist URLs are untrusted input on an open create
+	// route, so they must be fetched directly or not at all.
+	transport.Proxy = nil
 
 	return &HTTPFetcher{
 		client: &http.Client{
