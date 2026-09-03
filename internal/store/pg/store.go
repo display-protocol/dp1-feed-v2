@@ -755,7 +755,10 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 // Input may repeat the same id (membership order); DISTINCT ON keeps the first occurrence so the row and
 // its item index are always derived from the same body. Only newly inserted rows get an index, which is
 // why nothing is cleared first — an existing playlist's index must survive untouched.
-func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
+// insertMissingPlaylistsBatch inserts referenced playlists this feed does not hold, records their source
+// mappings, and returns the slice membership rows must be written from — which is not necessarily the
+// input, see applySourceMappingWinners.
+func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) ([]store.IngestedPlaylist, error) {
 	// One statement: the data-modifying CTE reports which ids it actually inserted (ON CONFLICT DO NOTHING
 	// returns nothing for rows that already existed), and the outer INSERT indexes only those.
 	const insertMissing = `
@@ -781,7 +784,7 @@ SELECT (elem->>'id')::uuid, playlist_items.id, playlist_items.created_at, (ord -
 FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY AS t(elem, ord)`
 
 	if len(playlists) == 0 {
-		return nil
+		return playlists, nil
 	}
 
 	ids := make([]uuid.UUID, len(playlists))
@@ -789,7 +792,7 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	bodies := make([]string, len(playlists))
 	for i, p := range playlists {
 		if err := requireDocument(p.Raw, "ingested playlist body"); err != nil {
-			return err
+			return nil, err
 		}
 		ids[i] = p.ID
 		slugs[i] = p.Slug
@@ -798,25 +801,88 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	// A tombstoned id is one this feed deleted, so no row exists and the statement below would insert it.
 	// Ingestion must not become a side door around the create-path tombstone guard.
 	if err := lockDocumentIDs(ctx, tx, "playlists", ids); err != nil {
-		return err
+		return nil, err
 	}
 	if err := requireNoneTombstoned(ctx, tx, "playlists", ids); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, insertMissing, ids, slugs, bodies); err != nil {
 		// ON CONFLICT (id) DO NOTHING absorbs id collisions, but a referenced playlist that is new to this
 		// feed can still carry a slug some other live playlist already holds. That is a conflict with
 		// existing state, not a server fault.
 		if conflict := createConflict(err, "referenced playlist"); conflict != nil {
-			return conflict
+			return nil, conflict
 		}
-		return fmt.Errorf("insert referenced playlists: %w", err)
+		return nil, fmt.Errorf("insert referenced playlists: %w", err)
 	}
 	// Record source mappings for every remote reference in this batch, not only the rows just inserted: a
 	// playlist can already be stored (created directly, or ingested from another URI) and still be the
 	// first thing a given URI resolves to. That case is precisely the one the mapping has to cover, since
 	// otherwise the next ingest of that URI would fetch again to learn an id already known here.
-	return recordPlaylistSources(ctx, tx, playlists)
+	if err := recordPlaylistSources(ctx, tx, playlists); err != nil {
+		return nil, err
+	}
+	return applySourceMappingWinners(ctx, tx, playlists)
+}
+
+// applySourceMappingWinners re-points every remote reference at the playlist its URI is mapped to.
+//
+// recordPlaylistSources keeps the FIRST mapping for a URI and ignores later ones, so without this the two
+// halves could disagree: a concurrent request that resolved the same previously-unmapped URI to a
+// different playlist would lose the mapping race yet still write ITS id into membership. The URI would
+// then mean one playlist in playlist_sources and another in the rows derived from it, and a later replace
+// of an unchanged document would silently move membership to the mapped winner.
+//
+// Reading the winners back inside the same transaction settles it: whatever won the insert is what every
+// membership row uses, so one URI means one playlist everywhere. A playlist inserted by the losing
+// resolution stays stored but unreferenced, which is harmless — it is a real, validly signed document that
+// simply nothing links to.
+//
+// Only ID is re-pointed. Slug and Raw are not used to write membership, and rewriting them here would
+// imply this function had fetched the winner's document, which it has not.
+func applySourceMappingWinners(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) ([]store.IngestedPlaylist, error) {
+	uris := make([]string, 0, len(playlists))
+	seen := make(map[string]struct{}, len(playlists))
+	for _, p := range playlists {
+		if p.SourceURI == "" {
+			continue
+		}
+		if _, dup := seen[p.SourceURI]; dup {
+			continue
+		}
+		seen[p.SourceURI] = struct{}{}
+		uris = append(uris, p.SourceURI)
+	}
+	if len(uris) == 0 {
+		return playlists, nil
+	}
+
+	rows, err := tx.Query(ctx, `SELECT uri, playlist_id FROM playlist_sources WHERE uri = ANY($1::text[])`, uris)
+	if err != nil {
+		return nil, fmt.Errorf("read playlist source winners: %w", err)
+	}
+	defer rows.Close()
+	winners := make(map[string]uuid.UUID, len(uris))
+	for rows.Next() {
+		var uri string
+		var id uuid.UUID
+		if err := rows.Scan(&uri, &id); err != nil {
+			return nil, fmt.Errorf("scan playlist source winner: %w", err)
+		}
+		winners[uri] = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read playlist source winners: %w", err)
+	}
+
+	out := make([]store.IngestedPlaylist, len(playlists))
+	copy(out, playlists)
+	for i := range out {
+		if id, ok := winners[out[i].SourceURI]; ok {
+			out[i].ID = id
+		}
+	}
+	return out, nil
 }
 
 // insertPlaylistGroupMembersBatch writes membership rows in playlist order.
@@ -863,7 +929,10 @@ VALUES ($1, $2, $3::jsonb)`
 		return err
 	}
 
-	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
+	// this request resolved (see applySourceMappingWinners).
+	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
+	if err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -879,7 +948,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("insert playlist_group: %w", err)
 	}
 
-	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
+	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, members); err != nil {
 		return fmt.Errorf("insert playlist_group_members: %w", err)
 	}
 
@@ -1025,7 +1094,10 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 
 	// Upsert playlists
-	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
+	// this request resolved (see applySourceMappingWinners).
+	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
+	if err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1047,7 +1119,7 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
 		return fmt.Errorf("clear playlist_group_members: %w", err)
 	}
-	if err := insertPlaylistGroupMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
+	if err := insertPlaylistGroupMembersBatch(ctx, tx, rowID, members); err != nil {
 		return fmt.Errorf("insert playlist_group_members: %w", err)
 	}
 
@@ -1163,7 +1235,10 @@ VALUES ($1, $2, $3::jsonb)`
 		return err
 	}
 
-	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
+	// this request resolved (see applySourceMappingWinners).
+	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
+	if err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1179,7 +1254,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("insert channel: %w", err)
 	}
 
-	if err := insertChannelMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
+	if err := insertChannelMembersBatch(ctx, tx, in.ID, members); err != nil {
 		return fmt.Errorf("insert channel_members: %w", err)
 	}
 
@@ -1325,7 +1400,10 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 
 	// Upsert playlists
-	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
+	// this request resolved (see applySourceMappingWinners).
+	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
+	if err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1347,7 +1425,7 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
 		return fmt.Errorf("clear channel_members: %w", err)
 	}
-	if err := insertChannelMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
+	if err := insertChannelMembersBatch(ctx, tx, rowID, members); err != nil {
 		return fmt.Errorf("insert channel_members: %w", err)
 	}
 

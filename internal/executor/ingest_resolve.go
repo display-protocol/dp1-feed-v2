@@ -203,16 +203,37 @@ func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.
 	if max := e.maxRefs; max > 0 && len(uris) > max {
 		return nil, fmt.Errorf("%w: %d playlist references exceeds the maximum of %d", ErrTooManyReferences, len(uris), max)
 	}
+	// Resolve each DISTINCT URI once and copy the result to every position that names it.
+	//
+	// A document may legitimately repeat a URI, and resolving each occurrence independently made the same
+	// reference answerable differently within one request: two fetches of an unmapped URI straddling a
+	// change at the origin yield two different playlist ids, so the membership rows disagree about what
+	// that one URI means, while only a single URI→id mapping is recorded. A later replace of the unchanged
+	// document would then resolve every occurrence to the mapped winner and silently alter membership.
+	// Resolving once makes one URI mean one playlist for the whole request, and incidentally removes the
+	// duplicate fetches.
+	positions := make(map[string][]int, len(uris))
+	order := make([]string, 0, len(uris))
+	for i, uri := range uris {
+		key := strings.TrimSpace(uri)
+		if _, seen := positions[key]; !seen {
+			order = append(order, key)
+		}
+		positions[key] = append(positions[key], i)
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(8)
 	out := make([]store.IngestedPlaylist, len(uris))
-	for i := range uris {
+	for _, uri := range order {
 		g.Go(func() error {
-			ing, err := e.resolveOnePlaylistRef(ctx, uris[i])
+			ing, err := e.resolveOnePlaylistRef(ctx, uri)
 			if err != nil {
 				return err
 			}
-			out[i] = ing
+			for _, i := range positions[uri] {
+				out[i] = ing
+			}
 			return nil
 		})
 	}

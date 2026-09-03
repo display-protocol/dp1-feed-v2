@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1597,9 +1598,11 @@ func TestCreatePlaylistGroup_referencesAtCapAllowed(t *testing.T) {
 	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	plBody := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl-one","title":"P"}`)
 	plDoc := mustDecodePlaylist(t, plBody)
+	// One lookup covers both positions: the cap counts references in the document, while resolution is
+	// per distinct URI.
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl-one").Return(&store.PlaylistRecord{
 		ID: plID, Slug: "pl-one", Raw: plBody, Body: plDoc,
-	}, nil).Times(2)
+	}, nil).Times(1)
 	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase, executor.WithMaxPlaylistReferences(2))
@@ -1651,6 +1654,65 @@ func TestCreatePlaylistGroup_knownRemoteReferenceResolvesDuringOriginOutage(t *t
 	e := executor.New(mockStore, mockDP1, false, fetch, testPublicBase)
 	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(remoteURI)); err != nil {
 		t.Fatalf("a known remote reference must resolve without contacting its origin, got %v", err)
+	}
+}
+
+// countingFetcher records how many times each URI was fetched.
+type countingFetcher struct {
+	mu   sync.Mutex
+	body []byte
+	hits map[string]int
+}
+
+func (f *countingFetcher) FetchPlaylist(_ context.Context, uri string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hits[uri]++
+	return f.body, nil
+}
+
+// A document may repeat a reference, and every occurrence must mean the same playlist.
+//
+// Resolving each occurrence independently let one URI answer differently within a single request: two
+// fetches straddling a change at the origin produce two ids, so membership rows disagree about what that
+// URI means while only one URI→id mapping is recorded. A later replace of the unchanged document would
+// then quietly move membership to the mapped winner. Resolving once per distinct URI removes the
+// possibility, and the fetch count is the observable proof.
+func TestCreatePlaylistGroup_repeatedReferenceResolvesOnce(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	const remoteURI = "https://elsewhere.test/p.json"
+	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	plBody := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl-one","title":"P"}`)
+	plDoc := mustDecodePlaylist(t, plBody)
+
+	mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), remoteURI).Return(nil, store.ErrNotFound)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), plID.String()).Return(&store.PlaylistRecord{
+		ID: plID, Slug: "pl-one", Raw: plBody, Body: plDoc,
+	}, nil)
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+		if len(in.Playlists) != 3 {
+			t.Fatalf("every position must still be present, got %d", len(in.Playlists))
+		}
+		for i, p := range in.Playlists {
+			if p.ID != plID {
+				t.Fatalf("position %d resolved to %s, want the single shared id %s", i, p.ID, plID)
+			}
+		}
+	}).Return(nil)
+
+	fetch := &countingFetcher{body: plBody, hits: map[string]int{}}
+	e := executor.New(mockStore, mockDP1, false, fetch, testPublicBase)
+	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(remoteURI, remoteURI, remoteURI)); err != nil {
+		t.Fatalf("group create: %v", err)
+	}
+	if got := fetch.hits[remoteURI]; got != 1 {
+		t.Fatalf("a repeated reference must be resolved once, fetched %d times", got)
 	}
 }
 
@@ -1830,9 +1892,11 @@ func TestCreatePlaylistGroup_repeatedURIPreservesOrder(t *testing.T) {
 	plID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	body := []byte(`{"id":"33333333-3333-3333-3333-333333333333"}`)
 	plDoc := mustDecodePlaylist(t, body)
+	// Once, not twice: a repeated URI is resolved a single time and copied to every position it occupies,
+	// so one URI cannot mean two different playlists within a request.
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "same").Return(&store.PlaylistRecord{
 		ID: plID, Slug: "same", Body: plDoc,
-	}, nil).Times(2)
+	}, nil).Times(1)
 
 	signed := []byte(`{"signed":true}`)
 	parsedGroup := mustDecodeGroup(t, signed)

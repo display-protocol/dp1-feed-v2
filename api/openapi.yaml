@@ -1019,11 +1019,12 @@ components:
           type: string
         playlists:
           type: array
-          maxItems: 1000
           description: >-
-            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
-            every reference this feed does not already store becomes an outbound fetch, so the count
-            is bounded before resolution. Over the cap is a `400`.
+            Playlist URIs or slugs. The maximum count is set per deployment by
+            `playlist.max_playlist_references` (default 1000) and is therefore deliberately not fixed
+            here: hard-coding a number would misdescribe any deployment configured differently. Every
+            reference this feed does not already store becomes an outbound fetch, so the count is bounded
+            before resolution; over the configured cap is a `400`.
           items:
             type: string
         curator:
@@ -1063,11 +1064,12 @@ components:
           type: string
         playlists:
           type: array
-          maxItems: 1000
           description: >-
-            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
-            every reference this feed does not already store becomes an outbound fetch, so the count
-            is bounded before resolution. Over the cap is a `400`.
+            Playlist URIs or slugs. The maximum count is set per deployment by
+            `playlist.max_playlist_references` (default 1000) and is therefore deliberately not fixed
+            here: hard-coding a number would misdescribe any deployment configured differently. Every
+            reference this feed does not already store becomes an outbound fetch, so the count is bounded
+            before resolution; over the configured cap is a `400`.
           items:
             type: string
         # Additional fields...
@@ -1111,11 +1113,12 @@ components:
           example: "1.0.0"
         playlists:
           type: array
-          maxItems: 1000
           description: >-
-            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
-            every reference this feed does not already store becomes an outbound fetch, so the count
-            is bounded before resolution. Over the cap is a `400`.
+            Playlist URIs or slugs. The maximum count is set per deployment by
+            `playlist.max_playlist_references` (default 1000) and is therefore deliberately not fixed
+            here: hard-coding a number would misdescribe any deployment configured differently. Every
+            reference this feed does not already store becomes an outbound fetch, so the count is bounded
+            before resolution; over the configured cap is a `400`.
           items:
             type: string
         curators:
@@ -1162,11 +1165,12 @@ components:
           type: string
         playlists:
           type: array
-          maxItems: 1000
           description: >-
-            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
-            every reference this feed does not already store becomes an outbound fetch, so the count
-            is bounded before resolution. Over the cap is a `400`.
+            Playlist URIs or slugs. The maximum count is set per deployment by
+            `playlist.max_playlist_references` (default 1000) and is therefore deliberately not fixed
+            here: hard-coding a number would misdescribe any deployment configured differently. Every
+            reference this feed does not already store becomes an outbound fetch, so the count is bounded
+            before resolution; over the configured cap is a `400`.
           items:
             type: string
         # Additional fields...
