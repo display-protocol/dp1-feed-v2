@@ -356,6 +356,20 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 			wantErr: "write timeout must exceed",
 		},
 		{
+			// Without notification clients the only budget check used to be against the reserve, so a config
+			// could allow 30s per fetch while handing reference-resolving writes a 1s deadline. That is
+			// accepted at startup and then fails every group/channel write that actually fetches, which is
+			// the worst combination: valid-looking config, unserveable requests.
+			name: "write timeout does not cover a fetch when no notification clients are configured",
+			mutate: func(cfg *Config) {
+				cfg.Notifications.Clients = nil
+				cfg.Playlist.FetchTimeout = 30 * time.Second
+				cfg.Server.ResponseWriteReserve = time.Second
+				cfg.Server.WriteTimeout = 2 * time.Second
+			},
+			wantErr: "write timeout must exceed playlist fetch timeout plus response write reserve",
+		},
+		{
 			name: "non-positive response write reserve",
 			mutate: func(cfg *Config) {
 				cfg.Server.ResponseWriteReserve = 0

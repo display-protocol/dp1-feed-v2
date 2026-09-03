@@ -165,6 +165,13 @@ func requireNoneTombstoned(ctx context.Context, q interface {
 // exists, the caller's expected updated_at was stale (a concurrent write, or a delete and re-create,
 // landed) → ErrConcurrentModification; if the row is gone → ErrNotFound.
 //
+// The row-is-gone case is deliberately ErrNotFound (404) rather than ErrConcurrentModification (409),
+// even though it is reached after the executor authorized against a row it had loaded. 409 carries
+// "re-read and retry", and that advice would be wrong here: deleting an id tombstones it, so the resource
+// cannot come back and no number of retries will succeed. 404 is both accurate and terminal. The
+// deleted-and-re-created case is genuinely different — the row exists, the caller's generation is simply
+// stale — and does return 409, where retrying can succeed.
+//
 // table is a fixed internal constant, never client input, so interpolating it into the existence probe
 // carries no injection risk. The probe runs on the same tx/conn as the failed write, so it observes the
 // same snapshot.

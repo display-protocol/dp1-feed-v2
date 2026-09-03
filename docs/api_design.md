@@ -166,10 +166,17 @@ body or diffing it against your request.
 **Request bodies are decoded strictly.** An unknown or misspelled JSON member, or a body holding more
 than one JSON value, is a **`400`** naming the field — never silently dropped, because a dropped member
 changes the bytes the client signed. Every request schema in OpenAPI therefore declares
-`additionalProperties: false`, so a generated client cannot construct a body the server will reject. The
-few deliberately opaque values (`inlineManifest`, `defaults`, `dynamicQuery`, and the other DP-1
-sub-objects) are left unconstrained because their member sets belong to dp1-go's published schemas, not
-to this document — but they are still decoded strictly, so unknown members inside them are rejected too.
+`additionalProperties: false`, so a generated client cannot construct a body the server will reject.
+
+**Opaque values are the exception, and the boundary is worth knowing.** A few DP-1 sub-objects
+(`inlineManifest`, `defaults`, `dynamicQuery`, and friends) are carried as raw JSON because their member
+sets belong to dp1-go's published schemas rather than to this document. Strict decoding stops at that
+boundary: it rejects an unknown member *beside* one of these values, but does **not** recurse into it, so
+an unknown member **inside** an opaque value is not a `400`. What happens next depends on the deployment:
+with extensions **enabled**, dp1-go validates `inlineManifest` against the ref-manifest schema, so a
+malformed manifest still fails the write; with extensions **disabled**, the core schema does not describe
+the field and DP-1 tolerates unknown members, so it is stored and returned unchecked. Either way the
+value is part of the signed payload and is preserved as sent — the feed never edits it to make it fit.
 Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
 `payload_too_large`, enforced before the body is buffered for authentication.
 
@@ -242,6 +249,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **401** | `unauthorized` | Missing authentication — a mutating request whose body carries no signatures (`IsSignaturesRequiredError`; also enforced by `RequireSignatures`). |
 | **403** | `forbidden` | Signature is valid but the signer is not an owner of the resource, or a PUT tried to change the immutable owner set (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
+| **404** | `not_found` | The target was **deleted** between authorization and the write. Deliberately not a `409`: the id is tombstoned, so "re-read and retry" could never succeed, whereas `404` is both accurate and terminal. A resource deleted *and re-created* in that window is a `409` instead, because the row exists and a retry can succeed. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
 | **409** | `conflict` | `POST` collided with a **live** resource: the `id` or `slug` is already taken. A lost-response retry — `GET` the resource; a slug collision needs a different `slug`. Do **not** republish under a new id. |

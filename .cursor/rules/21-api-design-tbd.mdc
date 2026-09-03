@@ -55,7 +55,7 @@ alwaysApply: true
 ## Error model
 
 - Body shape: `{"error":"<stable_code>","message":"<detail>"}` — see `internal/httpserver/errors.go`.
-- Typical codes: `bad_request`, `validation_error`, `signature_invalid`, `signature_verification_failed`, `invalid_timestamp` (400); `unauthorized` (401); `forbidden` (403); `not_found`, `extensions_disabled` (404); `conflict` (409 — concurrent change, a live id/slug collision on create, or a tombstoned id reused; these need different client actions); `payload_too_large` (413); `internal_error` (500).
+- Typical codes: `bad_request`, `validation_error`, `signature_invalid`, `signature_verification_failed`, `invalid_timestamp` (400); `unauthorized` (401); `forbidden` (403); `not_found`, `extensions_disabled` (404); `conflict` (409 — concurrent change, a live id/slug collision on create, or a tombstoned id reused; these need different client actions). A target **deleted** between authorization and write is `404`, not `409`: the id is tombstoned so retrying cannot succeed; `payload_too_large` (413); `internal_error` (500).
 - Prefer branching on **`error`**; **`message`** may vary.
 
 ## HTTP semantics (summary)

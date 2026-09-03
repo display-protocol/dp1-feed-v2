@@ -306,6 +306,15 @@ func (c *Config) validate() error {
 	if c.Server.WriteTimeout <= c.Server.ResponseWriteReserve {
 		return fmt.Errorf("server write timeout must exceed response write reserve")
 	}
+	// The request deadline handed to reference-resolving mutations is write_timeout - response_write_reserve,
+	// and a group or channel write may spend up to fetch_timeout resolving a single remote reference. If the
+	// budget is smaller than that, the deadline cancels a fetch the operator explicitly allowed time for and
+	// the write fails with a generic error — a configuration that looks valid but cannot serve the writes it
+	// accepts. Checked for every deployment, not only those with notification clients: groups fan out the
+	// same way channels do.
+	if c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Server.ResponseWriteReserve {
+		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus response write reserve")
+	}
 	if c.Playlist.MaxPlaylistReferences < 0 {
 		return fmt.Errorf("max playlist references must not be negative")
 	}
