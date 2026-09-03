@@ -121,38 +121,8 @@ func createConflict(err error, resource string) error {
 	}
 }
 
-// deleteConflict classifies a refused delete. The membership tables reference documents with ON DELETE
-// RESTRICT, so removing a document a group or channel still lists raises a foreign-key violation rather
-// than quietly emptying that group. Restrict is the right policy; reporting it as 500 was not, because
-// the caller can fix it by removing the references and retrying.
-//
-// resource is an internal constant, never client input.
-func deleteConflict(err error, resource string) error {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		return nil
-	}
-	// Both codes matter. An explicit ON DELETE RESTRICT raises 23001 (restrict_violation), which is what
-	// the membership tables use today; 23503 (foreign_key_violation) is what NO ACTION and deferred
-	// checks raise. Matching only the better-known 23503 would have made this classification dead code.
-	if pgErr.Code != restrictViolationCode && pgErr.Code != foreignKeyViolationCode {
-		return nil
-	}
-	return &store.ConflictError{
-		Kind:   store.ErrStillReferenced,
-		Detail: fmt.Sprintf("this %s is still referenced by a group or channel; remove those references first", resource),
-	}
-}
-
 // uniqueViolationCode is the SQLSTATE Postgres raises for a unique or primary-key violation.
 const uniqueViolationCode = "23505"
-
-// SQLSTATEs for a delete refused by a referencing row: 23001 for an explicit RESTRICT, 23503 for a
-// NO ACTION or deferred foreign-key check.
-const (
-	restrictViolationCode   = "23001"
-	foreignKeyViolationCode = "23503"
-)
 
 // requireNotTombstoned fails a create whose id this feed has already deleted. It runs on the caller's
 // transaction so the check and the insert commit together, and callers must hold lockDocumentID first.
@@ -668,21 +638,6 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpd
 	return s.deleteDocumentRow(ctx, "playlists", idOrSlug, expectedUpdatedAt)
 }
 
-// documentResourceName maps an internal table name to the noun used in client-facing messages, so an
-// error never leaks a schema identifier.
-func documentResourceName(table string) string {
-	switch table {
-	case "playlists":
-		return "playlist"
-	case "playlist_groups":
-		return "playlist-group"
-	case "channels":
-		return "channel"
-	default:
-		return "document"
-	}
-}
-
 // deleteDocumentRow is the shared conditional delete for the three document tables. It resolves the row
 // id (accepting a UUID or a slug), deletes only when updated_at still matches what the caller authorized
 // against, and classifies a zero-row delete as ErrConcurrentModification or ErrNotFound.
@@ -715,9 +670,6 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 
 	ct, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE id = $1 AND updated_at = $2", rowID, expectedUpdatedAt)
 	if err != nil {
-		if conflict := deleteConflict(err, documentResourceName(table)); conflict != nil {
-			return conflict
-		}
 		return fmt.Errorf("delete %s: %w", table, err)
 	}
 	if ct.RowsAffected() == 0 {

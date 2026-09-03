@@ -58,8 +58,9 @@ CREATE INDEX IF NOT EXISTS idx_channels_created_id ON channels (created_at, id);
 -- position 0 is the first entry in the group document's playlists[] URI array.
 -- PK (playlist_group_id, position) allows the same playlist_id at multiple
 -- positions when the document repeats a URI. ON DELETE CASCADE removes links
--- when the group is deleted; RESTRICT on playlist prevents deleting a playlist
--- that is still referenced by any group.
+-- when the group is deleted. The playlist-side rule was RESTRICT here and is
+-- changed to CASCADE by migration 000005 (see that file for why: RESTRICT let a
+-- third party veto a playlist owner's own deletion).
 CREATE TABLE IF NOT EXISTS playlist_group_members (
     playlist_group_id UUID NOT NULL REFERENCES playlist_groups (id) ON DELETE CASCADE,
     playlist_id UUID NOT NULL REFERENCES playlists (id) ON DELETE RESTRICT,

@@ -100,10 +100,17 @@ func New(signingKeyHex, kid string) (*Service, error) {
 	return &Service{priv: priv, kid: kid}, nil
 }
 
-// mergeSignaturesReplacingSameKid builds the post-sign "signatures" array: drop every entry in raw
-// whose Kid matches newSig (typically prior feed signatures), keep all others in order, then append newSig.
-// A legacy top-level "signature" is not part of this array and is preserved by appendFeedSignature.
-func mergeSignaturesReplacingSameKid(raw []byte, newSig playlist.Signature) ([]playlist.Signature, error) {
+// mergeSignaturesReplacingPriorFeedSig builds the post-sign "signatures" array: drop the feed's own prior
+// signature, keep every other entry in order, then append newSig. A legacy top-level "signature" is not
+// part of this array and is preserved by appendFeedSignature.
+//
+// The match is on kid AND role, not kid alone. Nothing stops a curator or publisher from being the same
+// key as the feed — a self-hosted deployment whose operator also curates is the obvious case — and
+// matching on kid alone silently deleted that owner's `curator`/`publisher` attestation, leaving only a
+// `feed` entry for the key. The document then no longer carried the owner signature it was authorized
+// with, and a role-aware consumer would be right to reject it. Only the feed's own previous entry is
+// replaced; every attestation the feed did not make is preserved.
+func mergeSignaturesReplacingPriorFeedSig(raw []byte, newSig playlist.Signature) ([]playlist.Signature, error) {
 	var doc struct {
 		Signatures []playlist.Signature `json:"signatures"`
 	}
@@ -112,7 +119,7 @@ func mergeSignaturesReplacingSameKid(raw []byte, newSig playlist.Signature) ([]p
 	}
 	out := make([]playlist.Signature, 0, len(doc.Signatures)+1)
 	for _, s := range doc.Signatures {
-		if s.Kid == newSig.Kid {
+		if s.Kid == newSig.Kid && s.Role == newSig.Role {
 			continue
 		}
 		out = append(out, s)
@@ -161,7 +168,7 @@ func (s *Service) appendFeedSignature(raw []byte, ts time.Time) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
+	merged, err := mergeSignaturesReplacingPriorFeedSig(raw, sig)
 	if err != nil {
 		return nil, err
 	}

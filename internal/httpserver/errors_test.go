@@ -165,22 +165,3 @@ func TestMapStoreError_alreadyExists(t *testing.T) {
 		t.Fatalf("message must not be confusable with the tombstone case, got %q", msg)
 	}
 }
-
-// A delete refused because a group or channel still lists the document is the client's to fix, so it must
-// reach them as an actionable 409 rather than the 500 an unclassified driver error produced. The detail is
-// returned verbatim, so this also pins that it never carries a table or constraint name.
-func TestMapStoreError_stillReferenced(t *testing.T) {
-	t.Parallel()
-	detail := "this playlist is still referenced by a group or channel; remove those references first"
-	wrapped := fmt.Errorf("delete playlist: %w", &store.ConflictError{Kind: store.ErrStillReferenced, Detail: detail})
-	st, code, msg := mapExecutorError(fmt.Errorf("store: %w", wrapped))
-	if st != http.StatusConflict || code != "conflict" {
-		t.Fatalf("got status=%d code=%q, want 409/conflict", st, code)
-	}
-	if msg != detail {
-		t.Fatalf("message should be the bare detail, got %q", msg)
-	}
-	if strings.Contains(msg, "_fkey") || strings.Contains(msg, "playlist_group_members") {
-		t.Fatalf("message must not leak schema identifiers, got %q", msg)
-	}
-}

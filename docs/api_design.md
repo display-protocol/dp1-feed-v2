@@ -112,6 +112,15 @@ Three postures, by verb:
    of the stored resource. DP-1 defines no delete document; this envelope is feed-local. The delete is
    conditional on the generation observed at authorization (**`409`** if the resource changed in between),
    and it **tombstones the id** in the same transaction.
+   - **A third party cannot block it.** Creation is open, so anyone may publish a group or channel
+     referencing a playlist they do not own. Those references do **not** prevent the playlist owner's
+     delete: the membership links are removed with the playlist. Otherwise a stranger could veto an
+     owner's deletion indefinitely, since only that stranger may edit their own document.
+   - The referencing documents are **not** modified — they are signed, and the feed does not own them. They
+     keep listing the deleted playlist's URI (now a **`404`**), and a later `PUT` of one will fail to
+     resolve that reference until its owner publishes an updated document. Membership rows are a derived
+     index over those documents, not content in their own right: a group is served from its stored
+     document, and the rows only back the `?playlist-group=` / `?channel=` list filters.
 
 **Membership ingestion is reference-only.** When a group or channel names a playlist URL, the feed
 **links** that playlist but never modifies it. A referenced id already stored here is linked as-is —
@@ -228,7 +237,8 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
-| **409** | `conflict` | `POST` named an id this feed has already deleted (tombstoned); ids are not reusable — create under a new id. |
+| **409** | `conflict` | `POST` collided with a **live** resource: the `id` or `slug` is already taken. A lost-response retry — `GET` the resource; a slug collision needs a different `slug`. Do **not** republish under a new id. |
+| **409** | `conflict` | `POST` named an id this feed has already **deleted** (tombstoned); ids are not reusable — create under a new id. Distinct from the live collision above, and the only 409 where a new id is the right action. |
 | **413** | `payload_too_large` | Request body exceeds `server.max_request_bytes` (enforced before the body is buffered). |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
 

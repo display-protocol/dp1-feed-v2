@@ -51,16 +51,8 @@ var ErrDocumentDeleted = errors.New("document id was deleted and cannot be reuse
 // gone for good rather than already taken — so the two must not share a message.
 var ErrAlreadyExists = errors.New("document already exists")
 
-// ErrStillReferenced is returned when a delete is refused because a group or channel still lists the
-// document as a member (the membership tables use ON DELETE RESTRICT).
-//
-// This is a client-correctable conflict, not a fault: the caller removes the references, then retries.
-// Left unclassified it surfaced as 500, even though the API documents the delete as failing when the
-// resource is referenced. Restrict is deliberate — cascading would silently empty someone else's group.
-var ErrStillReferenced = errors.New("document is still referenced")
-
 // ConflictError explains a refused mutation in the caller's terms, and carries the sentinel that
-// classifies it (ErrAlreadyExists, ErrStillReferenced) so callers can branch with errors.Is.
+// classifies it (currently ErrAlreadyExists) so callers can branch with errors.Is.
 //
 // Detail is reported to the client verbatim, which is the whole reason this type exists: err.Error() on a
 // wrapped sentinel hands back the internal chain ("store: document already exists: ..."), which stutters

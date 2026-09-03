@@ -201,7 +201,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
-          $ref: '#/components/responses/DeletedIdConflict'
+          $ref: '#/components/responses/CreateConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
 
@@ -278,9 +278,14 @@ paths:
       tags: [playlists]
       summary: Delete playlist
       description: >-
-        Deletes a playlist (fails if referenced by groups/channels). The request body is a signed
-        delete-intent (`PlaylistDeleteRequest`) that must target this playlist and be signed by one of its
-        curators within the freshness window.
+        Deletes a playlist. The request body is a signed delete-intent (`PlaylistDeleteRequest`) that must
+        target this playlist and be signed by one of its curators within the freshness window.
+
+        References from groups or channels do **not** block this: creation is open, so any third party
+        could otherwise veto an owner's deletion indefinitely. Their membership links are removed with the
+        playlist. Those documents are signed and therefore left untouched — they keep listing the deleted
+        playlist's URI, which now resolves to `404`, and a later PUT of one will fail to resolve it until
+        its owner publishes an updated document.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -353,7 +358,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
-          $ref: '#/components/responses/DeletedIdConflict'
+          $ref: '#/components/responses/CreateConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
 
@@ -506,7 +511,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
-          $ref: '#/components/responses/DeletedIdConflict'
+          $ref: '#/components/responses/CreateConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '404':
@@ -1630,18 +1635,41 @@ components:
             error: conflict
             message: the resource changed since it was authorized; re-read and retry
 
-    DeletedIdConflict:
+    CreateConflict:
       description: >-
-        The `id` names a document this feed has already deleted. Ids are not reusable, so a tombstoned id
-        cannot be re-created — this is what stops a previously published document from being replayed to
-        resurrect a deleted resource. Create the resource under a new id.
+        The create was refused because the id or slug is not available. Two distinct situations share this
+        status, and they need opposite client actions, so branch on the message rather than retrying
+        blindly:
+
+        - **Live collision** — a resource with this `id` or `slug` already exists. Usually a retry of a
+          POST whose response was lost, in which case the resource is already published: `GET` it and
+          carry on. A slug collision instead means the name is taken by a different resource and the
+          document needs a new `slug`.
+
+        - **Tombstoned id** — this feed has already deleted a document with this `id`. Ids are never
+          reusable, which is what stops a previously published document from being replayed to resurrect
+          a deleted resource. Only here must the client publish under a **new id**; doing that for a live
+          collision would duplicate an existing resource.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error: conflict
-            message: document id was deleted and cannot be reused
+          examples:
+            liveIdCollision:
+              summary: Live id collision — the resource already exists
+              value:
+                error: conflict
+                message: a playlist with this id already exists
+            liveSlugCollision:
+              summary: Live slug collision — choose another slug
+              value:
+                error: conflict
+                message: a playlist with this slug already exists
+            deletedId:
+              summary: Tombstoned id — republish under a new id
+              value:
+                error: conflict
+                message: document id was deleted and cannot be reused
 
     PayloadTooLarge:
       description: The request body exceeds the configured size limit (server.max_request_bytes).

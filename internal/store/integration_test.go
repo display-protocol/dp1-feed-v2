@@ -63,6 +63,23 @@ func newStore(t *testing.T) store.Store {
 	return testProvider.NewStore()
 }
 
+// jsonEqual compares two JSON documents by value, not bytes.
+//
+// Byte comparison would be wrong here: the jsonb column re-orders keys and normalizes numeric text on the
+// way in. That is JCS-neutral (signatures still verify), but it means stored bytes are not the submitted
+// bytes, so "unchanged document" has to be asserted semantically.
+func jsonEqual(t *testing.T, a, b []byte) bool {
+	t.Helper()
+	var av, bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		t.Fatalf("unmarshal a: %v", err)
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		t.Fatalf("unmarshal b: %v", err)
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
 // assertDeepEqual fails the test if want and got differ. It uses [reflect.DeepEqual],
 // which compares struct fields, slice elements, and map keys/values recursively.
 func assertDeepEqual[T any](t *testing.T, label string, want, got T) {
@@ -1407,28 +1424,39 @@ func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
 	}
 }
 
-func TestIntegration_PlaylistGroup_cannotDeleteReferencedPlaylist(t *testing.T) {
+// A playlist owner's deletion must not be blockable by someone else's document.
+//
+// Creation is open, so any caller can self-sign a group referencing an already-stored playlist they do
+// not own. While the membership FK was ON DELETE RESTRICT that reference vetoed the playlist owner's own
+// signed DELETE, and the documented remedy — remove the references — was impossible for them, since only
+// the group's owner may edit or delete the group. Migration 000005 makes membership CASCADE instead.
+//
+// The rows are a derived index, not owned content: a group is served from its stored signed document, so
+// cascading leaves that document byte-for-byte intact (asserted below) and only drops the membership row
+// that backs the `?playlist-group=` filter.
+func TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
-	// Create playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000005")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced"}
 	if err := st.CreatePlaylist(ctx, playlistID, "referenced-pl", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create group that references it
+	// The group is a third party's: it references the playlist without its owner's involvement, which is
+	// exactly the situation that used to deadlock.
 	groupID := uuid.MustParse("00000000-0000-0000-0000-000000000006")
+	groupRaw := rawDoc(t, playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "referencing-group",
+		Title:     "Referencing Group",
+		Playlists: []string{"referenced-pl"},
+	})
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "referencing-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "referencing-group",
-			Title:     "Referencing Group",
-			Playlists: []string{"referenced-pl"},
-		}),
+		Raw:  groupRaw,
 		Playlists: []store.IngestedPlaylist{
 			{ID: playlistID, Slug: "referenced-pl", Raw: rawDoc(t, pl)},
 		},
@@ -1437,41 +1465,35 @@ func TestIntegration_PlaylistGroup_cannotDeleteReferencedPlaylist(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	// Try to delete the playlist - should fail due to FK constraint (ON DELETE RESTRICT)
-	err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String()))
-	if err == nil {
-		t.Fatal("expected error when deleting playlist referenced by group, got nil")
-	}
-	// The refusal must be a classified conflict, not a raw driver error: the API documents this DELETE as
-	// failing while referenced, and the caller fixes it by removing the references and retrying. Left
-	// unclassified it reached the client as 500, which reads as "the server broke", not "undo this first".
-	if !errors.Is(err, store.ErrStillReferenced) {
-		t.Fatalf("want ErrStillReferenced for a referenced playlist, got %v", err)
-	}
-	var conflict *store.ConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("want a store.ConflictError carrying client-facing detail, got %T", err)
-	}
-	// Detail is returned to clients verbatim, so it must name the resource, not the table or constraint.
-	if !strings.Contains(conflict.Detail, "playlist") || strings.Contains(conflict.Detail, "playlist_group_members") {
-		t.Fatalf("detail should name the resource without leaking schema identifiers, got %q", conflict.Detail)
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		t.Fatal("expected FK constraint error, got ErrNotFound")
-	}
-
-	// Verify playlist still exists
-	_, err = st.GetPlaylist(ctx, playlistID.String())
-	if err != nil {
-		t.Fatalf("playlist should still exist after failed delete: %v", err)
-	}
-
-	// Delete group first, then playlist should be deletable
-	if err := st.DeletePlaylistGroup(ctx, groupID.String(), grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
-		t.Fatal(err)
-	}
 	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
-		t.Fatalf("should be able to delete playlist after removing references: %v", err)
+		t.Fatalf("a playlist owner's delete must not be blocked by a third party's reference: %v", err)
+	}
+
+	if _, err := st.GetPlaylist(ctx, playlistID.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("playlist should be gone after delete, got %v", err)
+	}
+
+	// The referencing group survives untouched. Its document is signed, so the feed must not edit it: it
+	// still lists the deleted playlist's URI, and its bytes must be unchanged.
+	grp, err := st.GetPlaylistGroup(ctx, groupID.String())
+	if err != nil {
+		t.Fatalf("third party's group must survive the playlist delete: %v", err)
+	}
+	if !jsonEqual(t, grp.Raw, groupRaw) {
+		t.Fatalf("group document must be untouched by another resource's deletion:\n got %s\nwant %s", grp.Raw, groupRaw)
+	}
+
+	// The membership row is gone, so the group filter no longer offers a playlist that no longer exists.
+	items, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:               10,
+		Sort:                store.SortAsc,
+		PlaylistGroupFilter: groupID.String(),
+	})
+	if err != nil {
+		t.Fatalf("list by group filter: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("membership should have cascaded away, got %d rows", len(items))
 	}
 }
 
@@ -1908,29 +1930,30 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	}
 }
 
-func TestIntegration_Channel_cannotDeleteReferencedPlaylist(t *testing.T) {
+// Channel counterpart of TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership:
+// a channel owned by someone else must not be able to block the playlist owner's delete either.
+func TestIntegration_Channel_deletingReferencedPlaylistCascadesMembership(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
-	// Create playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000009")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced by Channel"}
 	if err := st.CreatePlaylist(ctx, playlistID, "ref-by-channel", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create channel that references it
 	channelID := uuid.MustParse("00000000-0000-0000-0000-00000000000a")
+	channelRaw := rawDoc(t, channels.Channel{
+		ID:        channelID.String(),
+		Slug:      "referencing-channel",
+		Title:     "Referencing Channel",
+		Version:   "1.0.0",
+		Playlists: []string{"ref-by-channel"},
+	})
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "referencing-channel",
-		Raw: rawDoc(t, channels.Channel{
-			ID:        channelID.String(),
-			Slug:      "referencing-channel",
-			Title:     "Referencing Channel",
-			Version:   "1.0.0",
-			Playlists: []string{"ref-by-channel"},
-		}),
+		Raw:  channelRaw,
 		Playlists: []store.IngestedPlaylist{
 			{ID: playlistID, Slug: "ref-by-channel", Raw: rawDoc(t, pl)},
 		},
@@ -1939,27 +1962,32 @@ func TestIntegration_Channel_cannotDeleteReferencedPlaylist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Try to delete the playlist - should fail due to FK constraint
-	err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String()))
-	if err == nil {
-		t.Fatal("expected error when deleting playlist referenced by channel, got nil")
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		t.Fatal("expected FK constraint error, got ErrNotFound")
-	}
-
-	// Verify playlist still exists
-	_, err = st.GetPlaylist(ctx, playlistID.String())
-	if err != nil {
-		t.Fatalf("playlist should still exist after failed delete: %v", err)
-	}
-
-	// Delete channel first, then playlist should be deletable
-	if err := st.DeleteChannel(ctx, channelID.String(), chUpdatedAt(t, ctx, st, channelID.String())); err != nil {
-		t.Fatal(err)
-	}
 	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
-		t.Fatalf("should be able to delete playlist after removing references: %v", err)
+		t.Fatalf("a playlist owner's delete must not be blocked by a third party's channel: %v", err)
+	}
+
+	if _, err := st.GetPlaylist(ctx, playlistID.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("playlist should be gone after delete, got %v", err)
+	}
+
+	ch, err := st.GetChannel(ctx, channelID.String())
+	if err != nil {
+		t.Fatalf("third party's channel must survive the playlist delete: %v", err)
+	}
+	if !jsonEqual(t, ch.Raw, channelRaw) {
+		t.Fatalf("channel document must be untouched by another resource's deletion:\n got %s\nwant %s", ch.Raw, channelRaw)
+	}
+
+	items, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:         10,
+		Sort:          store.SortAsc,
+		ChannelFilter: channelID.String(),
+	})
+	if err != nil {
+		t.Fatalf("list by channel filter: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("membership should have cascaded away, got %d rows", len(items))
 	}
 }
 
