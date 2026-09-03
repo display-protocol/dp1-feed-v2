@@ -1259,6 +1259,7 @@ components:
 
     ChannelRegistry:
       type: object
+      additionalProperties: false
       required:
         - publishers
       properties:
@@ -1272,6 +1273,7 @@ components:
 
     ChannelRegistryPublisher:
       type: object
+      additionalProperties: false
       required:
         - name
         - channel_urls

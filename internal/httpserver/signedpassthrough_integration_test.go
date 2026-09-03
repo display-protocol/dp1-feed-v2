@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/display-protocol/dp1-go/playlist"
@@ -580,4 +581,54 @@ func TestIntegration_WriteResponseMatchesGet(t *testing.T) {
 	if !bytes.Equal(patchResp, getResp2) {
 		t.Fatalf("PATCH response must be byte-identical to GET:\n PATCH=%s\n GET  =%s", patchResp, getResp2)
 	}
+}
+
+// TestIntegration_SignedTrailingBytesIs400: a signed body followed by trailing content is a
+// client-correctable 400 (bindDocument), not a misleading 401 from the auth middleware's signature peek.
+func TestIntegration_SignedTrailingBytesIs400(t *testing.T) {
+	srv := newIntegrationServer(t)
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"f0f0f0f0-2222-4333-8444-555555555555","slug":"trailing",` +
+		`"title":"Trailing","created":"2020-01-02T03:04:05Z",` +
+		`"items":[{"id":"f1f1f1f1-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]}`)
+	signed, _ := curatorSigned(t, unsigned)
+	trailing := append(append([]byte(nil), signed...), []byte(`{"garbage":true}`)...)
+
+	// Send the trailing bytes verbatim (the JSON helpers would reject them before transport). No API key:
+	// the request takes the signature path, whose first JSON value carries signatures[].
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playlists", bytes.NewReader(trailing))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("signed body with trailing content: status=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "bad_request" {
+		t.Fatalf("want bad_request, got %+v", resp)
+	}
+}
+
+// TestIntegration_RegistryRejectsUnknownField: strict decoding applies to the registry PUT too, so its
+// OpenAPI schemas declare additionalProperties: false. An unknown member is a 400, not a silent drop.
+func TestIntegration_RegistryRejectsUnknownField(t *testing.T) {
+	srv := newIntegrationServer(t)
+	chURL := "http://example.com/api/v1/channels/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	// Unknown member on the publisher object.
+	pubExtra := map[string]any{"publishers": []map[string]any{{"name": "P", "channel_urls": []string{chURL}, "extra": 1}}}
+	body := doRaw(t, srv, http.MethodPut, "/api/v1/registry/channels", pubExtra, http.StatusBadRequest, true)
+	var resp ErrorResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "bad_request" {
+		t.Fatalf("registry publisher unknown field: want bad_request, got %+v", resp)
+	}
+
+	// Unknown member on the top-level registry object.
+	topExtra := map[string]any{"publishers": []map[string]any{{"name": "P", "channel_urls": []string{chURL}}}, "extra": 1}
+	doRaw(t, srv, http.MethodPut, "/api/v1/registry/channels", topExtra, http.StatusBadRequest, true)
 }

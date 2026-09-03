@@ -112,7 +112,10 @@ func SignatureOrAPIKeyAuth(secret string, log *zap.Logger) gin.HandlerFunc {
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-		if err := json.Unmarshal(body, &bodyCheck); err != nil {
+		// Decode only the first JSON value, not the whole body: json.Unmarshal rejects a valid object
+		// followed by trailing bytes, which would make a signed-but-trailing request a misleading 401.
+		// Using a Decoder lets the handler's bindDocument return the documented 400 for trailing content.
+		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&bodyCheck); err != nil {
 			log.Warn("unauthorized: invalid JSON body", zap.String("path", c.Request.URL.Path), zap.Error(err))
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing authentication: provide API key or signatures"})
 			return
