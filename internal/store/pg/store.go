@@ -42,6 +42,26 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// requireDocument guards the write path: a document is persisted as the raw bytes the executor signed,
+// so an empty payload here is a programming error, not a client error.
+func requireDocument(raw json.RawMessage, label string) error {
+	if len(raw) == 0 {
+		return fmt.Errorf("nil %s", label)
+	}
+	return nil
+}
+
+// scanDocument turns a jsonb column into the record pair (Raw, Body). Raw is copied out of the scan
+// buffer because the record outlives the row iteration; Body is the decoded view (see store.PlaylistRecord).
+func scanDocument[T any](raw []byte, label string) (json.RawMessage, T, error) {
+	body, err := utils.DecodeJSONB[T](raw, label)
+	if err != nil {
+		var zero T
+		return nil, zero, err
+	}
+	return append(json.RawMessage(nil), raw...), body, nil
+}
+
 // NewStore wraps a pgx pool as a store.Store (created_at/updated_at use column defaults; updated_at is refreshed by triggers).
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
@@ -60,19 +80,16 @@ func (s *Store) Ping(ctx context.Context) error {
 //
 // Process: insert the playlist row, then derive playlist_item_index rows from body.items
 // (array index → position). Missing or non-array "items" yields no index rows; each item needs a UUID "id".
-func (s *Store) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, body *playlist.Playlist) error {
+func (s *Store) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error {
 	const insertPlaylist = `
 INSERT INTO playlists (id, slug, body)
 VALUES ($1, $2, $3::jsonb)
 RETURNING created_at`
 
-	if body == nil {
-		return fmt.Errorf("nil playlist body")
-	}
-	bodyJSON, err := utils.EncodeJSONB(body)
-	if err != nil {
+	if err := requireDocument(raw, "playlist body"); err != nil {
 		return err
 	}
+	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -124,11 +141,9 @@ WHERE slug = $1`
 		}
 		return nil, fmt.Errorf("select playlist: %w", err)
 	}
-	pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-	if err != nil {
+	if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 		return nil, err
 	}
-	rec.Body = pl
 	return &rec, nil
 }
 
@@ -399,11 +414,9 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan: %w", err)
 		}
-		pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 			return nil, "", err
 		}
-		rec.Body = pl
 		out = append(out, rec)
 	}
 
@@ -417,20 +430,21 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 }
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, body *playlist.Playlist) error {
+// The slug column follows the document's "slug" when present, so the row is addressable by the slug it
+// serves; a document without a slug keeps the row's.
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage) error {
 	const (
-		updateByID     = `UPDATE playlists SET body = $2::jsonb WHERE id = $1 RETURNING created_at`
+		updateByID = `UPDATE playlists
+SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
+WHERE id = $1 RETURNING created_at`
 		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
 
-	if body == nil {
-		return fmt.Errorf("nil playlist body")
-	}
-	bodyJSON, err := utils.EncodeJSONB(body)
-	if err != nil {
+	if err := requireDocument(raw, "playlist body"); err != nil {
 		return err
 	}
+	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -539,13 +553,12 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	slugs := make([]string, len(playlists))
 	bodies := make([]string, len(playlists))
 	for i, p := range playlists {
-		ids[i] = p.ID
-		slugs[i] = p.Slug
-		b, err := utils.EncodeJSONB(p.Body)
-		if err != nil {
+		if err := requireDocument(p.Raw, "ingested playlist body"); err != nil {
 			return err
 		}
-		bodies[i] = string(b)
+		ids[i] = p.ID
+		slugs[i] = p.Slug
+		bodies[i] = string(p.Raw)
 	}
 	if _, err := tx.Exec(ctx, upsertPlaylists, ids, slugs, bodies); err != nil {
 		return fmt.Errorf("upsert playlist rows: %w", err)
@@ -600,10 +613,10 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
-	groupJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
 		return err
 	}
+	groupJSON := []byte(in.Raw)
 
 	if _, err := tx.Exec(ctx, insertGroup, in.ID, in.Slug, groupJSON); err != nil {
 		return fmt.Errorf("insert playlist_group: %w", err)
@@ -649,11 +662,9 @@ WHERE slug = $1`
 		}
 		return nil, fmt.Errorf("select playlist_group: %w", err)
 	}
-	g, err := utils.DecodeJSONB[playlistgroup.Group](raw, "playlist-group body")
-	if err != nil {
+	if rec.Raw, rec.Body, err = scanDocument[playlistgroup.Group](raw, "playlist-group body"); err != nil {
 		return nil, err
 	}
-	rec.Body = g
 	return &rec, nil
 }
 
@@ -708,11 +719,9 @@ LIMIT $1`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan: %w", err)
 		}
-		g, err := utils.DecodeJSONB[playlistgroup.Group](raw, "playlist-group body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlistgroup.Group](raw, "playlist-group body"); err != nil {
 			return nil, "", err
 		}
-		rec.Body = g
 		out = append(out, rec)
 	}
 
@@ -727,10 +736,11 @@ LIMIT $1`
 
 // UpdatePlaylistGroup implements store.Store (updated_at set by trigger; membership replaced).
 //
-// Process (single tx): batch-upsert all referenced playlists, update the group body, clear and rebuild membership.
+// Process (single tx): batch-upsert all referenced playlists, update the group body (slug column follows
+// the document's slug, see UpdatePlaylist), clear and rebuild membership.
 func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput) error {
 	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb WHERE id = $1`
+		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1`
 		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
 		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
 	)
@@ -764,10 +774,10 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 
 	// Update group body
-	groupJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
 		return err
 	}
+	groupJSON := []byte(in.Raw)
 
 	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON)
 	if err != nil {
@@ -834,11 +844,9 @@ ORDER BY m.position`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 			return nil, err
 		}
-		rec.Body = pl
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {
@@ -914,10 +922,10 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
-	chJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireDocument(in.Raw, "channel body"); err != nil {
 		return err
 	}
+	chJSON := []byte(in.Raw)
 
 	if _, err := tx.Exec(ctx, insertChannel, in.ID, in.Slug, chJSON); err != nil {
 		return fmt.Errorf("insert channel: %w", err)
@@ -963,11 +971,9 @@ WHERE slug = $1`
 		}
 		return nil, fmt.Errorf("select channel: %w", err)
 	}
-	ch, err := utils.DecodeJSONB[channels.Channel](raw, "channel body")
-	if err != nil {
+	if rec.Raw, rec.Body, err = scanDocument[channels.Channel](raw, "channel body"); err != nil {
 		return nil, err
 	}
-	rec.Body = ch
 	return &rec, nil
 }
 
@@ -1022,11 +1028,9 @@ LIMIT $1`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan: %w", err)
 		}
-		ch, err := utils.DecodeJSONB[channels.Channel](raw, "channel body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[channels.Channel](raw, "channel body"); err != nil {
 			return nil, "", err
 		}
-		rec.Body = ch
 		out = append(out, rec)
 	}
 
@@ -1041,10 +1045,11 @@ LIMIT $1`
 
 // UpdateChannel implements store.Store (updated_at set by trigger; membership replaced).
 //
-// Process (single tx): batch-upsert all referenced playlists, update the channel body, clear and rebuild membership.
+// Process (single tx): batch-upsert all referenced playlists, update the channel body (slug column follows
+// the document's slug, see UpdatePlaylist), clear and rebuild membership.
 func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput) error {
 	const (
-		updateByID     = `UPDATE channels SET body = $2::jsonb WHERE id = $1`
+		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1`
 		selectIDBySlug = `SELECT id FROM channels WHERE slug = $1`
 		clearMembers   = `DELETE FROM channel_members WHERE channel_id = $1`
 	)
@@ -1078,10 +1083,10 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 
 	// Update channel body
-	chJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireDocument(in.Raw, "channel body"); err != nil {
 		return err
 	}
+	chJSON := []byte(in.Raw)
 
 	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON)
 	if err != nil {
@@ -1148,11 +1153,9 @@ ORDER BY m.position`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 			return nil, err
 		}
-		rec.Body = pl
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {

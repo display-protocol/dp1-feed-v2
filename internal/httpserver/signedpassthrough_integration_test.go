@@ -1,0 +1,359 @@
+//go:build integration
+
+package httpserver
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"github.com/display-protocol/dp1-go/playlist"
+	dp1sign "github.com/display-protocol/dp1-go/sign"
+	"github.com/google/uuid"
+)
+
+// These tests pin the signed-document contract end to end (HTTP → executor → dp1svc → Postgres →
+// HTTP): the feed verifies, co-signs, stores, and serves the client's bytes without editing them.
+// Every assertion that matters is made by dp1-go's own verifier over the bytes the feed actually
+// serves, so a regression to a rebuild-then-hash flow (feral-file/ff-cli#107) fails here, not in a
+// partner's verifier.
+
+// curatorSigned returns unsigned document bytes with a curator signature appended, produced the way a
+// publishing tool does it: sign the JCS digest of the bytes, then add "signatures" to the same object.
+// The signed bytes are built with map[string]json.RawMessage so every other member stays verbatim.
+func curatorSigned(t *testing.T, unsigned []byte) (signed []byte, kid string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err = dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, "2020-01-02T03:04:05Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(unsigned, &doc); err != nil {
+		t.Fatal(err)
+	}
+	sigs, err := json.Marshal([]playlist.Signature{sig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc["signatures"] = sigs
+	signed, err = json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed, kid
+}
+
+// mustVerifyAll fails unless every signature on raw verifies against raw itself.
+func mustVerifyAll(t *testing.T, label string, raw []byte) []playlist.Signature {
+	t.Helper()
+	ok, failed, err := dp1sign.VerifyPlaylistSignatures(raw)
+	if err != nil || !ok {
+		t.Fatalf("%s: signatures do not verify over served bytes: ok=%v failed=%+v err=%v body=%s", label, ok, failed, err, raw)
+	}
+	var pl playlist.Playlist
+	if err := json.Unmarshal(raw, &pl); err != nil {
+		t.Fatal(err)
+	}
+	return pl.Signatures
+}
+
+// TestIntegration_SignedPlaylist_VerbatimRoundTrip: a document with every kind of member the old
+// rebuild changed — a present-but-empty string (curators[].name, which the schema leaves
+// unconstrained and the channels spec explicitly allows to be empty), a non-canonical RFC3339
+// spelling, an integer above 2^53 — publishes, and both the curator and feed signatures verify over
+// the POST response and over the GET response. That is the round-trip assertion from ff-cli#107.
+func TestIntegration_SignedPlaylist_VerbatimRoundTrip(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	id := uuid.MustParse("dddddddd-2222-4333-8444-555555555555")
+	const slug = "signed-verbatim"
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `",` +
+		`"title":"Signed verbatim","created":"2020-01-02T03:04:05+00:00",` +
+		`"curators":[{"name":"","key":"KID"}],` +
+		`"items":[{"id":"a1a1a1a1-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html","duration":10,"override":{"seed":12345678901234567890}}]}`)
+	// The curator key must appear in curators[] for the feed's curator check; splice it in before signing.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned = []byte(replaceOnce(string(unsigned), "KID", kid))
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, "2020-01-02T03:04:05Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(unsigned, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["signatures"], _ = json.Marshal([]playlist.Signature{sig})
+	signed, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createdRaw := mustDoRawUnauthenticated(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signed), http.StatusCreated)
+	sigs := mustVerifyAll(t, "POST response", createdRaw)
+	if len(sigs) != 2 || sigs[0].Kid != kid || sigs[1].Role != playlist.RoleFeed {
+		t.Fatalf("POST signatures: want [curator, feed], got %+v", sigs)
+	}
+	// Both signers attest the same payload (DP-1 §7.1.1 example).
+	if sigs[0].PayloadHash != sigs[1].PayloadHash {
+		t.Fatalf("payload_hash differs: curator=%s feed=%s", sigs[0].PayloadHash, sigs[1].PayloadHash)
+	}
+
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
+	mustVerifyAll(t, "GET response", gotRaw)
+
+	// The members the old path rewrote are served as sent. jsonb reorders keys, so compare values.
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(gotRaw, &got); err != nil {
+		t.Fatal(err)
+	}
+	var curators []map[string]json.RawMessage
+	if err := json.Unmarshal(got["curators"], &curators); err != nil {
+		t.Fatal(err)
+	}
+	if name, ok := curators[0]["name"]; !ok || string(name) != `""` {
+		t.Fatalf("curators[0].name: present-but-empty value dropped: %s", got["curators"])
+	}
+	if string(got["created"]) != `"2020-01-02T03:04:05+00:00"` {
+		t.Fatalf("created rewritten: %s", got["created"])
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(got["items"], &items); err != nil {
+		t.Fatal(err)
+	}
+	if string(items[0]["override"]) != `{"seed": 12345678901234567890}` && string(items[0]["override"]) != `{"seed":12345678901234567890}` {
+		t.Fatalf("large integer not preserved: %s", items[0]["override"])
+	}
+}
+
+// TestIntegration_SignedPlaylist_UnknownFieldRejected: the ff-cli#107 trigger. A signed document
+// carrying items[].created — a member the request model does not describe — is rejected up front with
+// the field named, instead of being silently stripped and failing signature verification later.
+func TestIntegration_SignedPlaylist_UnknownFieldRejected(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"eeeeeeee-2222-4333-8444-555555555555","slug":"unknown-field",` +
+		`"title":"ff-cli shaped","created":"2020-01-02T03:04:05Z",` +
+		`"items":[{"source":"https://cdn.example.com/a.html","created":"2026-01-01T00:00:00Z"}]}`)
+	signed, _ := curatorSigned(t, unsigned)
+
+	body := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signed), http.StatusBadRequest, false)
+	var resp ErrorResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "bad_request" || resp.Message != `json: unknown field "created"` {
+		t.Fatalf("want bad_request naming the unknown field, got %+v", resp)
+	}
+
+	// The API-key path is strict too: a member the feed would have discarded is an error, not a no-op.
+	apiKeyBody := []byte(`{"dpVersion":"1.1.0","title":"ops","items":[{"source":"https://cdn.example.com/a.html"}],"extra":1}`)
+	body = doRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(apiKeyBody), http.StatusBadRequest, true)
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Message != `json: unknown field "extra"` {
+		t.Fatalf("API-key path should reject unknown fields, got %+v", resp)
+	}
+}
+
+// TestIntegration_SignedPlaylist_ItemIDRequired: the feed's item index keys rows by items[].id. The
+// API-key path assigns missing ids; a signed document cannot be edited, so it is refused up front with a
+// clear 400 rather than failing inside the store.
+func TestIntegration_SignedPlaylist_ItemIDRequired(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"abcdef01-2222-4333-8444-555555555555","slug":"no-item-id",` +
+		`"title":"No item id","created":"2020-01-02T03:04:05Z",` +
+		`"items":[{"source":"https://cdn.example.com/a.html"}]}`)
+	signed, _ := curatorSigned(t, unsigned)
+
+	body := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signed), http.StatusBadRequest, false)
+	var resp ErrorResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "bad_request" || resp.Message != "signed playlists must give every item a UUID id: items[0]" {
+		t.Fatalf("want bad_request naming the item, got %+v", resp)
+	}
+}
+
+// TestIntegration_SignedPlaylist_ImmutableToOps: once a document carries a curator signature, the
+// API-key path and PATCH refuse to edit it (409), because the edit would orphan that signature. A
+// signed PUT that changes the document's identity is a 400; a signed PUT with the same identity replaces it.
+func TestIntegration_SignedPlaylist_ImmutableToOps(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	id := uuid.MustParse("ffffffff-2222-4333-8444-555555555555")
+	const slug = "signed-immutable"
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign := func(unsigned []byte) []byte {
+		sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, "2020-01-02T03:04:05Z")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(unsigned, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["signatures"], _ = json.Marshal([]playlist.Signature{sig})
+		out, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	base := `"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `","created":"2020-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + kid + `"}],` +
+		`"items":[{"id":"aaaaaaaa-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]`
+
+	mustDoRawUnauthenticated(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(sign([]byte(`{`+base+`,"title":"v1"}`))), http.StatusCreated)
+
+	// PATCH is API-key only, and refuses a curator-signed document.
+	doRaw(t, srv, http.MethodPatch, "/api/v1/playlists/"+slug, map[string]any{"title": "ops edit"}, http.StatusUnauthorized, false)
+	body := doRaw(t, srv, http.MethodPatch, "/api/v1/playlists/"+slug, map[string]any{"title": "ops edit"}, http.StatusConflict, true)
+	var resp ErrorResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "conflict" {
+		t.Fatalf("PATCH on signed document: want conflict, got %+v", resp)
+	}
+
+	// An API-key PUT (no signatures) is refused the same way.
+	opsPut := map[string]any{"dpVersion": "1.1.0", "title": "ops replace", "items": []map[string]any{{"source": "https://cdn.example.com/b.html"}}}
+	doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, opsPut, http.StatusConflict, true)
+
+	// A signed PUT that changes identity (different id) is rejected as a mismatch.
+	otherID := uuid.MustParse("abababab-2222-4333-8444-555555555555")
+	mismatch := `"dpVersion":"1.1.0","id":"` + otherID.String() + `","slug":"` + slug + `","created":"2020-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + kid + `"}],` +
+		`"items":[{"id":"aaaaaaaa-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}],"title":"v2"`
+	body = doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, json.RawMessage(sign([]byte(`{`+mismatch+`}`))), http.StatusBadRequest, false)
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "bad_request" {
+		t.Fatalf("signed PUT with different id: want bad_request, got %+v", resp)
+	}
+
+	// A signed PUT with the same identity replaces the document, and the new signatures verify.
+	replaced := mustDoRawUnauthenticated(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, json.RawMessage(sign([]byte(`{`+base+`,"title":"v2"}`))), http.StatusOK)
+	mustVerifyAll(t, "signed PUT response", replaced)
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
+	mustVerifyAll(t, "GET after signed PUT", gotRaw)
+	var got playlist.Playlist
+	if err := json.Unmarshal(gotRaw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "v2" {
+		t.Fatalf("title after signed PUT: %q", got.Title)
+	}
+}
+
+// TestIntegration_APIKeyPlaylist_StillMutable: compatibility for existing rows. A document the feed
+// authored (feed signature only) remains editable via PATCH, and the feed's signature on the result verifies.
+func TestIntegration_APIKeyPlaylist_StillMutable(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	post := map[string]any{"dpVersion": "1.1.0", "slug": "ops-owned", "title": "ops v1", "items": []map[string]any{{"source": "https://cdn.example.com/a.html"}}}
+	createdRaw := mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", post, http.StatusCreated)
+	mustVerifyAll(t, "API-key POST response", createdRaw)
+
+	patched := mustDoRaw(t, srv, http.MethodPatch, "/api/v1/playlists/ops-owned", map[string]any{"title": "ops v2"}, http.StatusOK)
+	sigs := mustVerifyAll(t, "API-key PATCH response", patched)
+	if len(sigs) != 1 || sigs[0].Role != playlist.RoleFeed {
+		t.Fatalf("feed-authored document should carry exactly the feed signature, got %+v", sigs)
+	}
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/ops-owned", nil, http.StatusOK)
+	mustVerifyAll(t, "GET after API-key PATCH", gotRaw)
+}
+
+// TestIntegration_SlugFollowsDocument: an API-key PATCH that changes slug must move the row's slug
+// with it. Otherwise GET by the served slug 404s, and a curator who signs the served document and PUTs
+// it back is rejected for a slug mismatch it cannot observe or fix.
+func TestIntegration_SlugFollowsDocument(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post := map[string]any{
+		"dpVersion": "1.1.0", "slug": "slug-v1", "title": "Slug drift",
+		"curators": []map[string]any{{"name": "Curator", "key": kid}},
+		"items":    []map[string]any{{"id": "b2b2b2b2-2222-4333-8444-555555555555", "source": "https://cdn.example.com/a.html"}},
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", post, http.StatusCreated)
+
+	patched := mustDoRaw(t, srv, http.MethodPatch, "/api/v1/playlists/slug-v1", map[string]any{"slug": "slug-v2"}, http.StatusOK)
+	var pl playlist.Playlist
+	if err := json.Unmarshal(patched, &pl); err != nil {
+		t.Fatal(err)
+	}
+	if pl.Slug != "slug-v2" {
+		t.Fatalf("PATCH response slug = %q", pl.Slug)
+	}
+	// The row is addressable by the slug it serves, and no longer by the old one.
+	served := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/slug-v2", nil, http.StatusOK)
+	doRaw(t, srv, http.MethodGet, "/api/v1/playlists/slug-v1", nil, http.StatusNotFound, false)
+
+	// A curator takes the served document, signs it, and PUTs it back by the slug it was served under.
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(served, &doc); err != nil {
+		t.Fatal(err)
+	}
+	delete(doc, "signatures")
+	unsigned, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, "2020-01-02T03:04:05Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc["signatures"], _ = json.Marshal([]playlist.Signature{sig})
+	signed, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := mustDoRawUnauthenticated(t, srv, http.MethodPut, "/api/v1/playlists/slug-v2", json.RawMessage(signed), http.StatusOK)
+	mustVerifyAll(t, "signed PUT of the served document", replaced)
+}
+
+func replaceOnce(s, old, repl string) string {
+	for i := 0; i+len(old) <= len(s); i++ {
+		if s[i:i+len(old)] == old {
+			return s[:i] + repl + s[i+len(old):]
+		}
+	}
+	return s
+}

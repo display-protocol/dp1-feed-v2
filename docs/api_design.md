@@ -64,23 +64,30 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Authentication and authorization
 
-**Two authentication paths for document writes (create and update):**
+**Two write paths for documents, distinguished by a non-empty `signatures` array in the body:**
 
-1. **API key authentication (ops path):** Traditional Bearer token.
+1. **API key authentication (ops path) — the feed is the author.** Traditional Bearer token.
    - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
-   - On **create**, when **`id`** or **`created`** are omitted, the server assigns a new UUID and the current time respectively; when provided, values are validated (UUID shape; **`created`** RFC3339 and not in the future) and stored. **`slug`** continues to follow **`makeSlug`** rules (optional client slug, else derived from title + short id).
-   - Server adds feed signature to the document
+   - The server builds the document from the request: on **create**, when **`id`** or **`created`** are omitted, it assigns a new UUID and the current time respectively; when provided, values are validated (UUID shape; **`created`** RFC3339 and not in the future) and stored. **`slug`** follows **`makeSlug`** rules (optional client slug, else derived from title + short id).
+   - Server adds its feed signature to the document.
+   - **Only for documents the feed owns.** If the stored document carries a signature from any key other than the feed's, an API-key **PUT** or **PATCH** is refused with **`409` `conflict`**: the edit would keep that signature while changing the bytes it attests. Such a document can only be replaced by a fully signed document (path 2). Known carve-out: group/channel ingest upserts member playlists **by id**, so a referenced remote document with the same `id` replaces a stored playlist wholesale (a validated document swapped for another; no signature is orphaned).
+   - A **PUT/PATCH** that changes `slug` moves the row's slug with the document, so the resource stays addressable by the slug it serves.
 
-2. **Signature-based authentication (user path):** Cryptographic signatures on the request body.
+2. **Signature-based authentication (user path) — the client is the author and first signer.**
    - **No API key required** when the body includes a **non-empty** `signatures` array and verification succeeds
-   - **POST (create):** request must include `id` (UUID), `created` (RFC3339, not in future), and `signatures`, as documented on `PlaylistInput` / group / channel inputs
-   - **PUT (replace):** same input shapes as create; `signatures` must match the document after replace (stored `id`, `slug`, and document `created` are preserved by the server)
-   - **PATCH (partial update):** optional `signatures` on `PlaylistUpdateInput` / group / channel update schemas; when non-empty, signatures must verify against the **merged** document (patch fields overlaid on the stored document)
+   - **The server never edits a signed document.** DP-1 §7.1 computes every signature over the JCS form of the *entire* document, so any change — a dropped or added member, a re-formatted value — would orphan the client's signature. The server therefore verifies the signatures over the request bytes **exactly as received**, appends its own `feed` entry to `signatures` (attesting the same `payload_hash`), validates, and stores and serves those bytes unchanged. It does not derive `slug`, assign item ids, re-format `created`, or strip a legacy `signature`.
+   - **POST (create):** the document must include `id` (UUID), `created` (RFC3339, not in future), `slug`, and `signatures`. `id` and `slug` become the resource's row identity verbatim.
+   - **PUT (replace):** same shape; the document's `id`, `slug`, and `created` must match the stored resource (`created` compared as an instant), otherwise **`400`**. Changing identity means a new document.
+   - **PATCH** is **API-key only**. A partial update is merged server-side, so no client signature can cover the result; the update schemas have no `signatures` field.
    - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec and `Signature` schema in OpenAPI)
    - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document used for verification
    - Server verifies signatures cryptographically (JCS canonicalization, SHA-256 payload hash, Ed25519 signature verification)
    - Server **always adds** its own feed signature regardless of authentication path
    - **DELETE** and **registry PUT** still require an API key only (no signature-only path)
+
+**Strict request decoding (all document writes, both paths):** a JSON member that the request schema does not describe is rejected with **`400` `bad_request`** naming the field (e.g. `json: unknown field "created"` for an `items[].created`). It is never silently dropped: on the signed path a dropped member changes the signed bytes; on the API-key path it is data the client sent and the feed would discard. Clients must send only the members the DP-1 core and enabled-extension schemas define.
+
+**Documents are served as stored.** GET, list, and write responses return the persisted bytes (JSONB re-orders keys and normalises numeric text, both of which are JCS-neutral), so every signature on a document verifies against the response that carries it. The ETag on single-resource GETs is over those bytes.
 
 - **Compare semantics (API key):** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
@@ -110,10 +117,10 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Methods and semantics
 
-- **POST** — create; server assigns id/slug rules per executor/store.
-- **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel).
-- **PATCH** — partial update (only provided fields change); server re-signs and re-validates as applicable.
+- **POST** — create; on the API-key path the server assigns id/slug per executor/store rules, on the signed path they come from the document.
+- **GET** — fetch one or list; bodies are the stored bytes.
+- **PUT** — full replacement of the document body (playlist, group, channel); `409` when an API-key replace targets a document with foreign signatures.
+- **PATCH** — partial update (only provided fields change), API key only; server re-signs and re-validates; `409` on a document with foreign signatures.
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules).
 
 **Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). **PUT** requires at least one publisher, and at least one channel URL per publisher; it atomically **replaces the entire** registry (not a merge-by-item API).

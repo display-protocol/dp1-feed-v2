@@ -43,6 +43,20 @@ func (m *MockValidatorSigner) EXPECT() *MockValidatorSignerMockRecorder {
 	return m.recorder
 }
 
+// Kid mocks base method.
+func (m *MockValidatorSigner) Kid() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Kid")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// Kid indicates an expected call of Kid.
+func (mr *MockValidatorSignerMockRecorder) Kid() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Kid", reflect.TypeOf((*MockValidatorSigner)(nil).Kid))
+}
+
 // SignChannel mocks base method.
 func (m *MockValidatorSigner) SignChannel(raw []byte, ts time.Time) ([]byte, error) {
 	m.ctrl.T.Helper()

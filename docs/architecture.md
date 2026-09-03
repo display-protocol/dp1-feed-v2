@@ -67,7 +67,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 ## Persistence strategy
 
 - **Engine:** PostgreSQL via `pgx`.
-- **Documents:** JSONB columns for playlist, playlist-group, and channel bodies (flexible schema-aligned storage with validated write path).
+- **Documents:** JSONB columns for playlist, playlist-group, and channel bodies (flexible schema-aligned storage with validated write path). Bodies are written and read as **raw JSON**, never re-marshaled through the typed dp1-go structs: DP-1 §7.1 binds every signature to the JCS form of the whole document, and a typed round-trip is lossy (`omitempty`, unknown keys, number re-typing). Store records expose `Raw` (persisted bytes, what the API serves) and `Body` (a decoded read-only view). JSONB's key re-ordering and numeric normalisation are JCS-neutral, so stored bytes stay hash-equivalent to what was signed; nothing that is not JCS-neutral may run on the write path.
 - **Relationships:** junction tables (e.g. group/channel membership); appropriate indexes for id, slug, and key pagination patterns.
 - **Migrations:** `golang-migrate` (SQL under `db/migrations/`).
 - **Timekeeping:** `updated_at` maintained with database triggers where applicable.
@@ -78,22 +78,36 @@ Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membersh
 
 ## Request flow (illustrative)
 
-### Create playlist
+### Create playlist (API-key path — the feed is the author)
 
 ```text
-POST /api/v1/playlists
+POST /api/v1/playlists  (Authorization: Bearer)
   → Validate API key
-  → Parse JSON into models
-  → Executor: sign (dp1svc) → validate → store
-  → Return signed playlist JSON
+  → Strict-decode JSON into models (unknown member → 400)
+  → Executor: build document (id/slug/created defaults) → sign (dp1svc) → validate → store bytes
+  → Return the stored bytes
 ```
+
+### Create playlist (signed path — the client is the author and first signer)
+
+```text
+POST /api/v1/playlists  (body carries signatures[])
+  → Strict-decode JSON into models, keeping the raw request bytes
+  → Executor: verify client signatures over the raw bytes
+             → append feed signature to those same bytes (dp1svc)
+             → validate → store bytes verbatim (row id/slug/created are projections of the document)
+  → Return the stored bytes
+```
+
+The executor never rebuilds a signed document; see `docs/api_design.md` (Authentication) for the
+immutability and identity rules that follow from this.
 
 ### Read playlist
 
 ```text
 GET /api/v1/playlists/:id
   → Store load by id or slug
-  → Return JSONB body (signatures included)
+  → Return the stored bytes (signatures included; ETag over those bytes)
 ```
 
 ---

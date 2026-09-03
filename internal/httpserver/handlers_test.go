@@ -123,7 +123,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
-					Return([]playlist.Playlist{{DPVersion: "1.1.0"}}, "cursor1", nil)
+					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "cursor1", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -140,7 +140,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "").
-					Return([]playlist.Playlist{}, "", nil)
+					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -156,7 +156,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "").
-					Return([]playlist.Playlist{{DPVersion: "1.1.0"}}, "", nil)
+					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -193,7 +193,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "").
-					Return([]playlist.Playlist{}, "", nil)
+					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -208,7 +208,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "my-group").
-					Return([]playlist.Playlist{}, "", nil)
+					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -306,7 +306,7 @@ func TestCreatePlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					CreatePlaylist(gomock.Any(), gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Test Playlist"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Test Playlist"}), nil)
 			},
 			expectedStatus: http.StatusCreated,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -416,7 +416,7 @@ func TestGetPlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetPlaylist(gomock.Any(), gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Test"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Test"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -431,7 +431,7 @@ func TestGetPlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetPlaylist(gomock.Any(), "my-playlist").
-					Return(&playlist.Playlist{DPVersion: "1.1.0"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -505,7 +505,7 @@ func TestGetPlaylist_IfNoneMatchNotModified(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	pl := &playlist.Playlist{DPVersion: "1.1.0", Title: "Cached"}
+	pl := playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Cached"})
 	mockExec := mocks.NewMockExecutor(ctrl)
 	mockExec.EXPECT().
 		GetPlaylist(gomock.Any(), "slug-or-id").
@@ -757,7 +757,7 @@ func TestReplacePlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -857,7 +857,7 @@ func TestUpdatePlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					UpdatePlaylist(gomock.Any(), playlistID, gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1019,7 +1019,7 @@ func TestListPlaylistGroups(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc).
-					Return([]playlistgroup.Group{{Title: "Test Group"}}, "", nil)
+					Return([]store.PlaylistGroupRecord{groupRec(playlistgroup.Group{Title: "Test Group"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1085,7 +1085,7 @@ func TestCreatePlaylistGroup(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					CreatePlaylistGroup(gomock.Any(), gomock.Any()).
-					Return(&playlistgroup.Group{Title: "Test Group"}, nil)
+					Return(groupRecPtr(playlistgroup.Group{Title: "Test Group"}), nil)
 			},
 			expectedStatus: http.StatusCreated,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1163,7 +1163,7 @@ func TestGetPlaylistGroup(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetPlaylistGroup(gomock.Any(), groupID).
-					Return(&playlistgroup.Group{Title: "Test Group"}, nil)
+					Return(groupRecPtr(playlistgroup.Group{Title: "Test Group"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1251,7 +1251,7 @@ func TestReplacePlaylistGroup(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(&playlistgroup.Group{Title: "Updated Group"}, nil)
+					Return(groupRecPtr(playlistgroup.Group{Title: "Updated Group"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1336,7 +1336,7 @@ func TestUpdatePlaylistGroup(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					UpdatePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(&playlistgroup.Group{Title: "Updated Group"}, nil)
+					Return(groupRecPtr(playlistgroup.Group{Title: "Updated Group"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1488,7 +1488,7 @@ func TestListChannels(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListChannels(gomock.Any(), 100, "", store.SortAsc).
-					Return([]channels.Channel{{Title: "Test Channel"}}, "", nil)
+					Return([]store.ChannelRecord{channelRec(channels.Channel{Title: "Test Channel"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1554,7 +1554,7 @@ func TestCreateChannel(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					CreateChannel(gomock.Any(), gomock.Any()).
-					Return(&channels.Channel{Title: "Test Channel"}, nil)
+					Return(channelRecPtr(channels.Channel{Title: "Test Channel"}), nil)
 			},
 			expectedStatus: http.StatusCreated,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1647,7 +1647,7 @@ func TestGetChannel(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetChannel(gomock.Any(), channelID).
-					Return(&channels.Channel{Title: "Test Channel"}, nil)
+					Return(channelRecPtr(channels.Channel{Title: "Test Channel"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1750,7 +1750,7 @@ func TestReplaceChannel(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(&channels.Channel{Title: "Updated Channel"}, nil)
+					Return(channelRecPtr(channels.Channel{Title: "Updated Channel"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1850,7 +1850,7 @@ func TestUpdateChannel(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					UpdateChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(&channels.Channel{Title: "Updated Channel"}, nil)
+					Return(channelRecPtr(channels.Channel{Title: "Updated Channel"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {

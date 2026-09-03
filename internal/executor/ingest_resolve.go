@@ -57,14 +57,16 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		if err != nil {
 			return store.IngestedPlaylist{}, fmt.Errorf("local playlist %q: %w", uri, err)
 		}
-		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Body: rec.Body}, nil
+		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
 	}
 
 	if e.fetch == nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("external playlist %q: fetcher is not configured (set playlist.fetch_* and use absolute URLs)", uri)
 	}
 
-	// Remote: GET body, validate with same rules as operator-authored playlists, then read id/slug from parsed playlist.
+	// Remote: GET body, validate with same rules as operator-authored playlists, then read id/slug from
+	// the parsed playlist. The fetched bytes are what gets stored: the remote document carries its own
+	// signatures, and re-encoding it through the typed struct would invalidate them (see store.PlaylistRecord).
 	body, err := e.fetch.FetchPlaylist(ctx, uri)
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("fetch %q: %w", uri, err)
@@ -86,7 +88,7 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	} else {
 		slug = slugify(slug)
 	}
-	return store.IngestedPlaylist{ID: id, Slug: slug, Body: *p}, nil
+	return store.IngestedPlaylist{ID: id, Slug: slug, Raw: body}, nil
 }
 
 // resolvePlaylistURIs resolves every URI in uris. The returned slice has the same length and order

@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -156,14 +157,14 @@ func TestCreatePlaylist_success_coreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.CreatePlaylist(context.Background(), validCreateReq())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsed) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsed) {
 		t.Fatalf("body mismatch")
 	}
 }
@@ -181,7 +182,7 @@ func TestCreatePlaylist_success_extensionValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	_, err := e.CreatePlaylist(context.Background(), validCreateReq())
@@ -207,7 +208,6 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 	}
 
 	var preSign []byte
-	signed := []byte(`{"dpVersion":"1.1.0","title":"Daily"}`)
 	parsed := playlist.Playlist{
 		DPVersion: "1.1.0",
 		Title:     "Daily",
@@ -217,6 +217,12 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 			{Source: "https://cdn.example.com/intro.html"},
 		},
 	}
+	// The store persists the signed bytes themselves (not the validator's typed view), so the
+	// fixture returned by the signer must carry the items the assertion below inspects.
+	signed, err := json.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gomock.InOrder(
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).DoAndReturn(func(raw []byte, _ time.Time) ([]byte, error) {
 			preSign = append([]byte(nil), raw...)
@@ -225,7 +231,8 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
 	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, body *playlist.Playlist) error {
+		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, raw json.RawMessage) error {
+			body := mustDecodePlaylist(t, raw)
 			if len(body.Items) != 3 {
 				t.Fatalf("store body items: want 3, got %d", len(body.Items))
 			}
@@ -277,14 +284,14 @@ func TestCreatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.CreatePlaylist(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
+	if out == nil || displayAtValue(out.Body.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
 }
@@ -312,7 +319,7 @@ func TestCreatePlaylist_preservesItemInlineManifest(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), &parsed).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
@@ -400,7 +407,7 @@ func TestCreatePlaylist_optionalCreate_respectsProvidedID(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), wantID, gomock.Any(), &parsed).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), wantID, gomock.Any(), json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
@@ -462,7 +469,7 @@ func TestGetPlaylist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, pl) {
+	if out == nil || !reflect.DeepEqual(out.Body, pl) {
 		t.Fatalf("body mismatch: %+v vs %+v", out, pl)
 	}
 }
@@ -505,7 +512,7 @@ func TestListPlaylists(t *testing.T) {
 	if len(recs) != 2 {
 		t.Fatalf("recs len=%d", len(recs))
 	}
-	if !reflect.DeepEqual(items[0], recs[0].Body) || !reflect.DeepEqual(items[1], recs[1].Body) {
+	if !reflect.DeepEqual(items[0].Body, recs[0].Body) || !reflect.DeepEqual(items[1].Body, recs[1].Body) {
 		t.Fatalf("items mismatch: %+v %+v", items[0], items[1])
 	}
 }
@@ -639,8 +646,8 @@ func TestListPlaylists_filters(t *testing.T) {
 			if next != tt.wantNext {
 				t.Fatalf("next=%q want %q", next, tt.wantNext)
 			}
-			if tt.wantItems > 0 && items[0].Title != tt.wantFirstTitle {
-				t.Fatalf("items[0].Title=%q want %q", items[0].Title, tt.wantFirstTitle)
+			if tt.wantItems > 0 && items[0].Body.Title != tt.wantFirstTitle {
+				t.Fatalf("items[0].Body.Title=%q want %q", items[0].Body.Title, tt.wantFirstTitle)
 			}
 		})
 	}
@@ -682,7 +689,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	req := validCreateReq()
@@ -694,7 +701,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsed) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsed) {
 		t.Fatalf("out mismatch")
 	}
 	var check playlist.Playlist
@@ -717,32 +724,43 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(&store.PlaylistRecord{
 		ID:   id,
 		Slug: "keep-me",
+		Raw:  existing,
 		Body: mustDecodePlaylist(t, existing),
 	}, nil)
 
 	kid := "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
 	sig := playlist.Signature{Kid: kid, Alg: "ed25519", Sig: "test-sig"}
 
+	// The replacement asserts the stored identity (id, slug, created) and is otherwise the client's bytes.
+	// created uses a different but equivalent RFC3339 spelling to show the match is by instant, not string.
+	raw := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"keep-me","title":"New title",` +
+		`"created":"2020-01-02T03:04:05+00:00","items":[{"id":"0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b","source":"https://new"}],"curators":[{"key":"` + kid + `"}],` +
+		`"signatures":[{"kid":"` + kid + `","alg":"ed25519","sig":"test-sig"}]}`)
 	signed := []byte(`{"replaced":true}`)
 	parsed := mustDecodePlaylist(t, signed)
 	gomock.InOrder(
-		mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil),
-		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().VerifyPlaylistSignatures(json.RawMessage(raw)).Return(true, nil, nil),
+		mockDP1.EXPECT().SignPlaylist(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := validCreateReq()
 	req.Title = "New title"
+	req.ID = stringPtr(id.String())
+	req.Slug = "keep-me"
+	req.Items = []playlist.PlaylistItem{{ID: "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b", Source: "https://new"}}
+	req.Created = stringPtr("2020-01-02T03:04:05+00:00")
 	req.Signatures = []playlist.Signature{sig}
 	req.Curators = []identity.Entity{{Key: kid}}
+	req.Raw = raw
 
 	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsed) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsed) || !bytes.Equal(out.Raw, signed) {
 		t.Fatalf("out mismatch")
 	}
 }
@@ -771,14 +789,14 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.ReplacePlaylist(context.Background(), "daily", req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
+	if out == nil || displayAtValue(out.Body.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
 }
@@ -896,7 +914,7 @@ func TestUpdatePlaylist_preservesPlaylistLevelNote(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -955,7 +973,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	newTitle := "Daily Updated"
@@ -1000,7 +1018,7 @@ func TestUpdatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", json.RawMessage(signed)).Return(nil)
 
 	items := []playlist.PlaylistItem{
 		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
@@ -1010,7 +1028,7 @@ func TestUpdatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || displayAtValue(out.Items[0]) != "2026-07-21T00:00:00" {
+	if out == nil || displayAtValue(out.Body.Items[0]) != "2026-07-21T00:00:00" {
 		t.Fatalf("expected displayAt to be preserved, got %+v", out)
 	}
 }
@@ -1059,7 +1077,7 @@ func TestUpdatePlaylist_preservesItemInlineManifest(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "daily", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	newTitle := "Daily Updated"
@@ -1109,7 +1127,7 @@ func TestUpdatePlaylist_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1120,12 +1138,14 @@ func TestUpdatePlaylist_success_partialFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsed) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsed) {
 		t.Fatal("out mismatch")
 	}
 }
 
-func TestUpdatePlaylist_withSignatures_success(t *testing.T) {
+// A stored document carrying a signature from a key other than the feed's is immutable to PATCH: the
+// merge would keep that entry while changing the bytes it attests. Only a fully re-signed PUT may replace it.
+func TestUpdatePlaylist_foreignSignature_isImmutable(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
@@ -1133,16 +1153,18 @@ func TestUpdatePlaylist_withSignatures_success(t *testing.T) {
 
 	id := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
-	kid := "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+	const feedKid = "did:key:feed"
+	const curatorKid = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
 	existingBody := playlist.Playlist{
 		DPVersion: "1.1.0",
 		Title:     "Old Title",
 		Slug:      "old-slug",
 		Created:   created.UTC().Format(time.RFC3339Nano),
-		Summary:   "Old summary",
-		Curators:  []identity.Entity{{Key: kid}},
-		Items: []playlist.PlaylistItem{
-			{Source: "https://old.example/item1"},
+		Curators:  []identity.Entity{{Key: curatorKid}},
+		Items:     []playlist.PlaylistItem{{Source: "https://old.example/item1"}},
+		Signatures: []playlist.Signature{
+			{Kid: curatorKid, Alg: "ed25519", Role: "curator", Sig: "user-sig"},
+			{Kid: feedKid, Alg: "ed25519", Role: "feed", Sig: "feed-sig"},
 		},
 	}
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "old-slug").Return(&store.PlaylistRecord{
@@ -1151,29 +1173,60 @@ func TestUpdatePlaylist_withSignatures_success(t *testing.T) {
 		Body:      existingBody,
 		CreatedAt: created,
 	}, nil)
+	mockDP1.EXPECT().Kid().Return(feedKid).AnyTimes()
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	newTitle := "Updated Title"
+	_, err := e.UpdatePlaylist(context.Background(), "old-slug", &models.PlaylistUpdateRequest{Title: &newTitle})
+	if !errors.Is(err, executor.ErrDocumentImmutable) {
+		t.Fatalf("expected ErrDocumentImmutable, got %v", err)
+	}
+	if !executor.IsDocumentImmutableError(err) {
+		t.Fatal("IsDocumentImmutableError should recognize the error")
+	}
+}
+
+// A document whose only signatures are the feed's own stays mutable via the API-key path.
+func TestUpdatePlaylist_feedOnlySignatures_isMutable(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	id := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
+	const feedKid = "did:key:feed"
+	existingBody := playlist.Playlist{
+		DPVersion:  "1.1.0",
+		Title:      "Old Title",
+		Slug:       "old-slug",
+		Created:    created.UTC().Format(time.RFC3339Nano),
+		Items:      []playlist.PlaylistItem{{Source: "https://old.example/item1"}},
+		Signatures: []playlist.Signature{{Kid: feedKid, Alg: "ed25519", Role: "feed", Sig: "feed-sig"}},
+	}
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "old-slug").Return(&store.PlaylistRecord{
+		ID:        id,
+		Slug:      "old-slug",
+		Body:      existingBody,
+		CreatedAt: created,
+	}, nil)
+	mockDP1.EXPECT().Kid().Return(feedKid).AnyTimes()
 
 	signed := []byte(`{"dpVersion":"1.1.0","title":"Updated Title","slug":"old-slug"}`)
 	parsed := mustDecodePlaylist(t, signed)
 	gomock.InOrder(
-		mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil),
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "old-slug", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
-	req := &models.PlaylistUpdateRequest{
-		Title: &newTitle,
-		Signatures: []playlist.Signature{
-			{Kid: kid, Alg: "ed25519", Sig: "user-sig"},
-		},
-	}
-	out, err := e.UpdatePlaylist(context.Background(), "old-slug", req)
+	out, err := e.UpdatePlaylist(context.Background(), "old-slug", &models.PlaylistUpdateRequest{Title: &newTitle})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsed) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsed) || !bytes.Equal(out.Raw, signed) {
 		t.Fatal("out mismatch")
 	}
 }
@@ -1208,7 +1261,7 @@ func TestUpdatePlaylist_success_multipleFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), &parsed).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1319,6 +1372,7 @@ func TestCreatePlaylistGroup_success_localResolve(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl-one").Return(&store.PlaylistRecord{
 		ID:   plID,
 		Slug: "pl-one",
+		Raw:  plBody,
 		Body: plDoc,
 	}, nil)
 
@@ -1332,11 +1386,12 @@ func TestCreatePlaylistGroup_success_localResolve(t *testing.T) {
 		if in.ID == uuid.Nil || in.Slug == "" {
 			t.Fatalf("create expects non-zero id and slug, got id=%v slug=%q", in.ID, in.Slug)
 		}
-		if len(in.Playlists) != 1 || in.Playlists[0].ID != plID || !reflect.DeepEqual(in.Playlists[0].Body, plDoc) {
+		// Local members are ingested as their stored bytes, untouched.
+		if len(in.Playlists) != 1 || in.Playlists[0].ID != plID || !bytes.Equal(in.Playlists[0].Raw, plBody) {
 			t.Fatalf("ingested playlists: %+v", in.Playlists)
 		}
-		if !reflect.DeepEqual(in.Body, wantGroup) {
-			t.Fatalf("body: %+v", in.Body)
+		if !bytes.Equal(in.Raw, signed) {
+			t.Fatalf("raw: %s", in.Raw)
 		}
 	}).Return(nil)
 
@@ -1345,7 +1400,7 @@ func TestCreatePlaylistGroup_success_localResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, wantGroup) {
+	if out == nil || !reflect.DeepEqual(out.Body, wantGroup) {
 		t.Fatalf("response body mismatch")
 	}
 }
@@ -1431,17 +1486,13 @@ func TestCreatePlaylistGroup_preservesLocalDisplayAtWithCoreValidation(t *testin
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	plRaw := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"daily","title":"Daily",` +
+		`"items":[{"source":"https://cdn.example.com/day1.html","displayAt":"2026-07-21T00:00:00"}]}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
 		ID:   plID,
 		Slug: "daily",
-		Body: playlist.Playlist{
-			ID:    plID.String(),
-			Slug:  "daily",
-			Title: "Daily",
-			Items: []playlist.PlaylistItem{
-				{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
-			},
-		},
+		Raw:  plRaw,
+		Body: mustDecodePlaylist(t, plRaw),
 	}, nil)
 	signed := []byte(`{"signed":true}`)
 	parsedGroup := mustDecodeGroup(t, signed)
@@ -1450,7 +1501,7 @@ func TestCreatePlaylistGroup_preservesLocalDisplayAtWithCoreValidation(t *testin
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
 	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
-		if len(in.Playlists) != 1 || displayAtValue(in.Playlists[0].Body.Items[0]) != "2026-07-21T00:00:00" {
+		if len(in.Playlists) != 1 || displayAtValue(mustDecodePlaylist(t, in.Playlists[0].Raw).Items[0]) != "2026-07-21T00:00:00" {
 			t.Fatalf("expected local displayAt to be preserved, got %+v", in.Playlists)
 		}
 	}).Return(nil)
@@ -1574,7 +1625,7 @@ func TestGetPlaylistGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, g) {
+	if out == nil || !reflect.DeepEqual(out.Body, g) {
 		t.Fatal("body mismatch")
 	}
 }
@@ -1612,7 +1663,7 @@ func TestListPlaylistGroups(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("recs len=%d", len(recs))
 	}
-	if !reflect.DeepEqual(items[0], recs[0].Body) {
+	if !reflect.DeepEqual(items[0].Body, recs[0].Body) {
 		t.Fatalf("body mismatch: %+v", items[0])
 	}
 }
@@ -1665,8 +1716,8 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 		if len(in.Playlists) != 1 || in.Playlists[0].ID != plID {
 			t.Fatalf("playlists: %+v", in.Playlists)
 		}
-		if !reflect.DeepEqual(in.Body, parsedGroup) {
-			t.Fatalf("body: %+v", in.Body)
+		if !bytes.Equal(in.Raw, signed) {
+			t.Fatalf("raw: %s", in.Raw)
 		}
 	}).Return(nil)
 
@@ -1677,7 +1728,7 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsedGroup) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsedGroup) {
 		t.Fatal("out mismatch")
 	}
 }
@@ -1703,29 +1754,40 @@ func TestReplacePlaylistGroup_withSignatures_success(t *testing.T) {
 	plID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 	plBody := []byte(`{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl").Return(&store.PlaylistRecord{
-		ID: plID, Slug: "pl", Body: mustDecodePlaylist(t, plBody),
+		ID: plID, Slug: "pl", Raw: plBody, Body: mustDecodePlaylist(t, plBody),
 	}, nil)
 
+	raw := []byte(`{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"keep-g","title":"New group title","created":"2019-06-01T12:00:00Z",` +
+		`"playlists":["` + localPlaylistRef("pl") + `"],"curator":"` + curatorKid + `",` +
+		`"signatures":[{"kid":"` + curatorKid + `","alg":"ed25519","sig":"sig"}]}`)
 	signed := []byte(`{"replacedGroupSig":true}`)
 	parsedGroup := mustDecodeGroup(t, signed)
 	gomock.InOrder(
-		mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil),
-		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().VerifyPlaylistGroupSignatures(json.RawMessage(raw)).Return(true, nil, nil),
+		mockDP1.EXPECT().SignPlaylistGroup(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), "keep-g", gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), "keep-g", gomock.Any()).Do(func(_ context.Context, _ string, in *store.PlaylistGroupInput) {
+		if !bytes.Equal(in.Raw, signed) || len(in.Playlists) != 1 || !bytes.Equal(in.Playlists[0].Raw, plBody) {
+			t.Fatalf("input: %+v", in)
+		}
+	}).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	req := validGroupCreateReq(localPlaylistRef("pl"))
 	req.Title = "New group title"
+	req.ID = stringPtr(gid.String())
+	req.Slug = "keep-g"
+	req.Created = stringPtr("2019-06-01T12:00:00Z")
 	req.Curator = curatorKid
 	req.Signatures = []playlist.Signature{{Kid: curatorKid, Alg: "ed25519", Sig: "sig"}}
+	req.Raw = raw
 
 	out, err := e.ReplacePlaylistGroup(context.Background(), "keep-g", req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsedGroup) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsedGroup) {
 		t.Fatal("out mismatch")
 	}
 }
@@ -2074,8 +2136,8 @@ func TestCreateChannel_success(t *testing.T) {
 		if len(in.Playlists) != 1 || in.Playlists[0].ID != plID {
 			t.Fatalf("playlists: %+v", in.Playlists)
 		}
-		if !reflect.DeepEqual(in.Body, wantCh) {
-			t.Fatalf("body %+v", in.Body)
+		if !bytes.Equal(in.Raw, signed) {
+			t.Fatalf("raw: %s", in.Raw)
 		}
 	}).Return(nil)
 
@@ -2085,7 +2147,7 @@ func TestCreateChannel_success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, wantCh) {
+	if out == nil || !reflect.DeepEqual(out.Body, wantCh) {
 		t.Fatal("response mismatch")
 	}
 	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelAdded {
@@ -2172,7 +2234,7 @@ func TestGetChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, ch) {
+	if out == nil || !reflect.DeepEqual(out.Body, ch) {
 		t.Fatal("body mismatch")
 	}
 }
@@ -2210,7 +2272,7 @@ func TestListChannels(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("recs len=%d", len(recs))
 	}
-	if !reflect.DeepEqual(items[0], recs[0].Body) {
+	if !reflect.DeepEqual(items[0].Body, recs[0].Body) {
 		t.Fatalf("body mismatch: %+v", items[0])
 	}
 }
@@ -2415,8 +2477,8 @@ func TestReplaceChannel_success(t *testing.T) {
 		if len(in.Playlists) != 1 || in.Playlists[0].ID != plID {
 			t.Fatalf("playlists: %+v", in.Playlists)
 		}
-		if !reflect.DeepEqual(in.Body, parsedCh) {
-			t.Fatalf("body: %+v", in.Body)
+		if !bytes.Equal(in.Raw, signed) {
+			t.Fatalf("raw: %s", in.Raw)
 		}
 	}).Return(nil)
 
@@ -2428,7 +2490,7 @@ func TestReplaceChannel_success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsedCh) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsedCh) {
 		t.Fatal("out mismatch")
 	}
 	if len(notifications.events) != 1 || notifications.events[0].Type != notification.ChannelUpdated || notifications.events[0].Channel.URL != testPublicBase+"/api/v1/channels/"+cid.String() {
@@ -2455,30 +2517,41 @@ func TestReplaceChannel_withSignatures_success(t *testing.T) {
 	}, nil)
 
 	plID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
+	plBody := []byte(`{"id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl2").Return(&store.PlaylistRecord{
-		ID: plID, Slug: "pl2", Body: mustDecodePlaylist(t, []byte(`{"id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}`)),
+		ID: plID, Slug: "pl2", Raw: plBody, Body: mustDecodePlaylist(t, plBody),
 	}, nil)
 
+	raw := []byte(`{"id":"cccccccc-cccc-cccc-cccc-cccccccccccc","slug":"ch-slug","title":"New title","version":"1.0.0","created":"2021-01-01T00:00:00Z",` +
+		`"playlists":["` + localPlaylistRef("pl2") + `"],"publisher":{"key":"` + pubKid + `"},` +
+		`"signatures":[{"kid":"` + pubKid + `","alg":"ed25519","sig":"sig"}]}`)
 	signed := []byte(`{"channelSigPath":true}`)
 	parsedCh := mustDecodeChannel(t, signed)
 	gomock.InOrder(
-		mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil),
-		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().VerifyChannelSignatures(json.RawMessage(raw)).Return(true, nil, nil),
+		mockDP1.EXPECT().SignChannel(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any()).Do(func(_ context.Context, _ string, in *store.ChannelInput) {
+		if !bytes.Equal(in.Raw, signed) {
+			t.Fatalf("raw: %s", in.Raw)
+		}
+	}).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	req := validChannelCreateReq("ignored-on-replace", localPlaylistRef("pl2"))
+	req := validChannelCreateReq("ch-slug", localPlaylistRef("pl2"))
 	req.Title = "New title"
+	req.ID = stringPtr(cid.String())
+	req.Created = stringPtr("2021-01-01T00:00:00Z")
 	req.Publisher = &identity.Entity{Key: pubKid}
 	req.Signatures = []playlist.Signature{{Kid: pubKid, Alg: "ed25519", Sig: "sig"}}
+	req.Raw = raw
 
 	out, err := e.ReplaceChannel(context.Background(), "ch-slug", req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out == nil || !reflect.DeepEqual(*out, parsedCh) {
+	if out == nil || !reflect.DeepEqual(out.Body, parsedCh) {
 		t.Fatal("out mismatch")
 	}
 }
@@ -2773,34 +2846,99 @@ func TestCreatePlaylistWithSignatures_success(t *testing.T) {
 	req := &models.PlaylistCreateRequest{
 		DPVersion:  "1.1.0",
 		Title:      "Test Playlist",
-		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		Slug:       "test-playlist",
+		Items:      []playlist.PlaylistItem{{ID: "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a", Source: "https://example.com"}},
 		Curators:   []identity.Entity{{Key: kid}},
 		ID:         &id,
 		Created:    &created,
 		Signatures: []playlist.Signature{sig},
 	}
+	// The wire bytes carry a member the request struct does not model (items[].created, what ff-cli
+	// emits) and a present-but-empty summary; both must reach verification and the feed signer untouched.
+	req.Raw = []byte(`{"dpVersion":"1.1.0","title":"Test Playlist","slug":"test-playlist","summary":"",` +
+		`"items":[{"id":"0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a","source":"https://example.com","created":"2026-01-01T00:00:00Z"}],` +
+		`"curators":[{"key":"` + kid + `"}],"id":"` + id + `","created":"` + created + `",` +
+		`"signatures":[{"kid":"` + kid + `","alg":"ed25519","sig":"test-sig"}]}`)
 
-	// Mock signature verification passes
-	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil)
+	// Verification and feed signing both run over the received bytes, never a rebuilt document.
+	mockDP1.EXPECT().VerifyPlaylistSignatures(json.RawMessage(req.Raw)).Return(true, nil, nil)
+	signed := append(append([]byte(nil), req.Raw[:len(req.Raw)-1]...), []byte(`,"feed":true}`)...)
+	mockDP1.EXPECT().SignPlaylist(json.RawMessage(req.Raw), gomock.Any()).Return(signed, nil)
 
-	// Mock feed signing
-	signed := []byte(`{"dpVersion":"1.1.0","title":"Test Playlist","items":[{"source":"https://example.com"}],"curators":[{"key":"` + kid + `"}]}`)
-	mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
-
-	// Mock validation
 	parsed := mustDecodePlaylist(t, signed)
 	mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil)
 
-	// Mock store
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), &parsed).Return(nil)
+	// Row identity is projected from the document: id and slug verbatim.
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), uuid.MustParse(id), "test-playlist", json.RawMessage(signed)).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	result, err := e.CreatePlaylist(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	if result == nil || !bytes.Equal(result.Raw, signed) || result.Slug != "test-playlist" {
+		t.Fatalf("result: %+v", result)
+	}
+}
+
+// The signed path requires slug: the feed cannot derive one without editing the signed document.
+func TestCreatePlaylistWithSignatures_missingSlug(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	id := uuid.New().String()
+	created := time.Now().Add(-5 * time.Second).Format(time.RFC3339)
+	req := &models.PlaylistCreateRequest{
+		DPVersion:  "1.1.0",
+		Title:      "No slug",
+		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		ID:         &id,
+		Created:    &created,
+		Signatures: []playlist.Signature{{Kid: "did:key:x", Alg: "ed25519", Sig: "s"}},
+		Raw:        []byte(`{"title":"No slug"}`),
+	}
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	_, err := e.CreatePlaylist(context.Background(), req)
+	if !errors.Is(err, executor.ErrSlugRequired) || !executor.IsSignedSubmissionError(err) {
+		t.Fatalf("expected ErrSlugRequired, got %v", err)
+	}
+}
+
+// A signed PUT must target the resource it replaces: id, slug, and created are compared against the stored row.
+func TestReplacePlaylistWithSignatures_identityMismatch(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+
+	rowID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	created := time.Date(2020, 5, 15, 10, 30, 0, 0, time.UTC)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep").Return(&store.PlaylistRecord{
+		ID:   rowID,
+		Slug: "keep",
+		Body: playlist.Playlist{Created: created.Format(time.RFC3339Nano)},
+	}, nil).AnyTimes()
+
+	otherID := uuid.New().String()
+	createdStr := created.Format(time.RFC3339)
+	laterStr := created.Add(time.Hour).Format(time.RFC3339)
+	sigs := []playlist.Signature{{Kid: "did:key:x", Alg: "ed25519", Sig: "s"}}
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+
+	cases := []struct {
+		name string
+		req  *models.PlaylistReplaceRequest
+	}{
+		{"id", &models.PlaylistReplaceRequest{ID: &otherID, Created: &createdStr, Slug: "keep", Signatures: sigs, Raw: []byte(`{}`)}},
+		{"slug", &models.PlaylistReplaceRequest{ID: stringPtr(rowID.String()), Created: &createdStr, Slug: "other", Signatures: sigs, Raw: []byte(`{}`)}},
+		{"created", &models.PlaylistReplaceRequest{ID: stringPtr(rowID.String()), Created: &laterStr, Slug: "keep", Signatures: sigs, Raw: []byte(`{}`)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := e.ReplacePlaylist(context.Background(), "keep", tc.req)
+			if !errors.Is(err, executor.ErrSignedDocumentMismatch) {
+				t.Fatalf("expected ErrSignedDocumentMismatch, got %v", err)
+			}
+		})
 	}
 }
 
@@ -2822,10 +2960,12 @@ func TestCreatePlaylistWithSignatures_verificationFailure(t *testing.T) {
 	req := &models.PlaylistCreateRequest{
 		DPVersion:  "1.1.0",
 		Title:      "Test",
-		Items:      []playlist.PlaylistItem{{Source: "https://example.com"}},
+		Slug:       "test",
+		Items:      []playlist.PlaylistItem{{ID: "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a", Source: "https://example.com"}},
 		ID:         &id,
 		Created:    &created,
 		Signatures: []playlist.Signature{sig},
+		Raw:        []byte(`{"dpVersion":"1.1.0","title":"Test","slug":"test"}`),
 	}
 
 	// Mock signature verification failure

@@ -11,9 +11,9 @@ package mocks
 
 import (
 	context "context"
+	json "encoding/json"
 	reflect "reflect"
 
-	playlist "github.com/display-protocol/dp1-go/playlist"
 	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 
@@ -59,17 +59,17 @@ func (mr *MockStoreMockRecorder) CreateChannel(ctx, in any) *gomock.Call {
 }
 
 // CreatePlaylist mocks base method.
-func (m *MockStore) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, body *playlist.Playlist) error {
+func (m *MockStore) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreatePlaylist", ctx, id, slug, body)
+	ret := m.ctrl.Call(m, "CreatePlaylist", ctx, id, slug, raw)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // CreatePlaylist indicates an expected call of CreatePlaylist.
-func (mr *MockStoreMockRecorder) CreatePlaylist(ctx, id, slug, body any) *gomock.Call {
+func (mr *MockStoreMockRecorder) CreatePlaylist(ctx, id, slug, raw any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePlaylist", reflect.TypeOf((*MockStore)(nil).CreatePlaylist), ctx, id, slug, body)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePlaylist", reflect.TypeOf((*MockStore)(nil).CreatePlaylist), ctx, id, slug, raw)
 }
 
 // CreatePlaylistGroup mocks base method.
@@ -356,17 +356,17 @@ func (mr *MockStoreMockRecorder) UpdateChannel(ctx, idOrSlug, in any) *gomock.Ca
 }
 
 // UpdatePlaylist mocks base method.
-func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, body *playlist.Playlist) error {
+func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, body)
+	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, raw)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdatePlaylist indicates an expected call of UpdatePlaylist.
-func (mr *MockStoreMockRecorder) UpdatePlaylist(ctx, idOrSlug, body any) *gomock.Call {
+func (mr *MockStoreMockRecorder) UpdatePlaylist(ctx, idOrSlug, raw any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePlaylist", reflect.TypeOf((*MockStore)(nil).UpdatePlaylist), ctx, idOrSlug, body)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePlaylist", reflect.TypeOf((*MockStore)(nil).UpdatePlaylist), ctx, idOrSlug, raw)
 }
 
 // UpdatePlaylistGroup mocks base method.

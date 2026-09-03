@@ -1,9 +1,11 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -99,14 +101,16 @@ func SignatureOrAPIKeyAuth(secret string, log *zap.Logger) gin.HandlerFunc {
 			Signatures []interface{} `json:"signatures"`
 		}
 
-		// Read and restore body so handlers can still bind it
+		// Read and restore the body so the handler can read it again. The replacement must be a real
+		// io.Reader that reports io.EOF: handlers read the body to EOF (bindDocument → GetRawData), and a
+		// reader that returns (0, nil) at the end would make io.ReadAll spin forever.
 		body, err := c.GetRawData()
 		if err != nil {
 			log.Warn("unauthorized: cannot read request body", zap.String("path", c.Request.URL.Path), zap.Error(err))
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing authentication: provide API key or signatures"})
 			return
 		}
-		c.Request.Body = &bodyReaderCloser{body: body}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
 		if err := json.Unmarshal(body, &bodyCheck); err != nil {
 			log.Warn("unauthorized: invalid JSON body", zap.String("path", c.Request.URL.Path), zap.Error(err))
@@ -125,25 +129,6 @@ func SignatureOrAPIKeyAuth(secret string, log *zap.Logger) gin.HandlerFunc {
 		log.Warn("unauthorized: no API key or signatures", zap.String("path", c.Request.URL.Path))
 		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing authentication: provide API key or signatures"})
 	}
-}
-
-// bodyReaderCloser wraps a byte slice to implement io.ReadCloser for restoring request body.
-type bodyReaderCloser struct {
-	body   []byte
-	offset int
-}
-
-func (b *bodyReaderCloser) Read(p []byte) (n int, err error) {
-	if b.offset >= len(b.body) {
-		return 0, nil
-	}
-	n = copy(p, b.body[b.offset:])
-	b.offset += n
-	return n, nil
-}
-
-func (b *bodyReaderCloser) Close() error {
-	return nil
 }
 
 // ZapLogger emits basic request logs (method, path, status, latency).

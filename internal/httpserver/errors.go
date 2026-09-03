@@ -63,5 +63,11 @@ func mapExecutorError(err error) (status int, code, msg string) {
 	if executor.IsInvalidIDError(err) {
 		return http.StatusBadRequest, "invalid_id", err.Error()
 	}
+	if executor.IsSignedSubmissionError(err) {
+		return http.StatusBadRequest, "bad_request", err.Error()
+	}
+	if executor.IsDocumentImmutableError(err) {
+		return http.StatusConflict, "conflict", err.Error()
+	}
 	return mapStoreError(err)
 }

@@ -12,7 +12,13 @@ info:
     - Playlist item indexing and querying
     - Curated channel registry
 
-    Authentication: Bearer token (API key) for write operations.
+    Authentication: Bearer token (API key) for write operations, or a signed document (non-empty
+    `signatures[]`) for POST/PUT of playlists, playlist-groups, and channels.
+
+    Request bodies are decoded strictly: a JSON member the schema does not describe is rejected with
+    400 `bad_request` naming the field, never silently dropped. Signed documents are verified, feed
+    co-signed, stored, and served as the bytes received (DP-1 §7.1 signs the entire document).
+    Documents are always served as stored, so every signature verifies against the response carrying it.
 
 servers:
   - url: http://localhost:8787
@@ -203,7 +209,10 @@ paths:
       summary: Replace playlist
       description: >-
         Fully replaces a playlist document. Authentication: API key, or signature-based auth when the body
-        includes a non-empty `signatures` array (same semantics as POST create).
+        includes a non-empty `signatures` array (same semantics as POST create). A signed replacement must
+        carry the stored resource's `id`, `slug`, and `created` (400 otherwise). A document that carries
+        signatures from keys other than the feed's can only be replaced by a fully signed document; an
+        API-key replace of such a document is refused with 409.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -227,13 +236,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
     patch:
       tags: [playlists]
       summary: Update playlist
       description: >-
-        Partially updates a playlist document (only provided fields are updated). Authentication: API key,
-        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
+        Partially updates a playlist document (only provided fields are updated). Authentication: API key
+        only — the server merges the patch, so no client signature can cover the resulting document. A
+        document that carries signatures from keys other than the feed's is immutable to PATCH (409).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -257,6 +269,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
     delete:
       tags: [playlists]
@@ -357,7 +371,10 @@ paths:
       summary: Replace playlist-group
       description: >-
         Fully replaces a playlist-group document. Authentication: API key, or signature-based auth when the body
-        includes a non-empty `signatures` array (same semantics as POST create).
+        includes a non-empty `signatures` array (same semantics as POST create). A signed replacement must
+        carry the stored resource's `id`, `slug`, and `created` (400 otherwise). A document that carries
+        signatures from keys other than the feed's can only be replaced by a fully signed document; an
+        API-key replace of such a document is refused with 409.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -381,13 +398,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
     patch:
       tags: [playlist-groups]
       summary: Update playlist-group
       description: >-
-        Partially updates a playlist-group document (only provided fields are updated). Authentication: API key,
-        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
+        Partially updates a playlist-group document (only provided fields are updated). Authentication: API key
+        only — the server merges the patch, so no client signature can cover the resulting document. A
+        document that carries signatures from keys other than the feed's is immutable to PATCH (409).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -411,6 +431,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
     delete:
       tags: [playlist-groups]
@@ -514,7 +536,10 @@ paths:
       summary: Replace channel
       description: >-
         Fully replaces a channel document (requires extensions). Authentication: API key, or signature-based
-        auth when the body includes a non-empty `signatures` array (same semantics as POST create).
+        auth when the body includes a non-empty `signatures` array (same semantics as POST create). A signed
+        replacement must carry the stored resource's `id`, `slug`, and `created` (400 otherwise). A document
+        that carries signatures from keys other than the feed's can only be replaced by a fully signed
+        document; an API-key replace of such a document is refused with 409.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -538,13 +563,17 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           description: Channel not found or extensions disabled
+        '409':
+          $ref: '#/components/responses/Conflict'
 
     patch:
       tags: [channels]
       summary: Update channel
       description: >-
         Partially updates a channel document (only provided fields are updated, requires extensions).
-        Authentication: API key, or signature-based auth when `signatures` is non-empty (merged document).
+        Authentication: API key only — the server merges the patch, so no client signature can cover the
+        resulting document. A document that carries signatures from keys other than the feed's is
+        immutable to PATCH (409).
       security:
         - ApiKeyAuth: []
       parameters:
@@ -568,6 +597,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           description: Channel not found or extensions disabled
+        '409':
+          $ref: '#/components/responses/Conflict'
 
     delete:
       tags: [channels]
@@ -846,8 +877,17 @@ components:
             Optional. Array of cryptographic signatures for signature-based authentication.
             When provided with valid curator signatures matching curators[], bypasses API key requirement.
             Server always adds its feed signature regardless of authentication path.
+            When non-empty, the request is a signed document: the server verifies the signatures over the
+            request bytes exactly as received, appends its own `feed` entry to `signatures`, and stores and
+            serves those bytes unchanged (DP-1 §7.1 signs the entire document, so any edit would orphan the
+            client's signature). `id`, `created`, and `slug` are then required and taken verbatim.
           items:
             $ref: '#/components/schemas/Signature'
+        signature:
+          type: string
+          description: >-
+            Deprecated DP-1 v1.0.x single signature (`ed25519:<hex>`). Accepted on signed submissions and
+            preserved verbatim; ignored on API-key submissions.
 
     PlaylistUpdateInput:
       type: object
@@ -879,13 +919,6 @@ components:
           type: object
         dynamicQuery:
           type: object
-        signatures:
-          type: array
-          description: >-
-            When non-empty, signature-based authentication for this request; must verify against merged
-            curators. Server always adds feed signature after verification.
-          items:
-            $ref: '#/components/schemas/Signature'
 
     PlaylistItemInput:
       type: object
@@ -1044,8 +1077,13 @@ components:
             Optional. Array of cryptographic signatures for signature-based authentication.
             When provided with valid curator signature matching curator field, bypasses API key requirement.
             Server always adds its feed signature regardless of authentication path.
+            When non-empty, the request is a signed document: verified, feed co-signed, stored, and served
+            as the bytes received (see PlaylistInput.signatures). `id`, `created`, and `slug` are then required.
           items:
             $ref: '#/components/schemas/Signature'
+        signature:
+          type: string
+          description: Deprecated DP-1 v1.0.x single signature; preserved verbatim on signed submissions.
 
     PlaylistGroupUpdateInput:
       type: object
@@ -1067,13 +1105,6 @@ components:
         coverImage:
           type: string
           format: uri
-        signatures:
-          type: array
-          description: >-
-            When non-empty, signature-based authentication; must verify against merged curator field.
-            Server always adds feed signature after verification.
-          items:
-            $ref: '#/components/schemas/Signature'
 
     PlaylistGroup:
       type: object
@@ -1144,8 +1175,13 @@ components:
             Optional. Array of cryptographic signatures for signature-based authentication.
             When provided with valid publisher signature matching publisher field, bypasses API key requirement.
             Server always adds its feed signature regardless of authentication path.
+            When non-empty, the request is a signed document: verified, feed co-signed, stored, and served
+            as the bytes received (see PlaylistInput.signatures). `id`, `created`, and `slug` are then required.
           items:
             $ref: '#/components/schemas/Signature'
+        signature:
+          type: string
+          description: Deprecated DP-1 v1.0.x single signature; preserved verbatim on signed submissions.
 
     ChannelUpdateInput:
       type: object
@@ -1173,13 +1209,6 @@ components:
         coverImage:
           type: string
           format: uri
-        signatures:
-          type: array
-          description: >-
-            When non-empty, signature-based authentication; must verify against merged publisher.
-            Server always adds feed signature after verification.
-          items:
-            $ref: '#/components/schemas/Signature'
 
     Channel:
       type: object
@@ -1338,6 +1367,18 @@ components:
           example:
             error: unauthorized
             message: Invalid or missing API key
+
+    Conflict:
+      description: >-
+        The stored document carries signatures from keys other than the feed's, so an API-key replace or
+        a PATCH would invalidate them. Replace it with a fully signed document instead.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: conflict
+            message: document carries signatures from other keys and can only be replaced by a fully signed document
 
     NotFound:
       description: Resource not found

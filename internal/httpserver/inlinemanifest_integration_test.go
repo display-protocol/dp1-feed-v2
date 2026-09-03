@@ -211,7 +211,6 @@ func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
 	// publicBaseURL of the integration server, so the executor resolves this from the DB rather
 	// than over HTTP — the local-ingest branch of resolveOnePlaylistRef.
 	groupBody := map[string]any{
-		"dpVersion": "1.1.0",
 		"title":     "Group over an inline-manifest playlist",
 		"curator":   "Curator",
 		"playlists": []string{"http://example.com/api/v1/playlists/" + slug},
@@ -266,7 +265,6 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20))
 
 	groupBody := map[string]any{
-		"dpVersion": "1.1.0",
 		"title":     "Group over a remote inline-manifest playlist",
 		"curator":   "Curator",
 		"playlists": []string{origin.URL + "/remote.json"},

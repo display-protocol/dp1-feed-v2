@@ -1,6 +1,10 @@
 package models
 
-import "github.com/display-protocol/dp1-go/playlist"
+import (
+	"encoding/json"
+
+	"github.com/display-protocol/dp1-go/playlist"
+)
 
 // PlaylistGroupCreateRequest is the JSON body for POST /api/v1/playlist-groups.
 // Playlists is an ordered list of playlist URIs; the executor resolves each to a stored playlist row.
@@ -17,6 +21,11 @@ type PlaylistGroupCreateRequest struct {
 	ID         *string              `json:"id,omitempty"`
 	Created    *string              `json:"created,omitempty"`
 	Signatures []playlist.Signature `json:"signatures,omitempty"`
+	// Signature is the deprecated v1.0.x single signature; see PlaylistCreateRequest.Signature.
+	Signature string `json:"signature,omitempty"`
+
+	// Raw is the request body exactly as received; see PlaylistCreateRequest.Raw.
+	Raw json.RawMessage `json:"-"`
 }
 
 // PlaylistGroupReplaceRequest is the JSON body for PUT /api/v1/playlist-groups/{id}.
@@ -24,6 +33,7 @@ type PlaylistGroupReplaceRequest = PlaylistGroupCreateRequest
 
 // PlaylistGroupUpdateRequest is the JSON body for PATCH /api/v1/playlist-groups/{id} (partial update).
 // Only non-nil fields are updated; nil fields preserve existing values.
+// PATCH is API-key only: a merged document cannot carry a client signature, so there is no signatures field.
 type PlaylistGroupUpdateRequest struct {
 	Title      *string  `json:"title,omitempty"`
 	Slug       *string  `json:"slug,omitempty"`
@@ -31,7 +41,4 @@ type PlaylistGroupUpdateRequest struct {
 	Curator    *string  `json:"curator,omitempty"`
 	Summary    *string  `json:"summary,omitempty"`
 	CoverImage *string  `json:"coverImage,omitempty"`
-
-	// Trusted model: when non-empty, verify curator signatures (merged document) then feed co-signs.
-	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }

@@ -1,6 +1,8 @@
 package models
 
 import (
+	"encoding/json"
+
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 )
@@ -27,6 +29,11 @@ type ChannelCreateRequest struct {
 	ID         *string              `json:"id,omitempty"`
 	Created    *string              `json:"created,omitempty"`
 	Signatures []playlist.Signature `json:"signatures,omitempty"`
+	// Signature is the deprecated v1.0.x single signature; see PlaylistCreateRequest.Signature.
+	Signature string `json:"signature,omitempty"`
+
+	// Raw is the request body exactly as received; see PlaylistCreateRequest.Raw.
+	Raw json.RawMessage `json:"-"`
 }
 
 // ChannelReplaceRequest is the JSON body for PUT /api/v1/channels/{id}.
@@ -34,6 +41,7 @@ type ChannelReplaceRequest = ChannelCreateRequest
 
 // ChannelUpdateRequest is the JSON body for PATCH /api/v1/channels/{id} (partial update).
 // Only non-nil fields are updated; nil fields preserve existing values.
+// PATCH is API-key only: a merged document cannot carry a client signature, so there is no signatures field.
 type ChannelUpdateRequest struct {
 	Title      *string           `json:"title,omitempty"`
 	Slug       *string           `json:"slug,omitempty"`
@@ -43,7 +51,4 @@ type ChannelUpdateRequest struct {
 	Publisher  *identity.Entity  `json:"publisher,omitempty"`
 	Summary    *string           `json:"summary,omitempty"`
 	CoverImage *string           `json:"coverImage,omitempty"`
-
-	// Trusted model: when non-empty, verify publisher signatures (merged document) then feed co-signs.
-	Signatures []playlist.Signature `json:"signatures,omitempty"`
 }
