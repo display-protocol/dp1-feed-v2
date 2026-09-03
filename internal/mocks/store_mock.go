@@ -175,6 +175,21 @@ func (mr *MockStoreMockRecorder) GetPlaylist(ctx, idOrSlug any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPlaylist", reflect.TypeOf((*MockStore)(nil).GetPlaylist), ctx, idOrSlug)
 }
 
+// GetPlaylistBySourceURI mocks base method.
+func (m *MockStore) GetPlaylistBySourceURI(ctx context.Context, uri string) (*store.PlaylistRecord, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPlaylistBySourceURI", ctx, uri)
+	ret0, _ := ret[0].(*store.PlaylistRecord)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPlaylistBySourceURI indicates an expected call of GetPlaylistBySourceURI.
+func (mr *MockStoreMockRecorder) GetPlaylistBySourceURI(ctx, uri any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPlaylistBySourceURI", reflect.TypeOf((*MockStore)(nil).GetPlaylistBySourceURI), ctx, uri)
+}
+
 // GetPlaylistGroup mocks base method.
 func (m *MockStore) GetPlaylistGroup(ctx context.Context, idOrSlug string) (*store.PlaylistGroupRecord, error) {
 	m.ctrl.T.Helper()

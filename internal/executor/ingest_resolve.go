@@ -64,6 +64,26 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
 	}
 
+	// A URI this feed has already ingested resolves from local state, without contacting the origin.
+	//
+	// This is what makes the reference-only contract true rather than nearly true. Ingestion never
+	// refreshes a stored member, so fetching a known reference could only ever rediscover an id already
+	// recorded here — while making the write depend on that origin being reachable. An upstream outage
+	// would then block re-creating or replacing a group whose content, by contract, could not change.
+	// Consulting the mapping first also removes one outbound request per known reference, which lowers the
+	// fan-out ceiling on group and channel writes.
+	//
+	// A store failure other than "not mapped" is fatal: falling back to the network on an unhealthy
+	// database would silently reintroduce the origin dependency this exists to remove.
+	switch rec, err := e.store.GetPlaylistBySourceURI(ctx, uri); {
+	case err == nil:
+		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw, SourceURI: uri}, nil
+	case errors.Is(err, store.ErrNotFound):
+		// Never ingested from this URI, so it has to be fetched to learn what it names.
+	default:
+		return store.IngestedPlaylist{}, fmt.Errorf("playlist source %q: %w", uri, err)
+	}
+
 	if e.fetch == nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("external playlist %q: fetcher is not configured (set playlist.fetch_* and use absolute URLs)", uri)
 	}
@@ -90,7 +110,7 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		rec, err := e.store.GetPlaylist(ctx, id.String())
 		switch {
 		case err == nil:
-			return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
+			return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw, SourceURI: uri}, nil
 		case errors.Is(err, store.ErrNotFound):
 			// Not held here, so this ingest would create it: fall through to the full create bar below.
 			// A tombstoned id also lands here, and the store refuses to insert it (ErrDocumentDeleted),
@@ -137,7 +157,7 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	}
 	// Keep the fetched bytes exactly as served: the remote document's signatures are bound to them, so a
 	// typed re-marshal here would store a member whose own signatures no longer verify.
-	return store.IngestedPlaylist{ID: id, Slug: slug, Raw: append(json.RawMessage(nil), body...)}, nil
+	return store.IngestedPlaylist{ID: id, Slug: slug, Raw: append(json.RawMessage(nil), body...), SourceURI: uri}, nil
 }
 
 // playlistIDFromBody pulls just the id out of a fetched body.

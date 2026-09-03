@@ -297,6 +297,62 @@ WHERE slug = $1`
 }
 
 // GetPlaylistItems implements store.Store.
+// GetPlaylistBySourceURI implements store.Store. It resolves a remote reference from the mapping recorded
+// at ingest time, so a reference this feed has already ingested needs no outbound request.
+func (s *Store) GetPlaylistBySourceURI(ctx context.Context, uri string) (*store.PlaylistRecord, error) {
+	const q = `
+SELECT p.id, p.slug, p.body, p.created_at, p.updated_at
+FROM playlist_sources src
+JOIN playlists p ON p.id = src.playlist_id
+WHERE src.uri = $1`
+
+	var rec store.PlaylistRecord
+	var raw []byte
+	if err := s.pool.QueryRow(ctx, q, uri).Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w", store.ErrNotFound)
+		}
+		return nil, fmt.Errorf("select playlist by source uri: %w", err)
+	}
+	var err error
+	if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// recordPlaylistSources remembers which remote URI each ingested playlist came from.
+//
+// ON CONFLICT DO NOTHING so the first successful ingest of a URI wins: ingestion never refreshes a stored
+// member, so a URI that later serves a different document must not silently re-point an existing
+// reference. Runs on the caller's transaction, so the mapping and the membership it supports commit
+// together. Local (same-origin) references carry no SourceURI and are skipped — their id or slug is
+// already in the path.
+func recordPlaylistSources(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
+	uris := make([]string, 0, len(playlists))
+	ids := make([]uuid.UUID, 0, len(playlists))
+	for _, p := range playlists {
+		if p.SourceURI == "" {
+			continue
+		}
+		uris = append(uris, p.SourceURI)
+		ids = append(ids, p.ID)
+	}
+	if len(uris) == 0 {
+		return nil
+	}
+	const q = `
+INSERT INTO playlist_sources (uri, playlist_id)
+SELECT DISTINCT ON (x.uri) x.uri, x.playlist_id
+FROM unnest($1::text[], $2::uuid[]) WITH ORDINALITY AS x(uri, playlist_id, ord)
+ORDER BY x.uri, x.ord
+ON CONFLICT (uri) DO NOTHING`
+	if _, err := tx.Exec(ctx, q, uris, ids); err != nil {
+		return fmt.Errorf("record playlist sources: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetPlaylistItems(ctx context.Context, idOrSlug string) ([]store.PlaylistItemRecord, error) {
 	const (
 		byID = `
@@ -756,7 +812,11 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 		}
 		return fmt.Errorf("insert referenced playlists: %w", err)
 	}
-	return nil
+	// Record source mappings for every remote reference in this batch, not only the rows just inserted: a
+	// playlist can already be stored (created directly, or ingested from another URI) and still be the
+	// first thing a given URI resolves to. That case is precisely the one the mapping has to cover, since
+	// otherwise the next ingest of that URI would fetch again to learn an id already known here.
+	return recordPlaylistSources(ctx, tx, playlists)
 }
 
 // insertPlaylistGroupMembersBatch writes membership rows in playlist order.

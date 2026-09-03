@@ -176,6 +176,14 @@ type IngestedPlaylist struct {
 	ID   uuid.UUID
 	Slug string
 	Raw  json.RawMessage
+	// SourceURI is the remote URL this playlist was referenced by, or empty for a same-origin reference
+	// (whose id or slug is already in the path, so it needs no mapping).
+	//
+	// Recorded so a later ingest of the same URI can resolve the playlist from local state instead of
+	// fetching the origin again: ingestion never refreshes a stored member, so that fetch only ever
+	// discovered an id this feed already knew. It is set even when the playlist was already stored, since
+	// that is exactly the case the mapping needs to cover.
+	SourceURI string
 }
 
 // PlaylistGroupInput is passed to Store.CreatePlaylistGroup: the group row and playlists to upsert.
@@ -209,6 +217,10 @@ type Store interface {
 	CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error
 	// GetPlaylist loads a playlist by UUID or slug.
 	GetPlaylist(ctx context.Context, idOrSlug string) (*PlaylistRecord, error)
+	// GetPlaylistBySourceURI loads the playlist previously ingested from a remote URI, or ErrNotFound when
+	// this feed has never ingested that URI. It lets reference resolution answer from local state instead
+	// of fetching an origin whose content would be ignored anyway (see IngestedPlaylist.SourceURI).
+	GetPlaylistBySourceURI(ctx context.Context, uri string) (*PlaylistRecord, error)
 	// GetPlaylistItems returns all indexed items for a playlist, ordered by position.
 	GetPlaylistItems(ctx context.Context, idOrSlug string) ([]PlaylistItemRecord, error)
 	// ListPlaylistItems returns a page of indexed items across playlists (optional channel or playlist-group filter).

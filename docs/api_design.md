@@ -127,7 +127,14 @@ Three postures, by verb:
 whatever the remote document says is ignored, and its stored bytes, slug, owner and item index are
 untouched. Identity is resolved **before** the fetched body is judged, so this holds even when the origin
 has since rotted, rotated keys, or started serving something malformed: the id is enough to link the
-stored playlist, and a member's origin can never retroactively block groups that reference it. A
+stored playlist, and a member's origin can never retroactively block groups that reference it.
+
+A remote URI this feed has **already ingested** is not fetched at all — the URI→playlist mapping recorded
+at first ingest resolves it from local state. That is what extends the guarantee above to an origin that
+is simply *unreachable*: since a stored member is never refreshed, fetching a known reference could only
+rediscover an id already held here, while making the write fail during someone else's outage. The first
+successful ingest of a URI wins and is not re-pointed later, matching the never-refresh rule; the mapping
+is dropped when the playlist is deleted, so a retired id cannot be relinked. A
 referenced id that is *new* to this feed is being created, so it is held to the same bar as
 `POST`: the fetched document must be validly self-signed by a curator it declares, and must not name a
 tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —

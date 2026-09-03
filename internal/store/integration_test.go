@@ -1424,6 +1424,59 @@ func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
 	}
 }
 
+// The remote-URI mapping recorded at ingest must survive and resolve on its own, and must not outlive the
+// playlist it points at: a mapping to a deleted (tombstoned) id would send a later ingest back to a row
+// that must not be resurrected.
+func TestIntegration_PlaylistSources_mappingResolvesAndCascades(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	const remoteURI = "https://elsewhere.test/remote-playlist.json"
+	playlistID := uuid.MustParse("00000000-0000-0000-0000-00000000000b")
+	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Ingested from a remote origin"}
+
+	groupID := uuid.MustParse("00000000-0000-0000-0000-00000000000c")
+	groupInput := &store.PlaylistGroupInput{
+		ID:   groupID,
+		Slug: "sources-group",
+		Raw: rawDoc(t, playlistgroup.Group{
+			ID:        groupID.String(),
+			Slug:      "sources-group",
+			Title:     "Sources Group",
+			Playlists: []string{remoteURI},
+		}),
+		Playlists: []store.IngestedPlaylist{
+			{ID: playlistID, Slug: "remote-pl", Raw: rawDoc(t, pl), SourceURI: remoteURI},
+		},
+	}
+	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := st.GetPlaylistBySourceURI(ctx, remoteURI)
+	if err != nil {
+		t.Fatalf("ingesting a remote reference must record its URI mapping: %v", err)
+	}
+	if rec.ID != playlistID {
+		t.Fatalf("mapping resolved to %s, want %s", rec.ID, playlistID)
+	}
+
+	// An unmapped URI is a plain miss, not an error the caller has to special-case.
+	if _, err := st.GetPlaylistBySourceURI(ctx, "https://elsewhere.test/never-seen.json"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown URI should be ErrNotFound, got %v", err)
+	}
+
+	// Deleting the playlist must take the mapping with it (ON DELETE CASCADE), so a later ingest of the
+	// same URI goes through the full create bar and meets the tombstone guard rather than silently
+	// relinking a retired id.
+	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetPlaylistBySourceURI(ctx, remoteURI); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("mapping must not outlive the playlist it points at, got %v", err)
+	}
+}
+
 // A playlist owner's deletion must not be blockable by someone else's document.
 //
 // Creation is open, so any caller can self-sign a group referencing an already-stored playlist they do
