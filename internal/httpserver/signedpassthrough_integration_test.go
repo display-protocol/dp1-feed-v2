@@ -270,3 +270,47 @@ func TestIntegration_DeletedIDCannotBeResurrected(t *testing.T) {
 	}
 	mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusNotFound)
 }
+
+// TestIntegration_SignedPlaylist_itemSlugAndRefHashAccepted pins two item members that are easy to lose.
+//
+// `slug` and `refHash` are real dp1-go PlaylistItem fields, so a client may sign a document containing
+// them — but neither is in the core JSON Schema (refHash is prose-only), which makes them the members a
+// reader of the schema alone would assume are not allowed. Since OpenAPI now declares
+// `additionalProperties: false` on PlaylistItemInput, the spec and the decoder have to agree about them:
+// tightening either side would reject a document its owner already signed, and the signature cannot be
+// re-made without the owner's key.
+func TestIntegration_SignedPlaylist_itemSlugAndRefHashAccepted(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"eeeeeeee-3333-4333-8444-555555555555","slug":"item-extras",` +
+		`"title":"item extras","created":"2026-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + kid + `"}],` +
+		`"items":[{"id":"b2b2b2b2-2222-4333-8444-555555555555","slug":"an-item","source":"https://cdn.example.com/a.html",` +
+		`"ref":"https://cdn.example.com/a.json","refHash":"sha256:` + strings.Repeat("a", 64) + `"}]}`)
+	signed := signWith(t, priv, unsigned, playlist.RoleCurator)
+
+	body := mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signed), http.StatusCreated)
+
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(body, &stored); err != nil {
+		t.Fatal(err)
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(stored["items"], &items); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(items[0]["slug"]); got != `"an-item"` {
+		t.Fatalf("item slug not round-tripped: %s", got)
+	}
+	if !strings.Contains(string(items[0]["refHash"]), "sha256:") {
+		t.Fatalf("item refHash not round-tripped: %s", items[0]["refHash"])
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2308,5 +2309,138 @@ func TestIntegration_Tombstone_blocksIDReuse(t *testing.T) {
 	newID := uuid.MustParse("cccccccc-cccc-cccc-cccc-ccccccccccc2")
 	if err := st.CreatePlaylist(ctx, newID, "tombstone-playlist-new", rawDoc(t, &pl)); err != nil {
 		t.Fatalf("create under a new id must succeed: %v", err)
+	}
+}
+
+// TestIntegration_Create_liveCollisions pins live create collisions to ErrAlreadyExists.
+//
+// Create is open, so colliding with a resource that already exists is ordinary client behavior — a retried
+// POST, or two publishers reaching for the same slug — not a server fault. Without an explicit sentinel the
+// unique violation surfaces as a bare pgx error and the HTTP layer answers 500, which tells the client to
+// retry something that can never succeed. Each create path is covered because each has its own statement;
+// a missed one silently regresses to 500.
+func TestIntegration_Create_liveCollisions(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "collide",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+	plID := uuid.MustParse("dddddddd-dddd-dddd-dddd-ddddddddddd1")
+	if err := st.CreatePlaylist(ctx, plID, "collide-playlist", rawDoc(t, &pl)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+
+	t.Run("playlist id", func(t *testing.T) {
+		err := st.CreatePlaylist(ctx, plID, "some-other-slug", rawDoc(t, &pl))
+		assertAlreadyExists(t, err, "id")
+	})
+
+	t.Run("playlist slug", func(t *testing.T) {
+		other := uuid.MustParse("dddddddd-dddd-dddd-dddd-ddddddddddd2")
+		err := st.CreatePlaylist(ctx, other, "collide-playlist", rawDoc(t, &pl))
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	groupID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddde1")
+	group := playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "collide-group",
+		Title:     "Collide group",
+		Playlists: []string{"collide-playlist"},
+	}
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:        groupID,
+		Slug:      "collide-group",
+		Raw:       rawDoc(t, &group),
+		Playlists: []store.IngestedPlaylist{},
+	}); err != nil {
+		t.Fatalf("CreatePlaylistGroup: %v", err)
+	}
+
+	t.Run("playlist-group slug", func(t *testing.T) {
+		err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+			ID:        uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddde2"),
+			Slug:      "collide-group",
+			Raw:       rawDoc(t, &group),
+			Playlists: []store.IngestedPlaylist{},
+		})
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	chID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf01")
+	ch := channels.Channel{
+		ID:        chID.String(),
+		Slug:      "collide-channel",
+		Title:     "Collide Channel",
+		Version:   "1.0.0",
+		Playlists: []string{"collide-playlist"},
+	}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{
+		ID:        chID,
+		Slug:      "collide-channel",
+		Raw:       rawDoc(t, ch),
+		Playlists: []store.IngestedPlaylist{{ID: plID, Slug: "collide-playlist", Raw: rawDoc(t, &pl)}},
+	}); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	t.Run("channel slug", func(t *testing.T) {
+		err := st.CreateChannel(ctx, &store.ChannelInput{
+			ID:        uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf02"),
+			Slug:      "collide-channel",
+			Raw:       rawDoc(t, ch),
+			Playlists: []store.IngestedPlaylist{},
+		})
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	// The ingestion batch is the subtle one: ON CONFLICT (id) DO NOTHING absorbs an id that is already
+	// stored, but a playlist that is new to this feed can still carry a slug a different live playlist
+	// holds, and that unique violation escapes the DO NOTHING.
+	t.Run("ingested playlist slug", func(t *testing.T) {
+		err := st.CreateChannel(ctx, &store.ChannelInput{
+			ID:   uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf03"),
+			Slug: "ingest-collision-channel",
+			Raw:  rawDoc(t, ch),
+			Playlists: []store.IngestedPlaylist{
+				{ID: uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf04"), Slug: "collide-playlist", Raw: rawDoc(t, &pl)},
+			},
+		})
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	// A tombstoned id must keep its own sentinel: both are 409 at the HTTP layer, but only this one means
+	// the id can never be used again, so conflating them would tell a client to give up on a retryable
+	// create or to retry one that is permanently refused.
+	t.Run("tombstone stays distinct", func(t *testing.T) {
+		deadID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf05")
+		if err := st.CreatePlaylist(ctx, deadID, "doomed-playlist", rawDoc(t, &pl)); err != nil {
+			t.Fatalf("CreatePlaylist: %v", err)
+		}
+		if err := st.DeletePlaylist(ctx, deadID.String(), plUpdatedAt(t, ctx, st, deadID.String())); err != nil {
+			t.Fatalf("DeletePlaylist: %v", err)
+		}
+		err := st.CreatePlaylist(ctx, deadID, "doomed-playlist-again", rawDoc(t, &pl))
+		if !errors.Is(err, store.ErrDocumentDeleted) {
+			t.Fatalf("re-create of a deleted id: want ErrDocumentDeleted, got %v", err)
+		}
+		if errors.Is(err, store.ErrAlreadyExists) {
+			t.Fatalf("tombstone must not also report ErrAlreadyExists, got %v", err)
+		}
+	})
+}
+
+// assertAlreadyExists checks the sentinel and that the message names which uniqueness rule was hit, so an
+// operator reading a 409 can tell an id retry from a slug someone else already took.
+func assertAlreadyExists(t *testing.T, err error, wantMention string) {
+	t.Helper()
+	if !errors.Is(err, store.ErrAlreadyExists) {
+		t.Fatalf("want ErrAlreadyExists, got %v", err)
+	}
+	if !strings.Contains(err.Error(), wantMention) {
+		t.Fatalf("error should mention %q, got %q", wantMention, err)
 	}
 }

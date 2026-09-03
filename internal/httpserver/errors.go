@@ -41,6 +41,11 @@ func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrDocumentDeleted) {
 		return http.StatusConflict, "conflict", "this id was deleted on this feed and cannot be reused; publish under a new id"
 	}
+	// Distinct from the tombstone case above: there the id is gone for good, here it is already taken.
+	// Usually a retry of a POST whose response was lost, so the message says the resource is already there.
+	if errors.Is(err, store.ErrAlreadyExists) {
+		return http.StatusConflict, "conflict", err.Error()
+	}
 	if errors.Is(err, store.ErrListLimitExceeded) {
 		return http.StatusBadRequest, "bad_request", err.Error()
 	}

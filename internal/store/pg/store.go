@@ -96,6 +96,31 @@ func lockDocumentIDs(ctx context.Context, q interface {
 	return nil
 }
 
+// createConflict translates a Postgres unique violation on a create into store.ErrAlreadyExists, or
+// returns nil when err is something else.
+//
+// The tombstone check cannot cover this: it answers "was this id deleted", while these are collisions
+// with a resource that is still live. The common case is not an attack but a retry — a POST whose
+// response was lost, re-sent — so it must read as 409, not as a server fault. The constraint name tells
+// which column collided: Postgres names the implicit ones <table>_pkey and <table>_slug_key.
+func createConflict(err error, resource string) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != uniqueViolationCode {
+		return nil
+	}
+	switch {
+	case strings.HasSuffix(pgErr.ConstraintName, "_pkey"):
+		return fmt.Errorf("%w: a %s with this id already exists", store.ErrAlreadyExists, resource)
+	case strings.HasSuffix(pgErr.ConstraintName, "_slug_key"):
+		return fmt.Errorf("%w: a %s with this slug already exists", store.ErrAlreadyExists, resource)
+	default:
+		return fmt.Errorf("%w: %s violates %s", store.ErrAlreadyExists, resource, pgErr.ConstraintName)
+	}
+}
+
+// uniqueViolationCode is the SQLSTATE Postgres raises for a unique or primary-key violation.
+const uniqueViolationCode = "23505"
+
 // requireNotTombstoned fails a create whose id this feed has already deleted. It runs on the caller's
 // transaction so the check and the insert commit together, and callers must hold lockDocumentID first.
 func requireNotTombstoned(ctx context.Context, q interface {
@@ -218,6 +243,9 @@ RETURNING created_at`
 
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx, insertPlaylist, id, slug, bodyJSON).Scan(&createdAt); err != nil {
+		if conflict := createConflict(err, "playlist"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert playlist: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, id, bodyJSON, createdAt); err != nil {
@@ -717,6 +745,12 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 		return err
 	}
 	if _, err := tx.Exec(ctx, insertMissing, ids, slugs, bodies); err != nil {
+		// ON CONFLICT (id) DO NOTHING absorbs id collisions, but a referenced playlist that is new to this
+		// feed can still carry a slug some other live playlist already holds. That is a conflict with
+		// existing state, not a server fault.
+		if conflict := createConflict(err, "referenced playlist"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert referenced playlists: %w", err)
 	}
 	return nil
@@ -776,6 +810,9 @@ VALUES ($1, $2, $3::jsonb)`
 	groupJSON := []byte(in.Raw)
 
 	if _, err := tx.Exec(ctx, insertGroup, in.ID, in.Slug, groupJSON); err != nil {
+		if conflict := createConflict(err, "playlist-group"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert playlist_group: %w", err)
 	}
 
@@ -1073,6 +1110,9 @@ VALUES ($1, $2, $3::jsonb)`
 	chJSON := []byte(in.Raw)
 
 	if _, err := tx.Exec(ctx, insertChannel, in.ID, in.Slug, chJSON); err != nil {
+		if conflict := createConflict(err, "channel"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert channel: %w", err)
 	}
 

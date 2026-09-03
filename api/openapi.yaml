@@ -765,6 +765,7 @@ components:
 
     PlaylistInput:
       type: object
+      additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a playlist. Authorization is signature-only: `id`,
         `created`, `slug`, `curators`, and a matching `signatures` entry are all required, and the feed
@@ -813,10 +814,18 @@ components:
           format: uri
         defaults:
           type: object
+          description: >-
+            DP-1 playlist defaults. The member set is governed by dp1-go's published schema and is
+            deliberately not restated here, so this document cannot drift from a schema it does not own.
+            It is still decoded strictly: an unknown member inside it is rejected with `400`, so do not
+            add members beyond that schema.
         note:
           $ref: '#/components/schemas/Note'
         dynamicQuery:
           type: object
+          description: >-
+            DP-1 playlists-extension dynamic query. Member set governed by dp1-go's schema (see
+            `defaults`); decoded strictly, so unknown members are rejected with `400`.
         signature:
           type: string
           deprecated: true
@@ -835,6 +844,7 @@ components:
 
     PlaylistItemInput:
       type: object
+      additionalProperties: false
       required:
         - id
         - source
@@ -846,6 +856,11 @@ components:
         source:
           type: string
           format: uri
+        slug:
+          type: string
+          description: >-
+            Optional per-item slug carried in the signed document. The feed stores and returns it but does
+            not route on it — `GET /playlist-items/{id}` resolves by item UUID.
         title:
           type: string
         duration:
@@ -854,6 +869,12 @@ components:
           type: string
         ref:
           type: string
+        refHash:
+          type: string
+          description: >-
+            Optional digest of the manifest behind `ref`. Defined in DP-1 prose rather than the core JSON
+            Schema; the feed accepts it as part of the signed document and does not verify it against a
+            fetched `ref`.
         override:
           type: object
         display:
@@ -958,6 +979,7 @@ components:
 
     PlaylistGroupInput:
       type: object
+      additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a playlist-group. Signature-only: `id`, `created`, `slug`,
         `curator`, and a matching `signatures` entry are required and stored verbatim. On PUT the identity
@@ -1032,6 +1054,7 @@ components:
 
     ChannelInput:
       type: object
+      additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a channel (requires extensions). Signature-only: `id`,
         `created`, `slug`, `publisher`, and a matching `signatures` entry are required and stored verbatim.
@@ -1171,6 +1194,7 @@ components:
 
     Signature:
       type: object
+      additionalProperties: false
       description: DP-1 v1.1+ multisig signature (see DP-1 spec §7.1.1)
       required:
         - alg
@@ -1221,6 +1245,7 @@ components:
 
     PlaylistIntentTarget:
       type: object
+      additionalProperties: false
       description: Identifies the playlist this intent acts on; every field is checked against the stored row.
       required: [type, id, slug]
       properties:
@@ -1235,6 +1260,7 @@ components:
 
     PlaylistReplaceIntent:
       type: object
+      additionalProperties: false
       description: >-
         Authorizes replacing this playlist. Must be signed by a key the stored resource already names as an
         owner, and `created` must be within `auth.intent_max_clock_skew`.
@@ -1265,6 +1291,7 @@ components:
 
     PlaylistReplaceRequest:
       type: object
+      additionalProperties: false
       description: >-
         PUT body for a playlist: the full re-signed document plus the intent authorizing its installation.
         Both halves are verified independently — one without the other authorizes nothing.
@@ -1277,6 +1304,7 @@ components:
 
     PlaylistDeleteRequest:
       type: object
+      additionalProperties: false
       description: >-
         DELETE body for a playlist: a signed intent with no `payloadHash`, since a delete carries no
         document. Must be signed by a stored owner and be fresh.
@@ -1301,6 +1329,7 @@ components:
 
     PlaylistGroupIntentTarget:
       type: object
+      additionalProperties: false
       description: Identifies the playlist-group this intent acts on; every field is checked against the stored row.
       required: [type, id, slug]
       properties:
@@ -1315,6 +1344,7 @@ components:
 
     PlaylistGroupReplaceIntent:
       type: object
+      additionalProperties: false
       description: >-
         Authorizes replacing this playlist-group. Must be signed by a key the stored resource already names as an
         owner, and `created` must be within `auth.intent_max_clock_skew`.
@@ -1345,6 +1375,7 @@ components:
 
     PlaylistGroupReplaceRequest:
       type: object
+      additionalProperties: false
       description: >-
         PUT body for a playlist-group: the full re-signed document plus the intent authorizing its installation.
         Both halves are verified independently — one without the other authorizes nothing.
@@ -1357,6 +1388,7 @@ components:
 
     PlaylistGroupDeleteRequest:
       type: object
+      additionalProperties: false
       description: >-
         DELETE body for a playlist-group: a signed intent with no `payloadHash`, since a delete carries no
         document. Must be signed by a stored owner and be fresh.
@@ -1381,6 +1413,7 @@ components:
 
     ChannelIntentTarget:
       type: object
+      additionalProperties: false
       description: Identifies the channel this intent acts on; every field is checked against the stored row.
       required: [type, id, slug]
       properties:
@@ -1395,6 +1428,7 @@ components:
 
     ChannelReplaceIntent:
       type: object
+      additionalProperties: false
       description: >-
         Authorizes replacing this channel. Must be signed by a key the stored resource already names as an
         owner, and `created` must be within `auth.intent_max_clock_skew`.
@@ -1425,6 +1459,7 @@ components:
 
     ChannelReplaceRequest:
       type: object
+      additionalProperties: false
       description: >-
         PUT body for a channel: the full re-signed document plus the intent authorizing its installation.
         Both halves are verified independently — one without the other authorizes nothing.
@@ -1437,6 +1472,7 @@ components:
 
     ChannelDeleteRequest:
       type: object
+      additionalProperties: false
       description: >-
         DELETE body for a channel: a signed intent with no `payloadHash`, since a delete carries no
         document. Must be signed by a stored owner and be fresh.
@@ -1461,6 +1497,7 @@ components:
 
     Note:
       type: object
+      additionalProperties: false
       description: Text note with optional display duration (playlists extension)
       required:
         - text
@@ -1477,6 +1514,7 @@ components:
 
     Entity:
       type: object
+      additionalProperties: false
       description: >-
         A curator or publisher identity. `key` is a did:key; it is the value a signature's `kid` must
         match to authorize a write on the resource that declares this entity as an owner.

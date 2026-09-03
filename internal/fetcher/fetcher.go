@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"syscall"
@@ -99,41 +100,81 @@ func NewHTTPFetcher(timeout time.Duration, maxBodyBytes int64, opts ...Option) *
 	}
 }
 
-// checkDialAddress rejects a resolved "host:port" whose IP is not publicly routable.
+// checkDialAddress rejects a resolved "host:port" whose IP is not globally routable.
 func checkDialAddress(address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("%w: cannot parse address %q", ErrBlockedDestination, address)
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
 		return fmt.Errorf("%w: %q did not resolve to an IP address", ErrBlockedDestination, host)
 	}
-	if blockedIP(ip) {
-		return fmt.Errorf("%w: %s is not a public address", ErrBlockedDestination, ip)
+	if blockedAddr(addr) {
+		return fmt.Errorf("%w: %s is not a globally routable address", ErrBlockedDestination, addr)
 	}
 	return nil
 }
 
-// blockedIP reports whether ip is one the feed must not contact. An IPv4-mapped IPv6 address is unwrapped
-// first, so ::ffff:127.0.0.1 is classified as the loopback address it really is.
-func blockedIP(ip net.IP) bool {
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	switch {
-	case ip.IsLoopback(), // 127.0.0.0/8, ::1
-		ip.IsUnspecified(),             // 0.0.0.0, ::
-		ip.IsPrivate(),                 // RFC1918, fc00::/7 unique-local
-		ip.IsLinkLocalUnicast(),        // 169.254.0.0/16, fe80::/10 (cloud metadata lives here)
-		ip.IsLinkLocalMulticast(),      //
-		ip.IsInterfaceLocalMulticast(), //
-		ip.IsMulticast():
+// nonGlobalPrefixes is the set of IANA special-purpose prefixes this feed refuses to contact.
+//
+// The policy is deny-by-default over a prefix list rather than a handful of net.IP predicates, because
+// the predicates only cover the famous ranges: benchmarking (198.18.0.0/15), documentation
+// (192.0.2.0/24 and friends), reserved (240.0.0.0/4), "this network" (0.0.0.0/8) and 6to4/NAT64 relays
+// are none of loopback, private, link-local or multicast, yet a deployment that routes special-use space
+// internally would happily let the feed reach them. Every prefix here is one IANA does not consider
+// globally reachable, so no legitimate playlist can be served from it.
+//
+// NAT64 (64:ff9b::/96) and 6to4 (2002::/16) matter for a subtler reason: both embed an IPv4 address, so
+// allowing them would reintroduce every blocked IPv4 range through an IPv6 literal.
+var nonGlobalPrefixes = []netip.Prefix{
+	// IPv4
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 1122)
+	netip.MustParsePrefix("10.0.0.0/8"),      // private (RFC 1918)
+	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT (RFC 6598)
+	netip.MustParsePrefix("127.0.0.0/8"),     // loopback
+	netip.MustParsePrefix("169.254.0.0/16"),  // link-local; cloud metadata lives at 169.254.169.254
+	netip.MustParsePrefix("172.16.0.0/12"),   // private (RFC 1918)
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments (RFC 6890)
+	netip.MustParsePrefix("192.0.2.0/24"),    // documentation TEST-NET-1
+	netip.MustParsePrefix("192.31.196.0/24"), // AS112-v4
+	netip.MustParsePrefix("192.52.193.0/24"), // AMT
+	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast
+	netip.MustParsePrefix("192.168.0.0/16"),  // private (RFC 1918)
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking (RFC 2544)
+	netip.MustParsePrefix("198.51.100.0/24"), // documentation TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // documentation TEST-NET-3
+	netip.MustParsePrefix("224.0.0.0/4"),     // multicast
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, incl. 255.255.255.255 broadcast
+	// IPv6
+	netip.MustParsePrefix("::/128"),         // unspecified
+	netip.MustParsePrefix("::1/128"),        // loopback
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known (embeds IPv4)
+	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use (embeds IPv4)
+	netip.MustParsePrefix("100::/64"),       // discard-only
+	netip.MustParsePrefix("2001::/23"),      // IETF protocol assignments (Teredo, ORCHIDv2, …)
+	netip.MustParsePrefix("2001:db8::/32"),  // documentation — outside 2001::/23, so listed separately
+	netip.MustParsePrefix("2002::/16"),      // 6to4 (embeds IPv4)
+	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637)
+	netip.MustParsePrefix("fc00::/7"),       // unique-local
+	netip.MustParsePrefix("fe80::/10"),      // link-local
+	netip.MustParsePrefix("ff00::/8"),       // multicast
+}
+
+// blockedAddr reports whether addr is one the feed must not contact.
+//
+// An IPv4-mapped IPv6 address is unmapped first, so ::ffff:127.0.0.1 is judged as the loopback address it
+// really is rather than sliding past the IPv4 prefixes. A zone is stripped for the same reason:
+// netip.Prefix.Contains never matches a zoned address, so fe80::1%eth0 would otherwise escape fe80::/10.
+func blockedAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
 		return true
 	}
-	// Carrier-grade NAT, 100.64.0.0/10: shared address space, never a legitimate playlist host.
-	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-		return true
+	addr = addr.Unmap().WithZone("")
+	for _, prefix := range nonGlobalPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
 	}
 	return false
 }

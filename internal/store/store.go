@@ -42,6 +42,15 @@ var ErrConcurrentModification = errors.New("document was modified concurrently")
 // id. Surfaces as HTTP 409.
 var ErrDocumentDeleted = errors.New("document id was deleted and cannot be reused")
 
+// ErrAlreadyExists is returned when a create collides with a resource that is still live — the same id,
+// or a slug another resource already holds.
+//
+// This is the ordinary retry: a client whose successful POST lost its response re-sends it, and the
+// resource is already there. Left unclassified it surfaced as 500, reporting a server fault for a
+// perfectly normal race. Distinct from ErrDocumentDeleted, which is the opposite situation — the id is
+// gone for good rather than already taken — so the two must not share a message.
+var ErrAlreadyExists = errors.New("document already exists")
+
 // Documents are written and read as raw JSON, never re-marshaled through the typed dp1-go structs.
 //
 // Why: DP-1 §7.1 signs the JCS form of the *entire* document, so every signer's payload_hash is bound

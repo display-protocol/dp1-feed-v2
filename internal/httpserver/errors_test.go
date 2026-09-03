@@ -145,3 +145,20 @@ func TestMapStoreError_documentDeleted(t *testing.T) {
 		t.Fatalf("message should tell the client to publish under a new id, got %q", msg)
 	}
 }
+
+// A live collision is a different situation from a tombstone: the id is taken, not retired. Both are 409,
+// so the messages must not be confusable — a client retrying a lost POST needs to know the resource is
+// already there, not that its id is permanently unusable.
+func TestMapStoreError_alreadyExists(t *testing.T) {
+	t.Parallel()
+	st, code, msg := mapExecutorError(fmt.Errorf("store: %w", fmt.Errorf("%w: a playlist with this id already exists", store.ErrAlreadyExists)))
+	if st != http.StatusConflict || code != "conflict" {
+		t.Fatalf("got status=%d code=%q, want 409/conflict", st, code)
+	}
+	if !strings.Contains(msg, "already exists") {
+		t.Fatalf("message should say the resource already exists, got %q", msg)
+	}
+	if strings.Contains(msg, "new id") {
+		t.Fatalf("message must not be confusable with the tombstone case, got %q", msg)
+	}
+}

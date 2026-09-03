@@ -3,9 +3,9 @@ package fetcher
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -97,25 +97,73 @@ func TestHTTPFetcher_FetchPlaylist_invalidURL(t *testing.T) {
 
 func TestBlockedIP_classification(t *testing.T) {
 	t.Parallel()
-	blocked := []string{
-		"127.0.0.1", "::1", // loopback
-		"0.0.0.0", "::", // unspecified
-		"10.1.2.3", "172.16.0.1", "192.168.1.1", // RFC1918
-		"fd00::1",                    // unique-local
-		"169.254.169.254", "fe80::1", // link-local (cloud metadata)
-		"100.64.0.1", "100.127.255.254", // carrier-grade NAT
-		"224.0.0.1",        // multicast
-		"::ffff:127.0.0.1", // IPv4-mapped loopback must be unwrapped, not treated as v6
-		"::ffff:192.168.0.1",
+	// Deny-by-default: every family IANA treats as not globally reachable, not just the famous ones.
+	// The benchmarking, documentation, reserved and relay ranges are the gap an allow-list of
+	// loopback/private/link-local predicates leaves open.
+	blocked := []struct{ addr, why string }{
+		{"127.0.0.1", "loopback"},
+		{"::1", "loopback"},
+		{"0.0.0.0", "unspecified"},
+		{"::", "unspecified"},
+		{"0.0.0.1", "this network (0.0.0.0/8)"},
+		{"10.1.2.3", "RFC1918"},
+		{"172.16.0.1", "RFC1918"},
+		{"192.168.1.1", "RFC1918"},
+		{"fd00::1", "unique-local"},
+		{"169.254.169.254", "link-local cloud metadata"},
+		{"fe80::1", "link-local"},
+		{"fe80::1%eth0", "link-local with a zone must not escape the prefix check"},
+		{"100.64.0.1", "carrier-grade NAT"},
+		{"100.127.255.254", "carrier-grade NAT"},
+		{"224.0.0.1", "multicast"},
+		{"ff02::1", "multicast"},
+		{"192.0.0.1", "IETF protocol assignments"},
+		{"192.0.2.5", "documentation TEST-NET-1"},
+		{"198.51.100.5", "documentation TEST-NET-2"},
+		{"203.0.113.5", "documentation TEST-NET-3"},
+		{"198.18.0.1", "benchmarking"},
+		{"198.19.255.254", "benchmarking"},
+		{"192.88.99.1", "deprecated 6to4 relay anycast"},
+		{"192.31.196.1", "AS112-v4"},
+		{"192.52.193.1", "AMT"},
+		{"240.0.0.1", "reserved"},
+		{"255.255.255.255", "broadcast"},
+		{"2001:db8::1", "documentation"},
+		{"2001::1", "Teredo / IETF protocol assignments"},
+		{"2002::1", "6to4 embeds IPv4"},
+		{"64:ff9b::7f00:1", "NAT64 well-known embeds IPv4"},
+		{"64:ff9b:1::1", "NAT64 local-use"},
+		{"100::1", "discard-only"},
+		{"3fff::1", "documentation (RFC 9637)"},
+		{"::ffff:127.0.0.1", "IPv4-mapped loopback must be unwrapped"},
+		{"::ffff:192.168.0.1", "IPv4-mapped RFC1918 must be unwrapped"},
+		{"::ffff:198.18.0.1", "IPv4-mapped benchmarking must be unwrapped"},
 	}
-	for _, s := range blocked {
-		if ip := net.ParseIP(s); ip == nil || !blockedIP(ip) {
-			t.Errorf("expected %s to be blocked", s)
+	for _, tc := range blocked {
+		addr, err := netip.ParseAddr(tc.addr)
+		if err != nil {
+			t.Errorf("parse %s: %v", tc.addr, err)
+			continue
+		}
+		if !blockedAddr(addr) {
+			t.Errorf("expected %s to be blocked (%s)", tc.addr, tc.why)
 		}
 	}
-	allowed := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946", "100.63.255.255", "100.128.0.1"}
+
+	// Genuinely public addresses must still resolve, or the feed cannot ingest anything.
+	allowed := []string{
+		"8.8.8.8", "1.1.1.1", "93.184.216.34",
+		"100.63.255.255", "100.128.0.1", // either side of the CGNAT block
+		"2606:2800:220:1:248:1893:25c8:1946",
+		"2606:4700:4700::1111",
+	}
 	for _, s := range allowed {
-		if ip := net.ParseIP(s); ip == nil || blockedIP(ip) {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			t.Errorf("parse %s: %v", s, err)
+			continue
+		}
+		if blockedAddr(addr) {
 			t.Errorf("expected %s to be allowed", s)
 		}
 	}

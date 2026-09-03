@@ -139,8 +139,13 @@ re-orders keys and normalises numeric text; both are JCS-neutral, so stored byte
 
 **Request bodies are decoded strictly.** An unknown or misspelled JSON member, or a body holding more
 than one JSON value, is a **`400`** naming the field — never silently dropped, because a dropped member
-changes the bytes the client signed. Bodies are also capped by `server.max_request_bytes` (default 5 MiB);
-exceeding it is **`413`** `payload_too_large`, enforced before the body is buffered for authentication.
+changes the bytes the client signed. Every request schema in OpenAPI therefore declares
+`additionalProperties: false`, so a generated client cannot construct a body the server will reject. The
+few deliberately opaque values (`inlineManifest`, `defaults`, `dynamicQuery`, and the other DP-1
+sub-objects) are left unconstrained because their member sets belong to dp1-go's published schemas, not
+to this document — but they are still decoded strictly, so unknown members inside them are rejected too.
+Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
+`payload_too_large`, enforced before the body is buffered for authentication.
 
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
 - **Registry is read-only over the API** (`GET /api/v1/registry/channels`); there is no write endpoint. Seed it out-of-band.
