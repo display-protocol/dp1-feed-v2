@@ -58,7 +58,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
 - **`displayAt`** — optional ISO 8601 datetime on a playlist item (same level as `source`, not inside `display`). Under playlist extension validation, accepted wire forms per §3.5.2 are local datetime with seconds and no timezone (`2026-07-21T00:00:00`, display-locale local), or absolute RFC 3339 date-time with `Z`/colon offset. Date-only (`YYYY-MM-DD`) and compact offset without colon are **not** accepted by that extension validator. This feed stores and returns the item metadata; it does not compute playback eligibility.
 - **`inlineManifest`** — optional complete Ref Manifest carried on a playlist item (same level as `source`) instead of behind `ref`, per §3.6. Under playlist extension validation it is checked against the unmodified ref-manifest schema, so a malformed manifest fails the whole write with **`400`**. With extensions **off**, the core schema does not describe the field and core DP-1 tolerates unknown ones, so the manifest is stored and returned **unchecked** (same posture as `displayAt`). The manifest is **not** returned byte-identical to the one submitted — signing and JSONB storage re-encode it — so do not hash, diff, or cache the returned blob. The feed does not fetch `ref`, merge the two, or apply the §3.6 precedence (a fetched `ref` manifest wins, the inline copy is the offline fallback) — that resolution belongs to players. The manifest is part of the signed payload, with no `refHash` counterpart of its own.
-  - **No inbound body limit.** Nothing caps request size, so a playlist carrying large inline manifests can be published directly yet exceed `playlist.fetch_max_body_bytes` (default 4 MiB) when another deployment ingests it by URL into a group or channel. `playlist_item_index` also holds a second full copy of each manifest, which `GET /api/v1/playlist-items` returns up to 100 rows at a time. Size inline manifests with both limits in mind.
+  - **Two size limits apply.** Inbound bodies are capped by `server.max_request_bytes` (default 5 MiB, **`413`** beyond it), and a playlist fetched *by URL* during group/channel ingest is capped by `playlist.fetch_max_body_bytes` (default 4 MiB). A playlist carrying large inline manifests can therefore be publishable directly yet un-ingestable by another deployment. `playlist_item_index` also holds a second full copy of each manifest, which `GET /api/v1/playlist-items` returns up to 100 rows at a time. Size inline manifests with all three in mind.
 
 ---
 
@@ -110,6 +110,17 @@ Three postures, by verb:
    of the stored resource. DP-1 defines no delete document; this envelope is feed-local. The delete is
    conditional on the generation observed at authorization (**`409`** if the resource changed in between),
    and it **tombstones the id** in the same transaction.
+
+**Membership ingestion is reference-only.** When a group or channel names a playlist URL, the feed
+**links** that playlist but never modifies it. A referenced id already stored here is linked as-is —
+whatever the remote document says is ignored, and its stored bytes, slug, owner and item index are
+untouched. A referenced id that is *new* to this feed is being created, so it is held to the same bar as
+`POST`: the fetched document must be validly self-signed by a curator it declares, and must not name a
+tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
+re-ingesting a group does not refresh member bodies. (Without this, any client able to create a channel
+could host a document reusing another owner's playlist id and overwrite it; verifying signatures alone
+would not help, since an attacker self-signs the spoof with their own key.) Cross-feed propagation is the
+webhook path's job, not ingestion's.
 
 **Deleted ids are not reusable.** A successful DELETE records a tombstone, and a later `POST` naming that
 id is refused with **`409` `conflict`**. This is what stops a captured, still-valid document from being
