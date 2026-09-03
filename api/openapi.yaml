@@ -10,9 +10,14 @@ info:
     - Playlist-group (exhibition) composition
     - Channel management (requires extensions enabled)
     - Playlist item indexing and querying
-    - Curated channel registry
+    - Curated channel registry (read-only over the API)
 
-    Authentication: Bearer token (API key) for write operations.
+    Authentication: signatures only — there is no API key. Every mutating request is authorized by the
+    cryptographic signatures it carries. POST (create) is open: the body must be validly self-signed by a
+    key it declares in `curators`/`publisher`. PUT (replace) and DELETE are owner-bound: the request must
+    be signed by a key the *stored* document already names as an owner, and the owner set is immutable on
+    replace. DELETE carries a signed delete-intent body (`SignedDeleteRequest`). The feed always adds its
+    own `feed` signature. There is no PATCH, and the registry has no write endpoint.
 
 servers:
   - url: http://localhost:8787
@@ -146,9 +151,9 @@ paths:
     post:
       tags: [playlists]
       summary: Create playlist
-      description: Creates a new DP-1 playlist with v1.1+ multisig
-      security:
-        - ApiKeyAuth: []
+      description: >-
+        Creates a new DP-1 playlist. Open to any client: the body must carry a non-empty `signatures`
+        array with a valid curator signature over the document. The feed adds its `feed` signature.
       requestBody:
         required: true
         content:
@@ -202,10 +207,10 @@ paths:
       tags: [playlists]
       summary: Replace playlist
       description: >-
-        Fully replaces a playlist document. Authentication: API key, or signature-based auth when the body
-        includes a non-empty `signatures` array (same semantics as POST create).
-      security:
-        - ApiKeyAuth: []
+        Fully replaces a playlist. Owner-bound and owner-immutable: the body must carry a non-empty
+        `signatures` array with a valid signature from a key the stored playlist already lists in
+        `curators`, and the `curators` set may not change. Returns 403 if the signer is not an owner or the
+        owner set changed.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -225,17 +230,18 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
-    patch:
+    delete:
       tags: [playlists]
-      summary: Update playlist
+      summary: Delete playlist
       description: >-
-        Partially updates a playlist document (only provided fields are updated). Authentication: API key,
-        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
-      security:
-        - ApiKeyAuth: []
+        Deletes a playlist (fails if referenced by groups/channels). The request body is a signed
+        delete-intent (`SignedDeleteRequest`) that must target this playlist and be signed by one of its
+        curators within the freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -243,34 +249,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PlaylistUpdateInput'
+              $ref: '#/components/schemas/SignedDeleteRequest'
       responses:
-        '200':
-          description: Playlist updated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Playlist'
+        '204':
+          description: Playlist deleted
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      tags: [playlists]
-      summary: Delete playlist
-      description: Deletes a playlist (fails if referenced by groups/channels)
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: '#/components/parameters/IdOrSlug'
-      responses:
-        '204':
-          description: Playlist deleted
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -301,9 +289,9 @@ paths:
     post:
       tags: [playlist-groups]
       summary: Create playlist-group
-      description: Creates a new playlist-group with resolved playlist references
-      security:
-        - ApiKeyAuth: []
+      description: >-
+        Creates a new playlist-group with resolved playlist references. Open to any client: the body must
+        carry a non-empty `signatures` array with a valid signature from the declared `curator`.
       requestBody:
         required: true
         content:
@@ -356,10 +344,9 @@ paths:
       tags: [playlist-groups]
       summary: Replace playlist-group
       description: >-
-        Fully replaces a playlist-group document. Authentication: API key, or signature-based auth when the body
-        includes a non-empty `signatures` array (same semantics as POST create).
-      security:
-        - ApiKeyAuth: []
+        Fully replaces a playlist-group. Owner-bound and owner-immutable: the body must carry a non-empty
+        `signatures` array with a valid signature from the stored `curator`, and `curator` may not change.
+        Returns 403 if the signer is not the owner or the owner changed.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -379,17 +366,18 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
-    patch:
+    delete:
       tags: [playlist-groups]
-      summary: Update playlist-group
+      summary: Delete playlist-group
       description: >-
-        Partially updates a playlist-group document (only provided fields are updated). Authentication: API key,
-        or signature-based auth when `signatures` is non-empty (signatures apply to the merged document).
-      security:
-        - ApiKeyAuth: []
+        Deletes a playlist-group (cascades membership). The request body is a signed delete-intent
+        (`SignedDeleteRequest`) that must target this group and be signed by its `curator` within the
+        freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -397,34 +385,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PlaylistGroupUpdateInput'
+              $ref: '#/components/schemas/SignedDeleteRequest'
       responses:
-        '200':
-          description: Playlist-group updated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PlaylistGroup'
+        '204':
+          description: Playlist-group deleted
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      tags: [playlist-groups]
-      summary: Delete playlist-group
-      description: Deletes a playlist-group (cascades membership)
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: '#/components/parameters/IdOrSlug'
-      responses:
-        '204':
-          description: Playlist-group deleted
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -457,9 +427,10 @@ paths:
     post:
       tags: [channels]
       summary: Create channel
-      description: Creates a new channel with resolved playlist references (requires extensions)
-      security:
-        - ApiKeyAuth: []
+      description: >-
+        Creates a new channel with resolved playlist references (requires extensions). Open to any client:
+        the body must carry a non-empty `signatures` array with a valid signature from the declared
+        `publisher`.
       requestBody:
         required: true
         content:
@@ -513,10 +484,9 @@ paths:
       tags: [channels]
       summary: Replace channel
       description: >-
-        Fully replaces a channel document (requires extensions). Authentication: API key, or signature-based
-        auth when the body includes a non-empty `signatures` array (same semantics as POST create).
-      security:
-        - ApiKeyAuth: []
+        Fully replaces a channel (requires extensions). Owner-bound and owner-immutable: the body must carry
+        a non-empty `signatures` array with a valid signature from the stored `publisher`, and `publisher`
+        may not change. Returns 403 if the signer is not the publisher or the publisher changed.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -536,17 +506,18 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Channel not found or extensions disabled
 
-    patch:
+    delete:
       tags: [channels]
-      summary: Update channel
+      summary: Delete channel
       description: >-
-        Partially updates a channel document (only provided fields are updated, requires extensions).
-        Authentication: API key, or signature-based auth when `signatures` is non-empty (merged document).
-      security:
-        - ApiKeyAuth: []
+        Deletes a channel (cascades membership, requires extensions). The request body is a signed
+        delete-intent (`SignedDeleteRequest`) that must target this channel and be signed by its
+        `publisher` within the freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -554,34 +525,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ChannelUpdateInput'
+              $ref: '#/components/schemas/SignedDeleteRequest'
       responses:
-        '200':
-          description: Channel updated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Channel'
+        '204':
+          description: Channel deleted
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '404':
-          description: Channel not found or extensions disabled
-
-    delete:
-      tags: [channels]
-      summary: Delete channel
-      description: Deletes a channel (cascades membership, requires extensions)
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: '#/components/parameters/IdOrSlug'
-      responses:
-        '204':
-          description: Channel deleted
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Channel not found or extensions disabled
 
@@ -673,56 +626,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-    put:
-      tags: [registry]
-      summary: Replace curated channel registry
-      description: Atomically replaces the entire registry with validation
-      security:
-        - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ChannelRegistry'
-      responses:
-        '200':
-          description: Registry updated successfully
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  success:
-                    type: boolean
-                    example: true
-                  message:
-                    type: string
-                    example: Curated registry updated successfully
-                  items_count:
-                    type: integer
-                    description: Number of publishers
-                  total_channels:
-                    type: integer
-                    description: Total number of channel URLs
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
 components:
-  securitySchemes:
-    ApiKeyAuth:
-      type: http
-      scheme: bearer
-      description: >
-        API key for write operations. Alternatively, omit this header when the JSON body includes a
-        non-empty `signatures` array and the server successfully verifies curator or publisher
-        signatures (POST create; PUT/PATCH replace/update on playlists, playlist-groups, and channels).
-        DELETE and registry PUT require this API key (no signature-only path).
-
   parameters:
     IdOrSlug:
       name: id
@@ -846,44 +750,6 @@ components:
             Optional. Array of cryptographic signatures for signature-based authentication.
             When provided with valid curator signatures matching curators[], bypasses API key requirement.
             Server always adds its feed signature regardless of authentication path.
-          items:
-            $ref: '#/components/schemas/Signature'
-
-    PlaylistUpdateInput:
-      type: object
-      description: Partial update for playlist (all fields optional, only provided fields are updated)
-      properties:
-        dpVersion:
-          type: string
-          example: "1.1.0"
-        title:
-          type: string
-        slug:
-          type: string
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/PlaylistItemInput'
-        note:
-          $ref: '#/components/schemas/Note'
-        curators:
-          type: array
-          items:
-            type: object
-        summary:
-          type: string
-        coverImage:
-          type: string
-          format: uri
-        defaults:
-          type: object
-        dynamicQuery:
-          type: object
-        signatures:
-          type: array
-          description: >-
-            When non-empty, signature-based authentication for this request; must verify against merged
-            curators. Server always adds feed signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1047,34 +913,6 @@ components:
           items:
             $ref: '#/components/schemas/Signature'
 
-    PlaylistGroupUpdateInput:
-      type: object
-      description: Partial update for playlist-group (all fields optional, only provided fields are updated)
-      properties:
-        title:
-          type: string
-        slug:
-          type: string
-        playlists:
-          type: array
-          description: Array of playlist URIs or slugs
-          items:
-            type: string
-        curator:
-          type: string
-        summary:
-          type: string
-        coverImage:
-          type: string
-          format: uri
-        signatures:
-          type: array
-          description: >-
-            When non-empty, signature-based authentication; must verify against merged curator field.
-            Server always adds feed signature after verification.
-          items:
-            $ref: '#/components/schemas/Signature'
-
     PlaylistGroup:
       type: object
       description: DP-1 playlist-group document
@@ -1144,40 +982,6 @@ components:
             Optional. Array of cryptographic signatures for signature-based authentication.
             When provided with valid publisher signature matching publisher field, bypasses API key requirement.
             Server always adds its feed signature regardless of authentication path.
-          items:
-            $ref: '#/components/schemas/Signature'
-
-    ChannelUpdateInput:
-      type: object
-      description: Partial update for channel (all fields optional, only provided fields are updated)
-      properties:
-        title:
-          type: string
-        slug:
-          type: string
-        version:
-          type: string
-        playlists:
-          type: array
-          description: Array of playlist URIs or slugs
-          items:
-            type: string
-        curators:
-          type: array
-          items:
-            type: object
-        publisher:
-          type: object
-        summary:
-          type: string
-        coverImage:
-          type: string
-          format: uri
-        signatures:
-          type: array
-          description: >-
-            When non-empty, signature-based authentication; must verify against merged publisher.
-            Server always adds feed signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1288,6 +1092,52 @@ components:
           description: Base64-encoded signature
           example: "dGVzdC1zaWduYXR1cmU="
 
+    SignedDeleteRequest:
+      type: object
+      description: >-
+        Signed delete-intent — the body of a DELETE. It is a feed-local envelope (DP-1 defines no delete
+        document) signed by an owner of the target resource. The server verifies the signatures over these
+        bytes with `signatures` removed (§7.1 digest), requires a signer whose kid is an owner of the
+        stored resource (curator for playlists/groups, publisher for channels), and rejects a `created`
+        outside the configured freshness window.
+      required:
+        - action
+        - target
+        - created
+        - signatures
+      properties:
+        action:
+          type: string
+          description: Must be "delete".
+          enum: ["delete"]
+        target:
+          type: object
+          description: Identifies the exact resource to delete; must match the stored row.
+          required:
+            - type
+            - id
+            - slug
+          properties:
+            type:
+              type: string
+              enum: ["playlist", "playlist-group", "channel"]
+            id:
+              type: string
+              format: uuid
+            slug:
+              type: string
+        created:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp; must be within the server's delete freshness window.
+          example: "2025-06-01T12:00:00Z"
+        signatures:
+          type: array
+          minItems: 1
+          description: Owner signatures over the intent (JCS with `signatures` removed).
+          items:
+            $ref: '#/components/schemas/Signature'
+
     Note:
       type: object
       description: Text note with optional display duration (playlists extension)
@@ -1330,14 +1180,32 @@ components:
                 message: Signature cryptographic verification failed
 
     Unauthorized:
-      description: Missing or invalid API key
+      description: Missing authentication — the request body carried no signatures
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: unauthorized
-            message: Invalid or missing API key
+            message: "missing authentication: request body must carry signatures"
+
+    Forbidden:
+      description: >-
+        The signature is valid but the signer is not an owner of the resource, or a replace attempted to
+        change the immutable owner set.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            not_owner:
+              value:
+                error: forbidden
+                message: request is not signed by an owner of the resource
+            owner_immutable:
+              value:
+                error: forbidden
+                message: resource owner is immutable and cannot be changed
 
     NotFound:
       description: Resource not found

@@ -31,19 +31,3 @@ type ChannelCreateRequest struct {
 
 // ChannelReplaceRequest is the JSON body for PUT /api/v1/channels/{id}.
 type ChannelReplaceRequest = ChannelCreateRequest
-
-// ChannelUpdateRequest is the JSON body for PATCH /api/v1/channels/{id} (partial update).
-// Only non-nil fields are updated; nil fields preserve existing values.
-type ChannelUpdateRequest struct {
-	Title      *string           `json:"title,omitempty"`
-	Slug       *string           `json:"slug,omitempty"`
-	Version    *string           `json:"version,omitempty"`
-	Playlists  []string          `json:"playlists,omitempty"`
-	Curators   []identity.Entity `json:"curators,omitempty"`
-	Publisher  *identity.Entity  `json:"publisher,omitempty"`
-	Summary    *string           `json:"summary,omitempty"`
-	CoverImage *string           `json:"coverImage,omitempty"`
-
-	// Trusted model: when non-empty, verify publisher signatures (merged document) then feed co-signs.
-	Signatures []playlist.Signature `json:"signatures,omitempty"`
-}

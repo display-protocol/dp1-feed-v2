@@ -72,7 +72,7 @@ func TestNewCORSMiddleware_allowlist_forbiddenOrigin(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestNewCORSMiddleware_preflightAuthorizationHeader(t *testing.T) {
+func TestNewCORSMiddleware_preflightContentTypeHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{CORS: config.CORSConfig{}}
 
@@ -80,14 +80,17 @@ func TestNewCORSMiddleware_preflightAuthorizationHeader(t *testing.T) {
 	r.Use(newCORSMiddleware(cfg))
 	r.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
 
+	// Authentication travels in the JSON body (signatures), not a header, so preflight need only permit
+	// Content-Type. The former Authorization allowlist entry is intentionally gone.
 	req := httptest.NewRequest(http.MethodOptions, "http://server.test/x", nil)
 	req.Header.Set("Origin", "https://client.example")
 	req.Header.Set("Access-Control-Request-Method", "POST")
-	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusNoContent, w.Code)
 	allowHeaders := w.Header().Get("Access-Control-Allow-Headers")
-	assert.Contains(t, allowHeaders, "Authorization")
+	assert.Contains(t, allowHeaders, "Content-Type")
+	assert.NotContains(t, allowHeaders, "Authorization")
 }

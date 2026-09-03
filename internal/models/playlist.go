@@ -34,22 +34,3 @@ type PlaylistCreateRequest struct {
 
 // PlaylistReplaceRequest is the JSON body for PUT /api/v1/playlists/{id} (full replacement, same shape as create).
 type PlaylistReplaceRequest = PlaylistCreateRequest
-
-// PlaylistUpdateRequest is the JSON body for PATCH /api/v1/playlists/{id} (partial update with optional fields).
-// Only non-nil fields are updated; nil fields preserve existing values.
-type PlaylistUpdateRequest struct {
-	DPVersion *string                 `json:"dpVersion,omitempty"`
-	Title     *string                 `json:"title,omitempty"`
-	Slug      *string                 `json:"slug,omitempty"`
-	Items     []playlist.PlaylistItem `json:"items,omitempty"`
-
-	Note         *dp1playlists.Note         `json:"note,omitempty"`
-	Curators     []identity.Entity          `json:"curators,omitempty"`
-	Summary      *string                    `json:"summary,omitempty"`
-	CoverImage   *string                    `json:"coverImage,omitempty"`
-	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
-	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
-
-	// Trusted model: when non-empty, same semantics as create — verify curator signatures then feed co-signs.
-	Signatures []playlist.Signature `json:"signatures,omitempty"`
-}

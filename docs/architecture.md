@@ -50,7 +50,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 ## Background job and transaction ownership
 
 - **Background jobs:** none by design. Every operation completes in the request path; there are no workers or queues.
-- **Channel notifications:** notified channel routes establish one application deadline at request entry, before authentication and body parsing. The deadline is `server.write_timeout - server.response_write_reserve`; resolution, final persistence, and post-commit notification share its remaining budget, leaving the reserve for response encoding and socket writes. After a channel create, replace, patch, or delete commits, the executor sends the canonical channel URL to configured clients in the same request path. Slug-targeted mutations resolve once and write by UUID so the committed row and notification identity cannot diverge if a slug is concurrently reused. Final persistence becomes mutation-owned once it begins: it preserves request values and the route deadline while ignoring later client cancellation. A request canceled before that boundary does not start persistence. Post-commit delivery preserves the same deadline while detaching cancellation, and notification fan-out applies its shorter aggregate timeout. Playlist fetch timeout remains per remote request; resolution runs eight fetches concurrently and may span multiple batches. Configuration enforces a minimum write budget for one fetch, notification delivery, and the response reserve, while operators must increase it for larger expected batches. Webhook endpoints are credential-free, query-free HTTP(S) URLs with a hostname, redirects are refused, and authentication comes only from the event signature. Public channel URLs also require a hostname and must not use loopback or unspecified bind addresses, including scoped IPv6 forms, when notification clients are enabled. Delivery is best-effort: failures are logged and do not change the successful mutation response. This avoids duplicate create retries caused by returning an error after commit. Guaranteed retry across process failure or the route deadline would require a durable outbox and an explicit background-job owner.
+- **Channel notifications:** notified channel routes establish one application deadline at request entry, before authentication and body parsing. The deadline is `server.write_timeout - server.response_write_reserve`; resolution, final persistence, and post-commit notification share its remaining budget, leaving the reserve for response encoding and socket writes. After a channel create, replace, or delete commits, the executor sends the canonical channel URL to configured clients in the same request path. Slug-targeted mutations resolve once and write by UUID so the committed row and notification identity cannot diverge if a slug is concurrently reused. Final persistence becomes mutation-owned once it begins: it preserves request values and the route deadline while ignoring later client cancellation. A request canceled before that boundary does not start persistence. Post-commit delivery preserves the same deadline while detaching cancellation, and notification fan-out applies its shorter aggregate timeout. Playlist fetch timeout remains per remote request; resolution runs eight fetches concurrently and may span multiple batches. Configuration enforces a minimum write budget for one fetch, notification delivery, and the response reserve, while operators must increase it for larger expected batches. Webhook endpoints are credential-free, query-free HTTP(S) URLs with a hostname, redirects are refused, and authentication comes only from the event signature. Public channel URLs also require a hostname and must not use loopback or unspecified bind addresses, including scoped IPv6 forms, when notification clients are enabled. Delivery is best-effort: failures are logged and do not change the successful mutation response. This avoids duplicate create retries caused by returning an error after commit. Guaranteed retry across process failure or the route deadline would require a durable outbox and an explicit background-job owner.
 - **Transactions:** multi-step writes (e.g. playlist-group or channel create with resolved playlists and membership) are owned by **`internal/executor`**, which uses the store’s transactional APIs so ingest + persist commit or roll back together. The HTTP layer does not start or manage database transactions.
 
 ---
@@ -82,9 +82,9 @@ Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membersh
 
 ```text
 POST /api/v1/playlists
-  → Validate API key
+  → RequireSignatures: body must carry a non-empty signatures[]
   → Parse JSON into models
-  → Executor: sign (dp1svc) → validate → store
+  → Executor: verify curator/publisher signatures → feed co-sign (dp1svc) → validate → store
   → Return signed playlist JSON
 ```
 
@@ -100,11 +100,11 @@ GET /api/v1/playlists/:id
 
 ## Authentication
 
-- **Writes:** `Authorization: Bearer <api-key>`.
+- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; owner immutable). DELETE carries a signed delete-intent body.
 - **Reads:** public unless restricted by deployment.
-- **Cryptographic signatures:** Ed25519 (v1.1+ multisig) via `dp1svc`; documents carry feed-operator proof, not end-user OAuth.
+- **Cryptographic signatures:** Ed25519 (v1.1+ multisig) via `dp1svc`; documents carry curator/publisher and feed-operator proof, not end-user OAuth.
 
-Single shared API key is the default deployment story; production may front the service with stronger auth or a reverse proxy.
+Ownership is derived from each document's declared curators/publisher — there is no global key allowlist. Since anyone can create (and thereby own) a resource, production may front the service with a gateway or reverse proxy to restrict who may create. See `docs/api_design.md` for the full authorization posture.
 
 ---
 
@@ -148,7 +148,7 @@ Configuration load order: defaults → YAML → environment variables. For Docke
 
 ## Intentionally out of scope
 
-- OAuth/JWT (use API keys or a proxy).
+- OAuth/JWT and any global signer allowlist (front with a proxy if you must restrict who may create).
 - Built-in rate limiting (use edge proxy if required).
 - Async pipelines and message queues.
 - Splitting into multiple services for this codebase’s default deployment model.

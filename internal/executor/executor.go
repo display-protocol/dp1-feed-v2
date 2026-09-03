@@ -34,19 +34,28 @@ import (
 // (directives in internal/mocks/doc.go; uses go tool mockgen from go.mod tools.)
 //
 // Create/Replace methods return the validated, persisted document (signatures included); HTTP layer JSON-encodes the response.
+//
+// Authorization model (there is no API key): every mutating method is authorized by cryptographic
+// signatures, never a shared secret.
+//   - Create is open: any client may submit a document validly self-signed by its own declared
+//     curator/publisher. The signer becomes the resource's owner.
+//   - Replace and Delete are owner-bound: the request must carry a verifying signature whose kid is an
+//     owner (curator/publisher) of the *stored* resource, and the owner set is immutable — a Replace
+//     may not change curators/publisher. Any edit re-derives the document bytes, so the owner re-signs
+//     and the feed co-signs.
+//
+// See internal/executor/signed_auth.go for the shared owner checks and the signed delete-intent.
 type Executor interface {
-	// CreatePlaylist signs (v1.1+ multisig), validates the signed document, and stores a new playlist.
+	// CreatePlaylist verifies the client's curator signatures, feed co-signs, validates, and stores a new playlist.
 	CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*playlist.Playlist, error)
 	// GetPlaylist returns the stored playlist document for id or slug (HTTP layer JSON-encodes the response).
 	GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Playlist, error)
 	// ListPlaylists returns one page of playlist bodies and an optional next cursor (optional channel or playlist-group filter; id or slug).
 	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]playlist.Playlist, string, error)
-	// ReplacePlaylist performs a full PUT: sign, validate signed JSON, and update storage.
+	// ReplacePlaylist performs a full PUT (owner-bound, owner immutable): verify owner signature, feed co-sign, validate, update.
 	ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error)
-	// UpdatePlaylist performs a partial PATCH: merges non-nil fields from req with existing playlist, then signs, validates, and updates storage.
-	UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistUpdateRequest) (*playlist.Playlist, error)
-	// DeletePlaylist removes a playlist row.
-	DeletePlaylist(ctx context.Context, idOrSlug string) error
+	// DeletePlaylist verifies the signed delete-intent against the stored owner keys, then removes the playlist row.
+	DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
 	// ListPlaylistItems returns one page of stored playlist items from the item index (OpenAPI GET /playlist-items).
 	ListPlaylistItems(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]playlist.PlaylistItem, string, error)
@@ -59,12 +68,10 @@ type Executor interface {
 	GetPlaylistGroup(ctx context.Context, idOrSlug string) (*playlistgroup.Group, error)
 	// ListPlaylistGroups returns one page of playlist-group bodies.
 	ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]playlistgroup.Group, string, error)
-	// ReplacePlaylistGroup re-resolves playlist URIs, re-signs, and commits updates in one transaction.
+	// ReplacePlaylistGroup re-resolves playlist URIs, verifies the owner signature, re-signs, and commits updates in one transaction.
 	ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest) (*playlistgroup.Group, error)
-	// UpdatePlaylistGroup performs a partial PATCH: merges non-nil fields from req with existing group, then re-resolves URIs, re-signs, and updates.
-	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupUpdateRequest) (*playlistgroup.Group, error)
-	// DeletePlaylistGroup removes a playlist-group row (membership CASCADE).
-	DeletePlaylistGroup(ctx context.Context, idOrSlug string) error
+	// DeletePlaylistGroup verifies the signed delete-intent against the stored curator, then removes the playlist-group row (membership CASCADE).
+	DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
 	// CreateChannel resolves playlist URIs, signs the channel document, and commits channel + playlists + membership in one transaction (requires extensions).
 	CreateChannel(ctx context.Context, req *models.ChannelCreateRequest) (*channels.Channel, error)
@@ -72,17 +79,13 @@ type Executor interface {
 	GetChannel(ctx context.Context, idOrSlug string) (*channels.Channel, error)
 	// ListChannels returns one page of channel bodies.
 	ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]channels.Channel, string, error)
-	// ReplaceChannel re-resolves playlist URIs, re-signs, and commits updates in one transaction.
+	// ReplaceChannel re-resolves playlist URIs, verifies the owner (publisher) signature, re-signs, and commits updates in one transaction.
 	ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest) (*channels.Channel, error)
-	// UpdateChannel performs a partial PATCH: merges non-nil fields from req with existing channel, then re-resolves URIs, re-signs, and updates.
-	UpdateChannel(ctx context.Context, idOrSlug string, req *models.ChannelUpdateRequest) (*channels.Channel, error)
-	// DeleteChannel removes a channel row (membership CASCADE).
-	DeleteChannel(ctx context.Context, idOrSlug string) error
+	// DeleteChannel verifies the signed delete-intent against the stored publisher, then removes the channel row (membership CASCADE).
+	DeleteChannel(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
 	// GetChannelRegistry returns the curated channel registry as ordered publisher items.
 	GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error)
-	// ReplaceChannelRegistry atomically replaces the entire registry; returns total channel count.
-	ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error)
 
 	// APIInfo returns deployment metadata for GET /api/v1.
 	APIInfo(version string) map[string]any
@@ -96,6 +99,7 @@ type impl struct {
 	fetch              fetcher.Fetcher
 	publicBase         string
 	notificationClient notification.Client
+	deleteSkew         time.Duration
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -108,6 +112,16 @@ func WithNotificationClient(client notification.Client) Option {
 	}
 }
 
+// WithDeleteClockSkew sets the signed delete-intent freshness window. A non-positive value leaves the
+// executor default (defaultDeleteSkew) in place.
+func WithDeleteClockSkew(d time.Duration) Option {
+	return func(e *impl) {
+		if d > 0 {
+			e.deleteSkew = d
+		}
+	}
+}
+
 // New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
 func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
@@ -117,12 +131,17 @@ func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetc
 		extensionsEnabled: extensionsEnabled,
 		fetch:             fetch,
 		publicBase:        strings.TrimSpace(publicBaseURL),
+		deleteSkew:        defaultDeleteSkew,
 	}
 	for _, option := range options {
 		option(e)
 	}
 	return e
 }
+
+// defaultDeleteSkew is the signed delete-intent freshness window when WithDeleteClockSkew is not set.
+// Kept small to bound replay of a captured delete after the same id is re-created.
+const defaultDeleteSkew = 5 * time.Minute
 
 func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {
@@ -184,65 +203,34 @@ var (
 	ErrNoValidPublisherSignature = errors.New("no valid publisher signature found")
 )
 
-// CreatePlaylist builds a playlist document, signs with v1.1+ multisig, validates the signed JSON, then persists.
-// Validation runs only after signing so the payload includes signatures (or legacy signature) as required by the schema.
+// CreatePlaylist builds the client's playlist document, verifies its curator signatures, feed co-signs,
+// validates the signed JSON, then persists. Validation runs only after signing so the payload carries
+// signatures as required by the schema.
 //
-// Trusted model: Accepts either API key (ops) or cryptographic signatures (user) authentication.
-//   - API key path: optional client id and created (validated when present); missing fields get server defaults
-//     (new UUID, current time). Slug is derived via makeSlug (client slug/title + id). Feed signs last.
-//   - Signature path: user provides id, created, signatures[]; server verifies curator signatures and adds feed signature
+// Create is open: any client may create a document validly self-signed by a key it declares in
+// curators[]. id, created, and signatures[] are required (see requireSignatures); the signer becomes
+// the resource's owner for later replace/delete.
 func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*playlist.Playlist, error) {
-	var id uuid.UUID
-	var slug string
-	var created time.Time
-	var raw []byte
-	var err error
-
-	// Determine authentication mode and validate accordingly
-	if len(req.Signatures) > 0 {
-		// Path B: Signature-based authentication (user path)
-		// User provides complete document with id, created, and curator signatures
-		id, err = parseUserProvidedID(req.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		created, err = parseUserProvidedCreated(req.Created)
-		if err != nil {
-			return nil, err
-		}
-
-		slug = makeSlug(req.Slug, req.Title, id, "playlist")
-
-		// Build document with user-provided fields
-		raw, err = e.buildPlaylistDocument(req, id, slug, created)
-		if err != nil {
-			return nil, err
-		}
-
-		// Verify user-provided curator signatures
-		if err := e.verifyPlaylistCuratorSignatures(raw, req.Signatures, req.Curators); err != nil {
-			return nil, fmt.Errorf("curator signature verification: %w", err)
-		}
-	} else {
-		// Path A: API key authentication (ops path)
-		id, err = resolveOptionalCreateID(req.ID)
-		if err != nil {
-			return nil, err
-		}
-		created, err = resolveOptionalCreateCreated(req.Created)
-		if err != nil {
-			return nil, err
-		}
-		slug = makeSlug(req.Slug, req.Title, id, "playlist")
-
-		raw, err = e.buildPlaylistDocument(req, id, slug, created)
-		if err != nil {
-			return nil, err
-		}
+	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
+	id, err := parseUserProvidedID(req.ID)
+	if err != nil {
+		return nil, err
+	}
+	created, err := parseUserProvidedCreated(req.Created)
+	if err != nil {
+		return nil, err
+	}
+	slug := makeSlug(req.Slug, req.Title, id, "playlist")
+	raw, err := e.buildPlaylistDocument(req, id, slug, created)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.verifyPlaylistCuratorSignatures(raw, req.Signatures, req.Curators); err != nil {
+		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
 
-	// ALWAYS sign with feed role (both paths)
 	signed, err := e.dp1.SignPlaylist(raw, created)
 	if err != nil {
 		return nil, fmt.Errorf("feed sign: %w", err)
@@ -397,13 +385,25 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 	return out, nextCur, nil
 }
 
-// ReplacePlaylist replaces a playlist by id/slug (full body); id and document "created" follow the stored row; JSON slug comes from request slug/title + id (see makeSlug), not from rec.Slug alone.
+// ReplacePlaylist replaces a playlist by id/slug (full body); id and document "created" follow the stored
+// row; JSON slug comes from request slug/title + id (see makeSlug), not from rec.Slug alone.
 //
-// Trusted model: when req.signatures is non-empty, verifies curator signatures (same rules as create) before feed co-signing; otherwise API-key (ops) path.
+// Owner-bound and owner-immutable: signatures[] is required; the curator (owner) set may not change from
+// the stored document; the new document must be validly self-signed by its curators; and at least one
+// verifying signature must come from a stored owner key. Any edit re-derives the bytes, so the owner
+// re-signs and the feed co-signs.
 func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error) {
-	// 1) Get the existing playlist row.
+	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
+
+	// 1) Get the existing playlist row and its owner (curator) key set.
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
+		return nil, err
+	}
+	ownerKeys := entityKeySet(rec.Body.Curators)
+	if err := requireImmutableEntityOwner(ownerKeys, entityKeySet(req.Curators)); err != nil {
 		return nil, err
 	}
 
@@ -418,10 +418,19 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 
-	if len(req.Signatures) > 0 {
-		if err := e.verifyPlaylistCuratorSignatures(raw, req.Signatures, req.Curators); err != nil {
-			return nil, fmt.Errorf("curator signature verification: %w", err)
-		}
+	// Authorize the replace: all signatures must cryptographically verify (400 on failure), and at least
+	// one must come from a stored owner key (403). Owner-immutability above already pins the declared
+	// curators to the stored set, so the stored-owner check is the authoritative identity gate — mirrors
+	// the delete path rather than re-checking the document's own declared curators.
+	ok, failed, err := e.dp1.VerifyPlaylistSignatures(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
+	}
+	if !ok {
+		return nil, signatureFailure(failed)
+	}
+	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
+		return nil, err
 	}
 
 	// 3) Sign with v1.1+ multisig (feed role).
@@ -446,105 +455,17 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	return pl, nil
 }
 
-// UpdatePlaylist performs a partial update: merges non-nil fields from req with existing playlist, then signs, validates, and stores.
-// When req.signatures is non-empty, verifies those curator signatures over the merged document before feed co-signing.
-func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistUpdateRequest) (*playlist.Playlist, error) {
-	// 1. Fetch existing playlist once.
+// DeletePlaylist authorizes a signed delete-intent against the stored playlist's curator (owner) keys,
+// then removes the playlist row. The intent must name this exact resource and carry a fresh, verifying
+// owner signature (see verifyDeleteIntent).
+func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	existing := &rec.Body
-
-	// 2. Merge patch fields with existing playlist.
-	mergedReq := &models.PlaylistReplaceRequest{
-		DPVersion:    existing.DPVersion,
-		Title:        existing.Title,
-		Slug:         existing.Slug,
-		Items:        existing.Items,
-		Curators:     existing.Curators,
-		Summary:      existing.Summary,
-		CoverImage:   existing.CoverImage,
-		Defaults:     existing.Defaults,
-		DynamicQuery: existing.DynamicQuery,
-		Note:         existing.Note,
+	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylist, entityKeySet(rec.Body.Curators)); err != nil {
+		return err
 	}
-
-	if req.DPVersion != nil {
-		mergedReq.DPVersion = *req.DPVersion
-	}
-	if req.Title != nil {
-		mergedReq.Title = *req.Title
-	}
-	if req.Slug != nil {
-		mergedReq.Slug = *req.Slug
-	}
-	if req.Items != nil {
-		mergedReq.Items = req.Items
-	}
-	if req.Curators != nil {
-		mergedReq.Curators = req.Curators
-	}
-	if req.Summary != nil {
-		mergedReq.Summary = *req.Summary
-	}
-	if req.CoverImage != nil {
-		mergedReq.CoverImage = *req.CoverImage
-	}
-	if req.Defaults != nil {
-		mergedReq.Defaults = req.Defaults
-	}
-	if req.DynamicQuery != nil {
-		mergedReq.DynamicQuery = req.DynamicQuery
-	}
-	if req.Note != nil {
-		mergedReq.Note = req.Note
-	}
-	if len(req.Signatures) > 0 {
-		mergedReq.Signatures = req.Signatures
-	}
-
-	// 3. Build the new playlist document: stable id + slug from merged Slug/Title + stored "created".
-	created, err := parseDocumentCreated(rec.Body.Created)
-	if err != nil {
-		return nil, err
-	}
-	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "playlist")
-	raw, err := e.buildPlaylistDocument(mergedReq, rec.ID, slug, created)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(mergedReq.Signatures) > 0 {
-		if err := e.verifyPlaylistCuratorSignatures(raw, mergedReq.Signatures, mergedReq.Curators); err != nil {
-			return nil, fmt.Errorf("curator signature verification: %w", err)
-		}
-	}
-
-	// 4. Sign with v1.1+ multisig (feed role).
-	signed, err := e.dp1.SignPlaylist(raw, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("sign: %w", err)
-	}
-
-	// 5. Validate signed document (schema + §7.1 payload rules) and obtain typed playlist (dp1-go parse path).
-	pl, err := e.parseValidatedPlaylist(signed)
-	if err != nil {
-		return nil, fmt.Errorf("post-sign validation: %w", err)
-	}
-	if pl == nil {
-		return nil, fmt.Errorf("post-sign validation: nil playlist")
-	}
-
-	// 6. Persist validated document; DB also builds playlist_item_index from items[].
-	if err := e.store.UpdatePlaylist(ctx, idOrSlug, pl); err != nil {
-		return nil, err
-	}
-	return pl, nil
-}
-
-// DeletePlaylist removes a playlist.
-func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string) error {
 	return e.store.DeletePlaylist(ctx, idOrSlug)
 }
 
@@ -618,55 +539,26 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 		return nil, err
 	}
 
-	var id uuid.UUID
-	var slug string
-	var created time.Time
-	var raw []byte
-
-	// Determine authentication mode and validate accordingly
-	if len(req.Signatures) > 0 {
-		// Path B: Signature-based authentication (user path)
-		id, err = parseUserProvidedID(req.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		created, err = parseUserProvidedCreated(req.Created)
-		if err != nil {
-			return nil, err
-		}
-
-		slug = makeSlug(req.Slug, req.Title, id, "group")
-
-		// Build document with user-provided fields
-		raw, err = e.buildPlaylistGroupDocument(req, uris, id, slug, created)
-		if err != nil {
-			return nil, err
-		}
-
-		// Verify user-provided curator signatures
-		if err := e.verifyPlaylistGroupCuratorSignatures(raw, req.Signatures, req.Curator); err != nil {
-			return nil, fmt.Errorf("curator signature verification: %w", err)
-		}
-	} else {
-		// Path A: API key authentication (ops path)
-		id, err = resolveOptionalCreateID(req.ID)
-		if err != nil {
-			return nil, err
-		}
-		created, err = resolveOptionalCreateCreated(req.Created)
-		if err != nil {
-			return nil, err
-		}
-		slug = makeSlug(req.Slug, req.Title, id, "group")
-
-		raw, err = e.buildPlaylistGroupDocument(req, uris, id, slug, created)
-		if err != nil {
-			return nil, err
-		}
+	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
+	id, err := parseUserProvidedID(req.ID)
+	if err != nil {
+		return nil, err
+	}
+	created, err := parseUserProvidedCreated(req.Created)
+	if err != nil {
+		return nil, err
+	}
+	slug := makeSlug(req.Slug, req.Title, id, "group")
+	raw, err := e.buildPlaylistGroupDocument(req, uris, id, slug, created)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.verifyPlaylistGroupCuratorSignatures(raw, req.Signatures, req.Curator); err != nil {
+		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
 
-	// ALWAYS sign with feed role (both paths)
 	signed, err := e.dp1.SignPlaylistGroup(raw, created)
 	if err != nil {
 		return nil, fmt.Errorf("feed sign: %w", err)
@@ -721,13 +613,22 @@ func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string,
 }
 
 // ReplacePlaylistGroup re-resolves playlist URIs and commits an update like CreatePlaylistGroup.
-// When req.signatures is non-empty, verifies curator signatures before feed co-signing.
+// Owner-bound and owner-immutable: signatures[] is required; the curator (owner) may not change; the
+// new document must be validly self-signed by that curator, whose signature also authorizes the replace.
 func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest) (*playlistgroup.Group, error) {
-	// 1. Get the existing playlist-group row.
+	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
+
+	// 1. Get the existing playlist-group row and its owner (curator).
 	rec, err := e.store.GetPlaylistGroup(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
 	}
+	if err := requireImmutableStringOwner(rec.Body.Curator, req.Curator); err != nil {
+		return nil, err
+	}
+	ownerKeys := stringOwnerKeySet(rec.Body.Curator)
 	uris := req.Playlists
 
 	// 2. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
@@ -747,10 +648,17 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		return nil, err
 	}
 
-	if len(req.Signatures) > 0 {
-		if err := e.verifyPlaylistGroupCuratorSignatures(raw, req.Signatures, req.Curator); err != nil {
-			return nil, fmt.Errorf("curator signature verification: %w", err)
-		}
+	// Authorize the replace: crypto-verify all signatures (400), then require a stored-owner signature
+	// (403). Owner-immutability pins the declared curator to the stored one; see ReplacePlaylist.
+	ok, failed, err := e.dp1.VerifyPlaylistGroupSignatures(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
+	}
+	if !ok {
+		return nil, signatureFailure(failed)
+	}
+	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
+		return nil, err
 	}
 
 	// 4. Sign with v1.1+ multisig (feed role).
@@ -778,99 +686,16 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	return group, nil
 }
 
-// UpdatePlaylistGroup performs a partial update: merges non-nil fields from req with existing group, then re-resolves URIs, re-signs, and updates.
-// When req.signatures is non-empty, verifies curator signatures over the merged document before feed co-signing.
-func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupUpdateRequest) (*playlistgroup.Group, error) {
-	// 1. Fetch existing playlist-group once.
+// DeletePlaylistGroup authorizes a signed delete-intent against the stored group's curator (owner), then
+// removes the playlist-group row (membership CASCADE).
+func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	rec, err := e.store.GetPlaylistGroup(ctx, idOrSlug)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	existing := &rec.Body
-
-	// 2. Merge patch fields with existing group.
-	mergedReq := &models.PlaylistGroupReplaceRequest{
-		Title:      existing.Title,
-		Slug:       existing.Slug,
-		Playlists:  existing.Playlists,
-		Curator:    existing.Curator,
-		Summary:    existing.Summary,
-		CoverImage: existing.CoverImage,
+	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylistGroup, stringOwnerKeySet(rec.Body.Curator)); err != nil {
+		return err
 	}
-
-	if req.Title != nil {
-		mergedReq.Title = *req.Title
-	}
-	if req.Slug != nil {
-		mergedReq.Slug = *req.Slug
-	}
-	if req.Playlists != nil {
-		mergedReq.Playlists = req.Playlists
-	}
-	if req.Curator != nil {
-		mergedReq.Curator = *req.Curator
-	}
-	if req.Summary != nil {
-		mergedReq.Summary = *req.Summary
-	}
-	if req.CoverImage != nil {
-		mergedReq.CoverImage = *req.CoverImage
-	}
-	if len(req.Signatures) > 0 {
-		mergedReq.Signatures = req.Signatures
-	}
-
-	// 3. Resolve playlist URIs from merged request.
-	uris := mergedReq.Playlists
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
-	if err != nil {
-		return nil, err
-	}
-
-	// 4. Build the group document: stable id + slug from merged Slug/Title + stored "created".
-	created, err := parseDocumentCreated(rec.Body.Created)
-	if err != nil {
-		return nil, err
-	}
-	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "group")
-	raw, err := e.buildPlaylistGroupDocument(mergedReq, uris, rec.ID, slug, created)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(mergedReq.Signatures) > 0 {
-		if err := e.verifyPlaylistGroupCuratorSignatures(raw, mergedReq.Signatures, mergedReq.Curator); err != nil {
-			return nil, fmt.Errorf("curator signature verification: %w", err)
-		}
-	}
-
-	// 5. Sign with v1.1+ multisig (feed role).
-	signed, err := e.dp1.SignPlaylistGroup(raw, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("sign: %w", err)
-	}
-
-	// 6. Validate signed document (playlist-group schema requires signatures) and obtain typed group (dp1-go parse path).
-	group, err := e.dp1.ValidatePlaylistGroup(signed)
-	if err != nil {
-		return nil, fmt.Errorf("post-sign validation: %w", err)
-	}
-	if group == nil {
-		return nil, fmt.Errorf("post-sign validation: nil playlist-group")
-	}
-
-	// 7. Persist validated document.
-	if err := e.store.UpdatePlaylistGroup(ctx, idOrSlug, &store.PlaylistGroupInput{
-		Body:      *group,
-		Playlists: ingested,
-	}); err != nil {
-		return nil, fmt.Errorf("store: %w", err)
-	}
-	return group, nil
-}
-
-// DeletePlaylistGroup removes a playlist-group.
-func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string) error {
 	return e.store.DeletePlaylistGroup(ctx, idOrSlug)
 }
 
@@ -920,55 +745,26 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 		return nil, err
 	}
 
-	var id uuid.UUID
-	var slug string
-	var created time.Time
-	var raw []byte
-
-	// Determine authentication mode and validate accordingly
-	if len(req.Signatures) > 0 {
-		// Path B: Signature-based authentication (user path)
-		id, err = parseUserProvidedID(req.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		created, err = parseUserProvidedCreated(req.Created)
-		if err != nil {
-			return nil, err
-		}
-
-		slug = makeSlug(req.Slug, req.Title, id, "channel")
-
-		// Build document with user-provided fields
-		raw, err = e.buildChannelDocument(req, uris, id, slug, created)
-		if err != nil {
-			return nil, err
-		}
-
-		// Verify user-provided publisher signatures
-		if err := e.verifyChannelPublisherSignatures(raw, req.Signatures, req.Publisher); err != nil {
-			return nil, fmt.Errorf("publisher signature verification: %w", err)
-		}
-	} else {
-		// Path A: API key authentication (ops path)
-		id, err = resolveOptionalCreateID(req.ID)
-		if err != nil {
-			return nil, err
-		}
-		created, err = resolveOptionalCreateCreated(req.Created)
-		if err != nil {
-			return nil, err
-		}
-		slug = makeSlug(req.Slug, req.Title, id, "channel")
-
-		raw, err = e.buildChannelDocument(req, uris, id, slug, created)
-		if err != nil {
-			return nil, err
-		}
+	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
+	id, err := parseUserProvidedID(req.ID)
+	if err != nil {
+		return nil, err
+	}
+	created, err := parseUserProvidedCreated(req.Created)
+	if err != nil {
+		return nil, err
+	}
+	slug := makeSlug(req.Slug, req.Title, id, "channel")
+	raw, err := e.buildChannelDocument(req, uris, id, slug, created)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.verifyChannelPublisherSignatures(raw, req.Signatures, req.Publisher); err != nil {
+		return nil, fmt.Errorf("publisher signature verification: %w", err)
 	}
 
-	// ALWAYS sign with feed role (both paths)
 	signed, err := e.dp1.SignChannel(raw, created)
 	if err != nil {
 		return nil, fmt.Errorf("feed sign: %w", err)
@@ -1031,17 +827,25 @@ func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort 
 }
 
 // ReplaceChannel re-resolves playlist URIs and commits a channel update like CreateChannel.
-// When req.signatures is non-empty, verifies publisher signatures before feed co-signing.
+// Owner-bound and owner-immutable: signatures[] is required; the publisher (owner) may not change; the
+// new document must be validly self-signed by that publisher, whose signature also authorizes the replace.
 func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest) (*channels.Channel, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled
 	}
+	if err := requireSignatures(req.Signatures); err != nil {
+		return nil, err
+	}
 
-	// 1. Get the existing channel row.
+	// 1. Get the existing channel row and its owner (publisher).
 	rec, err := e.store.GetChannel(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
 	}
+	if err := requireImmutableStringOwner(publisherKey(rec.Body.Publisher), publisherKey(req.Publisher)); err != nil {
+		return nil, err
+	}
+	ownerKeys := stringOwnerKeySet(publisherKey(rec.Body.Publisher))
 	uris := req.Playlists
 
 	// 2. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
@@ -1061,10 +865,17 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		return nil, err
 	}
 
-	if len(req.Signatures) > 0 {
-		if err := e.verifyChannelPublisherSignatures(raw, req.Signatures, req.Publisher); err != nil {
-			return nil, fmt.Errorf("publisher signature verification: %w", err)
-		}
+	// Authorize the replace: crypto-verify all signatures (400), then require a stored-owner (publisher)
+	// signature (403). Owner-immutability pins the declared publisher to the stored one; see ReplacePlaylist.
+	ok, failed, err := e.dp1.VerifyChannelSignatures(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
+	}
+	if !ok {
+		return nil, signatureFailure(failed)
+	}
+	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
+		return nil, err
 	}
 
 	// 4. Sign with v1.1+ multisig (feed role).
@@ -1095,119 +906,17 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	return ch, nil
 }
 
-// UpdateChannel performs a partial update: merges non-nil fields from req with existing channel, then re-resolves URIs, re-signs, and updates.
-// When req.signatures is non-empty, verifies publisher signatures over the merged document before feed co-signing.
-func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.ChannelUpdateRequest) (*channels.Channel, error) {
-	if !e.extensionsEnabled {
-		return nil, ErrExtensionsDisabled
-	}
-
-	// 1. Fetch existing channel once.
-	rec, err := e.store.GetChannel(ctx, idOrSlug)
-	if err != nil {
-		return nil, err
-	}
-	existing := &rec.Body
-
-	// 2. Merge patch fields with existing channel.
-	mergedReq := &models.ChannelReplaceRequest{
-		Title:      existing.Title,
-		Slug:       existing.Slug,
-		Version:    existing.Version,
-		Playlists:  existing.Playlists,
-		Curators:   existing.Curators,
-		Publisher:  existing.Publisher,
-		Summary:    existing.Summary,
-		CoverImage: existing.CoverImage,
-	}
-
-	if req.Title != nil {
-		mergedReq.Title = *req.Title
-	}
-	if req.Slug != nil {
-		mergedReq.Slug = *req.Slug
-	}
-	if req.Version != nil {
-		mergedReq.Version = *req.Version
-	}
-	if req.Playlists != nil {
-		mergedReq.Playlists = req.Playlists
-	}
-	if req.Curators != nil {
-		mergedReq.Curators = req.Curators
-	}
-	if req.Publisher != nil {
-		mergedReq.Publisher = req.Publisher
-	}
-	if req.Summary != nil {
-		mergedReq.Summary = *req.Summary
-	}
-	if req.CoverImage != nil {
-		mergedReq.CoverImage = *req.CoverImage
-	}
-	if len(req.Signatures) > 0 {
-		mergedReq.Signatures = req.Signatures
-	}
-
-	// 3. Resolve playlist URIs from merged request.
-	uris := mergedReq.Playlists
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
-	if err != nil {
-		return nil, err
-	}
-
-	// 4. Build the channel document: stable id + slug from merged Slug/Title + stored "created".
-	created, err := parseDocumentCreated(rec.Body.Created)
-	if err != nil {
-		return nil, err
-	}
-	slug := makeSlug(mergedReq.Slug, mergedReq.Title, rec.ID, "channel")
-	raw, err := e.buildChannelDocument(mergedReq, uris, rec.ID, slug, created)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(mergedReq.Signatures) > 0 {
-		if err := e.verifyChannelPublisherSignatures(raw, mergedReq.Signatures, mergedReq.Publisher); err != nil {
-			return nil, fmt.Errorf("publisher signature verification: %w", err)
-		}
-	}
-
-	// 5. Sign with v1.1+ multisig (feed role).
-	signed, err := e.dp1.SignChannel(raw, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("sign: %w", err)
-	}
-
-	// 6. Validate signed document (channels schema requires signatures) and obtain typed channel (dp1-go parse path).
-	ch, err := e.dp1.ValidateChannel(signed)
-	if err != nil {
-		return nil, fmt.Errorf("post-sign validation: %w", err)
-	}
-	if ch == nil {
-		return nil, fmt.Errorf("post-sign validation: nil channel")
-	}
-
-	// 7. Persist validated document.
-	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{
-			Body:      *ch,
-			Playlists: ingested,
-		})
-	}); err != nil {
-		return nil, fmt.Errorf("store: %w", err)
-	}
-	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
-	return ch, nil
-}
-
-// DeleteChannel removes a channel.
-func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string) error {
+// DeleteChannel authorizes a signed delete-intent against the stored channel's publisher (owner), then
+// removes the channel row (membership CASCADE) and notifies clients.
+func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	if !e.extensionsEnabled {
 		return ErrExtensionsDisabled
 	}
 	rec, err := e.store.GetChannel(ctx, idOrSlug)
 	if err != nil {
+		return err
+	}
+	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetChannel, stringOwnerKeySet(publisherKey(rec.Body.Publisher))); err != nil {
 		return err
 	}
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
@@ -1220,47 +929,10 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string) error {
 }
 
 // GetChannelRegistry returns the curated channel registry (publishers + channels in order).
+// The registry is read-only over the API: there is no signed document to authorize a full replace, so
+// the write endpoint was removed with the API key. Seed it out-of-band (migration/tooling).
 func (e *impl) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
 	return e.store.GetChannelRegistry(ctx)
-}
-
-// ReplaceChannelRegistry atomically replaces the entire registry.
-// Converts API input (publishers with a single ordered URL list) to relational rows with positions.
-// Returns total channel count for response.
-func (e *impl) ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error) {
-	publishers := make([]store.RegistryPublisher, 0, len(req.Publishers))
-	channels := []store.RegistryPublisherChannel{}
-	totalChannels := 0
-
-	for pubPos, item := range req.Publishers {
-		pubID := uuid.New()
-		var didPtr *string
-		if d := strings.TrimSpace(item.DID); d != "" {
-			didPtr = &d
-		}
-		publishers = append(publishers, store.RegistryPublisher{
-			ID:       pubID,
-			Name:     item.Name,
-			DID:      didPtr,
-			Position: pubPos,
-		})
-
-		for chPos, url := range item.ChannelURLs {
-			channels = append(channels, store.RegistryPublisherChannel{
-				ID:          uuid.New(),
-				PublisherID: pubID,
-				ChannelURL:  url,
-				Position:    chPos,
-			})
-			totalChannels++
-		}
-	}
-
-	if err := e.store.ReplaceChannelRegistry(ctx, publishers, channels); err != nil {
-		return 0, fmt.Errorf("replace channel registry: %w", err)
-	}
-
-	return totalChannels, nil
 }
 
 // APIInfo returns static deployment metadata for GET /api/v1.
@@ -1355,27 +1027,13 @@ func parseUserProvidedCreated(createdStr *string) (time.Time, error) {
 	return t, nil
 }
 
-// resolveOptionalCreateID interprets an optional JSON "id" for creates: absent or blank → new UUID;
-// otherwise parses the trimmed string as a UUID (same validity rules as trusted-model id fields).
-func resolveOptionalCreateID(idStr *string) (uuid.UUID, error) {
-	if idStr == nil || strings.TrimSpace(*idStr) == "" {
-		return uuid.New(), nil
+// publisherKey returns the channel publisher's key, or "" when there is no publisher. It is the channel
+// owner identity used for replace/delete authorization.
+func publisherKey(publisher *identity.Entity) string {
+	if publisher == nil {
+		return ""
 	}
-	id, err := uuid.Parse(strings.TrimSpace(*idStr))
-	if err != nil {
-		return uuid.UUID{}, fmt.Errorf("%w: %w", ErrInvalidID, err)
-	}
-	return id, nil
-}
-
-// resolveOptionalCreateCreated interprets an optional JSON "created" for creates: absent or blank → now (UTC semantics via callers);
-// otherwise parses RFC3339 and rejects future timestamps via [parseUserProvidedCreated].
-func resolveOptionalCreateCreated(createdStr *string) (time.Time, error) {
-	if createdStr == nil || strings.TrimSpace(*createdStr) == "" {
-		return time.Now(), nil
-	}
-	s := strings.TrimSpace(*createdStr)
-	return parseUserProvidedCreated(&s)
+	return strings.TrimSpace(publisher.Key)
 }
 
 // verifyPlaylistCuratorSignatures verifies that at least one signature in sigs matches a curator key.

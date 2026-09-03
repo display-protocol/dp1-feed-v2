@@ -47,6 +47,15 @@ func mapExecutorError(err error) (status int, code, msg string) {
 	if executor.IsExtensionsDisabled(err) {
 		return http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment"
 	}
+	if executor.IsSignaturesRequiredError(err) {
+		return http.StatusUnauthorized, "unauthorized", err.Error()
+	}
+	if executor.IsForbiddenError(err) {
+		return http.StatusForbidden, "forbidden", err.Error()
+	}
+	if executor.IsDeleteRequestError(err) {
+		return http.StatusBadRequest, "bad_request", err.Error()
+	}
 	if executor.IsDP1SignError(err) {
 		return http.StatusBadRequest, "signature_invalid", err.Error()
 	}

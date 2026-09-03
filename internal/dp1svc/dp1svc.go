@@ -46,6 +46,13 @@ type ValidatorSigner interface {
 	VerifyPlaylistGroupSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
 	// VerifyChannelSignatures verifies all signatures in a signed channel document.
 	VerifyChannelSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
+	// VerifySignatures verifies the top-level "signatures" array of an arbitrary signed JSON payload,
+	// applying the same DP-1 §7.1 digest and payload_hash rules as the document verifiers but without any
+	// schema validation. It exists for payloads that are not playlists/groups/channels — for example the
+	// signed delete-intent used to authorize DELETE — so callers can check authorship over a small
+	// hand-built object. Returns ok=true when every entry verifies; on failure ok=false and failed lists
+	// the entries that did not verify.
+	VerifySignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
 }
 
 // Service holds the operator Ed25519 key and did:key kid used in v1.1+ multi-signature entries.
@@ -226,4 +233,10 @@ func (s *Service) VerifyPlaylistGroupSignatures(raw []byte) (bool, []playlist.Si
 // VerifyChannelSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyChannelSignatures.
 func (s *Service) VerifyChannelSignatures(raw []byte) (bool, []playlist.Signature, error) {
 	return sign.VerifyChannelSignatures(raw)
+}
+
+// VerifySignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyMultiSignaturesJSON, the
+// schema-agnostic verifier the document-specific helpers are themselves built on.
+func (s *Service) VerifySignatures(raw []byte) (bool, []playlist.Signature, error) {
+	return sign.VerifyMultiSignaturesJSON(raw)
 }

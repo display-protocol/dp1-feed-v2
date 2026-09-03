@@ -40,7 +40,7 @@ Built with Go, Gin, and PostgreSQL. No complex auth, no message queues—just st
 
    ```bash
    cp config/config.yaml.example config/config.yaml
-   # Edit config/config.yaml to set your API key and signing key
+   # Edit config/config.yaml to set your feed signing key (there is no API key)
    # Generate a signing key: openssl rand -hex 32
    ```
 
@@ -60,22 +60,17 @@ Built with Go, Gin, and PostgreSQL. No complex auth, no message queues—just st
    curl http://localhost:8787/health
    ```
 
-   Create your first playlist (set `DP1_FEED_API_KEY` in your shell to match `config/config.yaml` or `config/.env`):
+   List playlists (reads are public):
 
    ```bash
-   curl -X POST http://localhost:8787/api/v1/playlists \
-     -H "Content-Type: application/json" \
-     -H "Authorization: Bearer ${DP1_FEED_API_KEY}" \
-     -d '{
-       "dpVersion": "1.1.0",
-       "title": "My First Playlist",
-       "items": [{
-         "source": "https://example.com/video.mp4",
-         "duration": 30000,
-         "license": "open"
-       }]
-     }'
+   curl http://localhost:8787/api/v1/playlists
    ```
+
+   **Writes require a signed document — there is no API key.** A `POST` must include a non-empty
+   `signatures` array with a valid curator signature over the document (the feed then adds its own
+   signature); `PUT` and `DELETE` are owner-bound. See **[docs/api_design.md](docs/api_design.md)** for the
+   signature format and the signed delete-intent, and the integration tests under `internal/httpserver`
+   for end-to-end signing examples.
 
 ## Docker
 
@@ -85,7 +80,7 @@ Prefer containers? We've got you covered.
 
    ```bash
    cp config/.env.example config/.env
-   # Edit config/.env to customize your API key and signing key if needed
+   # Edit config/.env to customize your signing key if needed (there is no API key)
    ```
 
 2. **Start the services**
@@ -120,7 +115,7 @@ empty PostgreSQL 18 cluster when it detects an existing volume from the former
 `/var/lib/postgresql/data` mount. Back up and restore persistent local data
 before this mount change; see [Docker Compose Configuration](DEVELOPMENT.md#docker-compose-configuration).
 
-Configuration is loaded from `config/.env`. The default values work for local development, but you should change the API key and generate a new signing key for production:
+Configuration is loaded from `config/.env`. The default values work for local development, but you should generate a new signing key for production:
 
 ```bash
 # Generate a new signing key

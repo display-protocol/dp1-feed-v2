@@ -19,7 +19,7 @@
 - **Plural resource segments:** `/api/v1/playlists`, `/api/v1/playlist-groups`, `/api/v1/channels`, `/api/v1/playlist-items`.
 - **Multi-word segments** use **kebab-case** (e.g. `playlist-items`, `playlist-groups`).
 - **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for groups and channels).
-- **Curated registry:** **`GET`** and **`PUT`** `/api/v1/registry/channels` (read public; replace requires auth).
+- **Curated registry:** **`GET`** `/api/v1/registry/channels` (read public; **read-only** — there is no write endpoint).
 
 Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two separate path params.
 
@@ -64,26 +64,36 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Authentication and authorization
 
-**Two authentication paths for document writes (create and update):**
+**Signatures only. There is no API key.** Every mutating request is authorized by the cryptographic
+signatures it carries; the middleware (`RequireSignatures`) rejects any POST/PUT/DELETE whose body has no
+`signatures` array, and the executor verifies authenticity and ownership. The feed **always adds** its own
+`feed` signature after verification (JCS canonicalization, SHA-256 payload hash, Ed25519). Each signature
+carries `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see the `Signature` schema in OpenAPI).
 
-1. **API key authentication (ops path):** Traditional Bearer token.
-   - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
-   - On **create**, when **`id`** or **`created`** are omitted, the server assigns a new UUID and the current time respectively; when provided, values are validated (UUID shape; **`created`** RFC3339 and not in the future) and stored. **`slug`** continues to follow **`makeSlug`** rules (optional client slug, else derived from title + short id).
-   - Server adds feed signature to the document
+Three postures, by verb:
 
-2. **Signature-based authentication (user path):** Cryptographic signatures on the request body.
-   - **No API key required** when the body includes a **non-empty** `signatures` array and verification succeeds
-   - **POST (create):** request must include `id` (UUID), `created` (RFC3339, not in future), and `signatures`, as documented on `PlaylistInput` / group / channel inputs
-   - **PUT (replace):** same input shapes as create; `signatures` must match the document after replace (stored `id`, `slug`, and document `created` are preserved by the server)
-   - **PATCH (partial update):** optional `signatures` on `PlaylistUpdateInput` / group / channel update schemas; when non-empty, signatures must verify against the **merged** document (patch fields overlaid on the stored document)
-   - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec and `Signature` schema in OpenAPI)
-   - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document used for verification
-   - Server verifies signatures cryptographically (JCS canonicalization, SHA-256 payload hash, Ed25519 signature verification)
-   - Server **always adds** its own feed signature regardless of authentication path
-   - **DELETE** and **registry PUT** still require an API key only (no signature-only path)
+1. **POST (create) — open.** Any client may create. The body must include `id` (UUID), `created`
+   (RFC3339, not in the future), `slug`, and a non-empty `signatures` array with a signature whose `kid`
+   matches a curator `key` (playlists/groups) or the publisher `key` (channels) declared in the document.
+   The signer becomes the resource's **owner**.
 
-- **Compare semantics (API key):** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
+2. **PUT (replace) — owner-bound and owner-immutable.** The body is a full document (same shapes as
+   create). The **owner set is immutable**: `curators` (playlists), `curator` (groups), and `publisher`
+   (channels) must equal the stored document's, or the request is refused **`403` `forbidden`**. At least
+   one verifying signature's `kid` must be an owner of the **stored** document, else **`403` `forbidden`**.
+   The server preserves the stored `id` and document `created`; because any edit re-derives the bytes, the
+   owner re-signs the whole document and the feed co-signs.
+
+3. **DELETE — owner-bound, signed delete-intent.** The body is a `SignedDeleteRequest`
+   (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
+   exact stored resource (`id` and `slug`), its `created` must fall within the server's freshness window
+   (`auth.delete_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
+   must verify over the intent bytes (JCS, `signatures` stripped), and at least one signer must be an owner
+   of the stored resource. DP-1 defines no delete document; this envelope is feed-local.
+
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
+- **Registry is read-only over the API** (`GET /api/v1/registry/channels`); there is no write endpoint. Seed it out-of-band.
+- **No global allowlist.** "Owner" is derived from the document's own declared curators/publisher, not a configured key list: anyone can create (and thereby own) new resources, but only the declared owner can replace or delete one. Front with a gateway if you need to restrict who may create.
 - **Per-user or OAuth** is out of scope for this service; front with a gateway if needed.
 
 ---
@@ -110,15 +120,15 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Methods and semantics
 
-- **POST** — create; server assigns id/slug rules per executor/store.
+- **POST** — create (open); body must be validly self-signed by its declared curator/publisher.
 - **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel).
-- **PATCH** — partial update (only provided fields change); server re-signs and re-validates as applicable.
-- **DELETE** — remove resource (membership tables follow DB CASCADE rules).
+- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound and owner-immutable (see Authentication).
+- **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a signed delete-intent (`SignedDeleteRequest`).
+- **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 
-**Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). **PUT** requires at least one publisher, and at least one channel URL per publisher; it atomically **replaces the entire** registry (not a merge-by-item API).
+**Registry `GET` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). The registry is **read-only over the API** — there is no write endpoint; seed it out-of-band.
 
-The registry is the **curation gate**, and it is easy to mistake for a mirror of the catalog: downstream consumers that build offline snapshots (e.g. the mobile app's seed-database builder) ingest **only registry-listed channels**, not the feed's full `/channels` listing. Publishing a channel makes it fetchable by URL; it does **not** list it in the registry, so a published-but-unlisted channel is invisible to every registry-driven consumer until someone PUTs an updated registry.
+The registry is the **curation gate**, and it is easy to mistake for a mirror of the catalog: downstream consumers that build offline snapshots (e.g. the mobile app's seed-database builder) ingest **only registry-listed channels**, not the feed's full `/channels` listing. Publishing a channel makes it fetchable by URL; it does **not** list it in the registry, so a published-but-unlisted channel is invisible to every registry-driven consumer until the registry is updated out-of-band.
 
 **Channel and extension features:** when extensions are disabled in config, channel routes return **`404`** with error code **`extensions_disabled`** (see below).
 
@@ -143,22 +153,24 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |
-| **400** | `invalid_timestamp` | User-provided `created` timestamp is in the future (`IsInvalidTimestampError`). |
+| **400** | `invalid_timestamp` | `created` is in the future, or a delete-intent `created` is outside the freshness window (`IsInvalidTimestampError`). |
 | **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
-| **401** | `unauthorized` | Missing or wrong API key on protected routes, or missing authentication (neither API key nor valid signatures). |
+| **400** | `bad_request` | Malformed delete-intent, or its `action`/`target` disagree with the stored resource (`IsDeleteRequestError`). |
+| **401** | `unauthorized` | Missing authentication — a mutating request whose body carries no signatures (`IsSignaturesRequiredError`; also enforced by `RequireSignatures`). |
+| **403** | `forbidden` | Signature is valid but the signer is not an owner of the resource, or a PUT tried to change the immutable owner set (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
 
 Clients should branch on **`error`** (stable) and treat **`message`** as diagnostic text, not a long-term contract.
 
-**OpenAPI** documents shared responses (`BadRequest`, `Unauthorized`, `NotFound`, `ExtensionsDisabled`, `InternalError`). If implementation adds a new stable `error` code, update **OpenAPI examples** and this doc in the same change.
+**OpenAPI** documents shared responses (`BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `ExtensionsDisabled`, `InternalError`). If implementation adds a new stable `error` code, update **OpenAPI examples** and this doc in the same change.
 
 ---
 
 ## Success status codes
 
-- **200** — OK (GET, PUT, PATCH, DELETE with body where applicable).
+- **200** — OK (GET, PUT).
 - **304** — Not Modified (single-resource GET only, when `If-None-Match` matches the current `ETag`; empty body).
 - **201** — Created (POST for new playlists, groups, channels as specified per path in OpenAPI).
 
@@ -167,9 +179,9 @@ Clients should branch on **`error`** (stable) and treat **`message`** as diagnos
 ## Idempotency and retries
 
 - The API does **not** define **`Idempotency-Key`** or similar headers.
-- **GET** and **DELETE** are safe to retry with usual caveats (delete twice may 404).
+- **GET** and **DELETE** are safe to retry with usual caveats (delete twice may 404; a retried delete-intent must still fall within the freshness window).
 - **POST** creates a new resource; retries may create duplicates unless the client deduplicates.
-- **PUT/PATCH** are last-write-wins; retries should send the same body if the intent is to repeat the same mutation.
+- **PUT** is last-write-wins; retries should send the same body if the intent is to repeat the same mutation.
 
 Document any future idempotency strategy in OpenAPI and here before implementing.
 

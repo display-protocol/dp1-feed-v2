@@ -22,24 +22,26 @@ func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
 	slug := "daily-displayat-round-trip"
 	postDisplayAt := "2026-07-21T00:00:00Z"
 	putDisplayAt := "2026-07-22T00:00:00Z"
-	patchDisplayAt := "2026-07-23T00:00:00Z"
+	put2DisplayAt := "2026-07-23T00:00:00Z"
 
-	postBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"id":        playlistID.String(),
-		"created":   created,
-		"slug":      slug,
-		"title":     "Daily displayAt round trip",
-		"items": []map[string]any{
-			{
-				"id":        item1ID.String(),
-				"source":    "https://cdn.example.com/day-1.html",
-				"displayAt": postDisplayAt,
-			},
-		},
+	priv, kid := newCuratorKeypair(t)
+	// base identity is fixed across replaces: id, slug, created, and the curator (owner) never change.
+	baseDoc := func(title string, item playlist.PlaylistItem) playlist.Playlist {
+		return playlist.Playlist{
+			DPVersion: "1.1.0",
+			ID:        playlistID.String(),
+			Slug:      slug,
+			Title:     title,
+			Created:   created,
+			Curators:  curatorEntities(kid),
+			Items:     []playlist.PlaylistItem{item},
+		}
 	}
 
-	createdPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPost, "/api/v1/playlists", postBody, http.StatusCreated)
+	postDoc := baseDoc("Daily displayAt round trip", playlist.PlaylistItem{
+		ID: item1ID.String(), Source: "https://cdn.example.com/day-1.html", DisplayAt: &postDisplayAt,
+	})
+	createdPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPost, "/api/v1/playlists", signedPlaylistBody(t, priv, postDoc), http.StatusCreated)
 	assertPlaylistDisplayAt(t, "POST response", createdPlaylist, item1ID, postDisplayAt)
 
 	gotPlaylist := mustDoPlaylistJSON(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
@@ -47,35 +49,22 @@ func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
 	assertListPlaylistDisplayAt(t, srv, item1ID, postDisplayAt)
 	assertIndexedItemDisplayAt(t, srv, item1ID, postDisplayAt)
 
-	putBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"slug":      slug,
-		"title":     "Daily displayAt replaced",
-		"items": []map[string]any{
-			{
-				"id":        item2ID.String(),
-				"source":    "https://cdn.example.com/day-2.html",
-				"displayAt": putDisplayAt,
-			},
-		},
-	}
-	replacedPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, putBody, http.StatusOK)
+	putDoc := baseDoc("Daily displayAt replaced", playlist.PlaylistItem{
+		ID: item2ID.String(), Source: "https://cdn.example.com/day-2.html", DisplayAt: &putDisplayAt,
+	})
+	replacedPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedPlaylistBody(t, priv, putDoc), http.StatusOK)
 	assertPlaylistDisplayAt(t, "PUT response", replacedPlaylist, item2ID, putDisplayAt)
 	assertIndexedItemDisplayAt(t, srv, item2ID, putDisplayAt)
 
-	patchBody := map[string]any{
-		"items": []map[string]any{
-			{
-				"id":        item3ID.String(),
-				"source":    "https://cdn.example.com/day-3.html",
-				"displayAt": patchDisplayAt,
-			},
-		},
-	}
-	patchedPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPatch, "/api/v1/playlists/"+slug, patchBody, http.StatusOK)
-	assertPlaylistDisplayAt(t, "PATCH response", patchedPlaylist, item3ID, patchDisplayAt)
-	assertListPlaylistDisplayAt(t, srv, item3ID, patchDisplayAt)
-	assertIndexedItemDisplayAt(t, srv, item3ID, patchDisplayAt)
+	// A second signed PUT stands in for the former PATCH: with no partial-update endpoint, an owner
+	// edits by re-signing the full document.
+	put2Doc := baseDoc("Daily displayAt replaced again", playlist.PlaylistItem{
+		ID: item3ID.String(), Source: "https://cdn.example.com/day-3.html", DisplayAt: &put2DisplayAt,
+	})
+	replacedAgain := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedPlaylistBody(t, priv, put2Doc), http.StatusOK)
+	assertPlaylistDisplayAt(t, "second PUT response", replacedAgain, item3ID, put2DisplayAt)
+	assertListPlaylistDisplayAt(t, srv, item3ID, put2DisplayAt)
+	assertIndexedItemDisplayAt(t, srv, item3ID, put2DisplayAt)
 }
 
 func assertListPlaylistDisplayAt(t *testing.T, srv *Server, itemID uuid.UUID, wantDisplayAt string) {

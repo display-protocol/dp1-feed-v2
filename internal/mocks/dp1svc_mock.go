@@ -195,3 +195,19 @@ func (mr *MockValidatorSignerMockRecorder) VerifyPlaylistSignatures(raw any) *go
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifyPlaylistSignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifyPlaylistSignatures), raw)
 }
+
+// VerifySignatures mocks base method.
+func (m *MockValidatorSigner) VerifySignatures(raw []byte) (bool, []playlist.Signature, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "VerifySignatures", raw)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].([]playlist.Signature)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// VerifySignatures indicates an expected call of VerifySignatures.
+func (mr *MockValidatorSignerMockRecorder) VerifySignatures(raw any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifySignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifySignatures), raw)
+}

@@ -6,15 +6,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
+	"github.com/display-protocol/dp1-go/playlistgroup"
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -72,7 +74,7 @@ func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Serve
 			WriteTimeout: 30 * time.Second,
 			IdleTimeout:  120 * time.Second,
 		},
-		Auth:       config.AuthConfig{APIKey: "integration-api-key"},
+		Auth:       config.AuthConfig{DeleteMaxClockSkew: 5 * time.Minute},
 		Logging:    config.LoggingConfig{Debug: true},
 		Extensions: config.ExtensionsConfig{Enabled: true},
 		Playlist: config.PlaylistConfig{
@@ -117,6 +119,105 @@ func newIntegrationSignerAndKid(t *testing.T) (*dp1svc.Service, string) {
 	return svc, kid
 }
 
+// newCuratorKeypair returns a fresh Ed25519 curator identity for signed-path integration requests.
+// Mutations are authorized by a signature from a key the document declares as curator/publisher, so
+// tests generate their own key rather than reusing the feed's (which only ever signs with the feed role).
+func newCuratorKeypair(t *testing.T) (ed25519.PrivateKey, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv, kid
+}
+
+// signedPlaylistBody curator-signs doc exactly as the feed will rebuild it from the request fields, and
+// returns the POST/PUT JSON body (curators + signatures). doc.Curators must include the signer's key.
+func signedPlaylistBody(t *testing.T, priv ed25519.PrivateKey, doc playlist.Playlist) map[string]any {
+	t.Helper()
+	unsigned, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, doc.Created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{
+		"dpVersion":  doc.DPVersion,
+		"id":         doc.ID,
+		"created":    doc.Created,
+		"slug":       doc.Slug,
+		"title":      doc.Title,
+		"curators":   doc.Curators,
+		"items":      doc.Items,
+		"signatures": []playlist.Signature{sig},
+	}
+	return body
+}
+
+// signedDeleteBody builds a delete-intent signed by priv (a key the stored resource names as owner).
+func signedDeleteBody(t *testing.T, priv ed25519.PrivateKey, targetType, id, slug string) map[string]any {
+	t.Helper()
+	created := time.Now().UTC().Format(time.RFC3339)
+	intent := map[string]any{
+		"action":  "delete",
+		"target":  map[string]any{"type": targetType, "id": id, "slug": slug},
+		"created": created,
+	}
+	unsigned, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent["signatures"] = []playlist.Signature{sig}
+	return intent
+}
+
+// curatorEntities wraps a single curator kid as the curators[] the document declares.
+func curatorEntities(kid string) []identity.Entity {
+	return []identity.Entity{{Name: "Curator", Key: kid}}
+}
+
+// signedGroupBody curator-signs a playlist-group (curator = kid) as the feed rebuilds it, returning the
+// POST/PUT JSON body. uris are the member playlist URIs, preserved verbatim in the signed document.
+func signedGroupBody(t *testing.T, priv ed25519.PrivateKey, kid, id, slug, title, created string, uris []string) map[string]any {
+	t.Helper()
+	doc := playlistgroup.Group{
+		ID:        id,
+		Slug:      slug,
+		Title:     title,
+		Playlists: uris,
+		Created:   created,
+		Curator:   kid,
+	}
+	unsigned, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"dpVersion":  "1.1.0",
+		"id":         id,
+		"created":    created,
+		"slug":       slug,
+		"title":      title,
+		"curator":    kid,
+		"playlists":  uris,
+		"signatures": []playlist.Signature{sig},
+	}
+}
+
 func mustDoPlaylistJSON(t *testing.T, srv *Server, method, path string, body any, wantStatus int) playlist.Playlist {
 	t.Helper()
 	var out playlist.Playlist
@@ -139,17 +240,17 @@ func mustDoJSON(t *testing.T, srv *Server, method, path string, body any, wantSt
 // (signature verification, raw-JSON fields such as inlineManifest).
 func mustDoRaw(t *testing.T, srv *Server, method, path string, body any, wantStatus int) []byte {
 	t.Helper()
-	return doRaw(t, srv, method, path, body, wantStatus, true)
+	return doRaw(t, srv, method, path, body, wantStatus)
 }
 
-// mustDoRawUnauthenticated sends no API key, which is how a curator publishes: a body carrying
-// signatures[] takes the signature-based path in SignatureOrAPIKeyAuth instead.
+// mustDoRawUnauthenticated is retained as an alias of mustDoRaw: with the API key removed, every mutating
+// request is authorized the same way — by the signatures[] in its body — so there is no separate path.
 func mustDoRawUnauthenticated(t *testing.T, srv *Server, method, path string, body any, wantStatus int) []byte {
 	t.Helper()
-	return doRaw(t, srv, method, path, body, wantStatus, false)
+	return doRaw(t, srv, method, path, body, wantStatus)
 }
 
-func doRaw(t *testing.T, srv *Server, method, path string, body any, wantStatus int, withAPIKey bool) []byte {
+func doRaw(t *testing.T, srv *Server, method, path string, body any, wantStatus int) []byte {
 	t.Helper()
 	var payload *bytes.Reader
 	if body == nil {
@@ -162,11 +263,9 @@ func doRaw(t *testing.T, srv *Server, method, path string, body any, wantStatus 
 		payload = bytes.NewReader(raw)
 	}
 
+	// Authentication is carried in the request body (signatures), not a header. There is no API key.
 	req := httptest.NewRequest(method, path, payload)
 	req.Header.Set("Content-Type", "application/json")
-	if withAPIKey && (method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete) {
-		req.Header.Set("Authorization", "Bearer integration-api-key")
-	}
 	rec := httptest.NewRecorder()
 	srv.engine.ServeHTTP(rec, req)
 	if rec.Code != wantStatus {

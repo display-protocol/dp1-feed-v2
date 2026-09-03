@@ -76,10 +76,19 @@ type DatabaseConfig struct {
 	MaxConnLifetime time.Duration `yaml:"max_conn_lifetime"`
 }
 
-// AuthConfig protects mutating routes (Bearer API key).
+// AuthConfig tunes signature-based authorization for mutating routes. There is no API key: every
+// mutating request is authorized by the cryptographic signatures it carries (POST/PUT in the document
+// body, DELETE in a signed delete-intent body).
 type AuthConfig struct {
-	APIKey string `yaml:"api_key"`
+	// DeleteMaxClockSkew bounds how far a signed delete-intent's "created" may sit from server time in
+	// either direction. It caps replay of a captured delete after the same id is re-created, so it must
+	// stay small; it also has to tolerate honest client/server clock drift. Zero falls back to the
+	// package default (see defaultConfig).
+	DeleteMaxClockSkew time.Duration `yaml:"delete_max_clock_skew"`
 }
+
+// DefaultDeleteMaxClockSkew is the delete-intent freshness window used when config leaves it unset.
+const DefaultDeleteMaxClockSkew = 5 * time.Minute
 
 // SentryConfig is optional; empty DSN disables Sentry.
 type SentryConfig struct {
@@ -154,6 +163,7 @@ func defaultConfig() *Config {
 			MaxConnLifetime: time.Hour,
 		},
 		Logging:    LoggingConfig{Debug: false},
+		Auth:       AuthConfig{DeleteMaxClockSkew: DefaultDeleteMaxClockSkew},
 		Extensions: ExtensionsConfig{Enabled: true},
 		Playlist: PlaylistConfig{
 			FetchTimeout:      30 * time.Second,
@@ -168,8 +178,12 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv(envPrefix + "DATABASE_URL"); v != "" {
 		cfg.Database.URL = v
 	}
-	if v := os.Getenv(envPrefix + "API_KEY"); v != "" {
-		cfg.Auth.APIKey = v
+	if v := os.Getenv(envPrefix + "DELETE_MAX_CLOCK_SKEW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("delete max clock skew env: %w", err)
+		}
+		cfg.Auth.DeleteMaxClockSkew = d
 	}
 	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
 		cfg.Sentry.DSN = v
@@ -220,12 +234,13 @@ func applyEnv(cfg *Config) error {
 }
 
 func (c *Config) validate() error {
-	// Minimum bar for boot: DB, mutating API key, and hex signing material (kid is filled in Load after this).
+	// Minimum bar for boot: DB and hex signing material (kid is filled in Load after this). There is no
+	// API key to require: mutating routes are authorized by request signatures, not a shared secret.
 	if c.Database.URL == "" {
 		return fmt.Errorf("database url is required (yaml database.url or DP1_FEED_DATABASE_URL)")
 	}
-	if c.Auth.APIKey == "" {
-		return fmt.Errorf("api key is required (yaml auth.api_key or DP1_FEED_API_KEY)")
+	if c.Auth.DeleteMaxClockSkew < 0 {
+		return fmt.Errorf("auth delete max clock skew must not be negative")
 	}
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")

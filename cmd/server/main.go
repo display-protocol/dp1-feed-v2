@@ -33,7 +33,8 @@ func main() {
 	skipMigrate := flag.Bool("skip-migrate", false, "skip running migrations on startup")
 	flag.Parse()
 
-	// 1) Load and validate config (DB URL, API key, signing key; derive did:key kid from the key).
+	// 1) Load and validate config (DB URL, signing key; derive did:key kid from the key). Mutating routes
+	// are authorized by request signatures, not an API key.
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		panic(err)
@@ -79,7 +80,7 @@ func main() {
 	}
 	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes)
 
-	var execOptions []executor.Option
+	execOptions := []executor.Option{executor.WithDeleteClockSkew(cfg.Auth.DeleteMaxClockSkew)}
 	if len(cfg.Notifications.Clients) > 0 {
 		privateKey, err := notification.ParseP256PrivateKeyHex(cfg.Notifications.PrivateKeyHex)
 		if err != nil {

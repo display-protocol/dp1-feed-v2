@@ -21,17 +21,3 @@ type PlaylistGroupCreateRequest struct {
 
 // PlaylistGroupReplaceRequest is the JSON body for PUT /api/v1/playlist-groups/{id}.
 type PlaylistGroupReplaceRequest = PlaylistGroupCreateRequest
-
-// PlaylistGroupUpdateRequest is the JSON body for PATCH /api/v1/playlist-groups/{id} (partial update).
-// Only non-nil fields are updated; nil fields preserve existing values.
-type PlaylistGroupUpdateRequest struct {
-	Title      *string  `json:"title,omitempty"`
-	Slug       *string  `json:"slug,omitempty"`
-	Playlists  []string `json:"playlists,omitempty"`
-	Curator    *string  `json:"curator,omitempty"`
-	Summary    *string  `json:"summary,omitempty"`
-	CoverImage *string  `json:"coverImage,omitempty"`
-
-	// Trusted model: when non-empty, verify curator signatures (merged document) then feed co-signs.
-	Signatures []playlist.Signature `json:"signatures,omitempty"`
-}

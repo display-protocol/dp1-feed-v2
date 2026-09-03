@@ -36,9 +36,11 @@ alwaysApply: true
 
 ## Authentication
 
-- **Bearer API key** on all mutating routes, **or** (for POST and document PUT/PATCH on playlists, playlist-groups, channels) **signature-only** when the JSON body has a non-empty `signatures` array—see `SignatureOrAPIKeyAuth` in `internal/httpserver/middleware.go`.
-- Registry PUT and DELETE routes require API key only (`APIKeyAuth`).
-- Constant-time comparison of full header value vs configured secret when the Bearer path is used.
+- **Signatures only — no API key.** `RequireSignatures` (`internal/httpserver/middleware.go`) rejects any POST/PUT/DELETE whose body lacks a non-empty `signatures` array; the executor verifies authenticity and ownership.
+- **Create (POST):** open — body must be validly self-signed by its declared curator/publisher.
+- **Replace (PUT):** owner-bound and owner-immutable — a verifying signature from a stored owner key is required, and curators/publisher may not change (else `403 forbidden`).
+- **Delete (DELETE):** body is a signed delete-intent (`SignedDeleteRequest`) that must target the resource, fall within `auth.delete_max_clock_skew`, and be signed by a stored owner.
+- **No PATCH.** Registry is read-only over the API. Ownership is document-declared; no global key allowlist.
 - Reads public unless network-restricted; no built-in OAuth.
 
 ## Pagination, sort, filter
@@ -49,18 +51,18 @@ alwaysApply: true
 ## Error model
 
 - Body shape: `{"error":"<stable_code>","message":"<detail>"}` — see `internal/httpserver/errors.go`.
-- Typical codes: `bad_request`, `validation_error`, `signature_invalid` (400); `unauthorized` (401); `not_found`, `extensions_disabled` (404); `internal_error` (500).
+- Typical codes: `bad_request`, `validation_error`, `signature_invalid`, `signature_verification_failed`, `invalid_timestamp` (400); `unauthorized` (401); `forbidden` (403); `not_found`, `extensions_disabled` (404); `internal_error` (500).
 - Prefer branching on **`error`**; **`message`** may vary.
 
 ## HTTP semantics (summary)
 
-- POST create, GET read/list, PUT full replace, PATCH partial update, DELETE remove (per OpenAPI per resource).
-- Registry PUT replaces the **entire** registry atomically.
+- POST create, GET read/list, PUT full replace, DELETE remove (per OpenAPI per resource). No PATCH.
+- Registry is read-only over the API (GET only).
 - Extensions off: channel-style routes → **404** + `extensions_disabled`.
 
 ## Idempotency
 
-- No idempotency-key header; POST may duplicate on retry; GET/DELETE retries are usual; PUT/PATCH are last-write-wins.
+- No idempotency-key header; POST may duplicate on retry; GET/DELETE retries are usual (a retried delete-intent must stay within the freshness window); PUT is last-write-wins.
 
 ## Compatibility
 

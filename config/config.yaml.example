@@ -18,8 +18,10 @@ database:
   max_conn_lifetime: 1h
 
 auth:
-  # Replace in production; override with DP1_FEED_API_KEY
-  api_key: "dev-change-me"
+  # Mutating routes are authorized by request signatures, not an API key.
+  # delete_max_clock_skew bounds how far a signed delete-intent's "created" may sit from server time.
+  # Override with DP1_FEED_DELETE_MAX_CLOCK_SKEW (Go duration, e.g. 5m).
+  delete_max_clock_skew: "5m"
 
 sentry:
   dsn: ""

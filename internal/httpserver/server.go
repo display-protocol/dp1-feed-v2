@@ -1,5 +1,6 @@
-// Package httpserver is the Gin HTTP layer: routes, JSON/error envelopes, API-key auth on mutating endpoints,
-// and wiring to executor.Executor (business logic). List/read routes are public; POST/PUT/DELETE require Bearer API key.
+// Package httpserver is the Gin HTTP layer: routes, JSON/error envelopes, signature gating on mutating
+// endpoints, and wiring to executor.Executor (business logic). List/read routes are public; POST/PUT/DELETE
+// require a signed body (RequireSignatures), and the executor enforces ownership. There is no API key.
 package httpserver
 
 import (

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 
@@ -31,8 +32,6 @@ func TestLoad_minimalYAML_derivesSigningKid(t *testing.T) {
 	content := strings.TrimSpace(`
 database:
   url: postgres://user:pass@localhost:5432/db?sslmode=disable
-auth:
-  api_key: integration-test-key
 playlist:
   signing_key_hex: "` + testSeedHex + `"
 `)
@@ -45,11 +44,15 @@ playlist:
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Database.URL == "" || cfg.Auth.APIKey == "" {
-		t.Fatalf("expected database url and api key from yaml")
+	if cfg.Database.URL == "" {
+		t.Fatalf("expected database url from yaml")
 	}
 	if cfg.Playlist.SigningKeyHex != testSeedHex {
 		t.Fatalf("signing key hex mismatch")
+	}
+	// Not set in yaml — the delete-intent freshness window keeps its default.
+	if cfg.Auth.DeleteMaxClockSkew != DefaultDeleteMaxClockSkew {
+		t.Fatalf("DeleteMaxClockSkew = %s, want default %s", cfg.Auth.DeleteMaxClockSkew, DefaultDeleteMaxClockSkew)
 	}
 
 	priv, err := dp1svc.Ed25519PrivateKeyFromHex(testSeedHex)
@@ -77,8 +80,8 @@ playlist:
 
 func TestLoad_envOverrides(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://from-env/db")
-	t.Setenv("DP1_FEED_API_KEY", "env-api-key")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_DELETE_MAX_CLOCK_SKEW", "90s")
 	t.Setenv("DP1_FEED_SERVER_HOST", "10.0.0.1")
 	t.Setenv("DP1_FEED_SERVER_PORT", "12345")
 	t.Setenv("DP1_FEED_LOG_DEBUG", "true")
@@ -94,8 +97,8 @@ func TestLoad_envOverrides(t *testing.T) {
 	if cfg.Database.URL != "postgres://from-env/db" {
 		t.Fatalf("DATABASE_URL override: got %q", cfg.Database.URL)
 	}
-	if cfg.Auth.APIKey != "env-api-key" {
-		t.Fatalf("API_KEY override")
+	if cfg.Auth.DeleteMaxClockSkew != 90*time.Second {
+		t.Fatalf("DELETE_MAX_CLOCK_SKEW override: got %s", cfg.Auth.DeleteMaxClockSkew)
 	}
 	if cfg.Server.Host != "10.0.0.1" || cfg.Server.Port != 12345 {
 		t.Fatalf("server override: host=%q port=%d", cfg.Server.Host, cfg.Server.Port)
@@ -123,8 +126,6 @@ func TestLoad_notificationClientsFromYAML(t *testing.T) {
 	content := strings.TrimSpace(`
 database:
   url: postgres://user:pass@localhost:5432/db?sslmode=disable
-auth:
-  api_key: integration-test-key
 playlist:
   signing_key_hex: "` + testSeedHex + `"
   public_base_url: https://feed.example
@@ -172,7 +173,6 @@ func TestLoad_exampleConfigRejectsNotificationsWithLoopbackPublicBase(t *testing
 
 func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
-	t.Setenv("DP1_FEED_API_KEY", "k")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
 	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", "not-json")
 
@@ -184,7 +184,6 @@ func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
 
 func TestLoad_invalidNotificationClient(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
-	t.Setenv("DP1_FEED_API_KEY", "k")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
 	t.Setenv("DP1_FEED_PUBLIC_BASE_URL", "https://feed.example")
 	t.Setenv("DP1_FEED_NOTIFICATION_CLIENTS", `[{"name":"catalog","url":"https://catalog.example/webhooks/v1/channels"}]`)
@@ -197,7 +196,6 @@ func TestLoad_invalidNotificationClient(t *testing.T) {
 
 func TestLoad_invalidWebhookPrivateKey(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
-	t.Setenv("DP1_FEED_API_KEY", "k")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
 	t.Setenv("DP1_FEED_PUBLIC_BASE_URL", "https://feed.example")
 
@@ -214,7 +212,6 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 
 	valid := defaultConfig()
 	valid.Database.URL = "postgres://x"
-	valid.Auth.APIKey = "k"
 	valid.Playlist.SigningKeyHex = testSeedHex
 	valid.Playlist.PublicBaseURL = "https://feed.example"
 	valid.Notifications.PrivateKeyHex = testWebhookPrivateKeyHex
@@ -371,7 +368,6 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 
 func TestLoad_corsAllowOriginsEnv(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
-	t.Setenv("DP1_FEED_API_KEY", "k")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
 	t.Setenv("DP1_FEED_CORS_ALLOW_ORIGINS", " https://app.example.com , https://other.example.com ")
 
@@ -393,8 +389,6 @@ func TestLoad_corsAllowOriginsFromYAML(t *testing.T) {
 	content := strings.TrimSpace(`
 database:
   url: postgres://user:pass@localhost:5432/db?sslmode=disable
-auth:
-  api_key: integration-test-key
 cors:
   allow_origins:
     - "https://alpha.example"
@@ -420,7 +414,6 @@ playlist:
 
 func TestLoad_serverPort_invalidEnvIgnored(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
-	t.Setenv("DP1_FEED_API_KEY", "k")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
 	t.Setenv("DP1_FEED_SERVER_PORT", "not-a-number")
 
@@ -441,8 +434,6 @@ func TestLoad_validateErrors(t *testing.T) {
 		yaml := strings.TrimSpace(`
 database:
   url: ""
-auth:
-  api_key: k
 playlist:
   signing_key_hex: "` + testSeedHex + `"
 `)
@@ -458,8 +449,9 @@ playlist:
 		}
 	})
 
-	t.Run("missing_api_key", func(t *testing.T) {
-		path := filepath.Join(dir, "no-api.yaml")
+	t.Run("no_auth_section_is_valid", func(t *testing.T) {
+		// There is no API key to require: a config with DB + signing key must load without an auth block.
+		path := filepath.Join(dir, "no-auth.yaml")
 		yaml := strings.TrimSpace(`
 database:
   url: postgres://x
@@ -469,12 +461,31 @@ playlist:
 		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := Load(path)
-		if err == nil {
-			t.Fatal("expected error")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
 		}
-		if !strings.Contains(err.Error(), "api key is required") {
-			t.Fatalf("unexpected error: %v", err)
+		if cfg.Auth.DeleteMaxClockSkew != DefaultDeleteMaxClockSkew {
+			t.Fatalf("DeleteMaxClockSkew = %s, want default %s", cfg.Auth.DeleteMaxClockSkew, DefaultDeleteMaxClockSkew)
+		}
+	})
+
+	t.Run("negative_delete_max_clock_skew", func(t *testing.T) {
+		path := filepath.Join(dir, "neg-skew.yaml")
+		yaml := strings.TrimSpace(`
+database:
+  url: postgres://x
+auth:
+  delete_max_clock_skew: -1s
+playlist:
+  signing_key_hex: "` + testSeedHex + `"
+`)
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "delete max clock skew must not be negative") {
+			t.Fatalf("Load error = %v, want negative skew error", err)
 		}
 	})
 
@@ -483,8 +494,6 @@ playlist:
 		yaml := strings.TrimSpace(`
 database:
   url: postgres://x
-auth:
-  api_key: k
 `)
 		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 			t.Fatal(err)
@@ -530,8 +539,6 @@ func TestLoad_invalidSigningKey(t *testing.T) {
 	yaml := strings.TrimSpace(`
 database:
   url: postgres://x
-auth:
-  api_key: k
 playlist:
   signing_key_hex: "deadbeef"
 `)
@@ -553,8 +560,6 @@ func TestLoad_yamlMergesWithDefaults(t *testing.T) {
 	yaml := strings.TrimSpace(`
 database:
   url: postgres://x
-auth:
-  api_key: k
 playlist:
   signing_key_hex: "` + testSeedHex + `"
 server:
