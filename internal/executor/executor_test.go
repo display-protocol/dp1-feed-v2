@@ -1718,6 +1718,248 @@ func TestReplacePlaylistGroup_notFound(t *testing.T) {
 // Channel Tests
 // =============================================================================
 
+// --- group replace deny/error branches ---
+
+// storedOwnedGroup returns a stored group whose owner (curator) is testCuratorKid.
+func storedOwnedGroup(id uuid.UUID, slug string) *store.PlaylistGroupRecord {
+	return &store.PlaylistGroupRecord{
+		ID:   id,
+		Slug: slug,
+		Body: playlistgroup.Group{ID: id.String(), Slug: slug, Curator: testCuratorKid, Created: "2020-01-02T03:04:05Z"},
+	}
+}
+
+// memberPlaylistExpect wires a local member playlist so resolvePlaylistURIs succeeds (replace requires a
+// non-empty, resolvable playlists list before reaching the auth checks).
+func memberPlaylistExpect(t *testing.T, mockStore *mocks.MockStore) string {
+	t.Helper()
+	plID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl").Return(&store.PlaylistRecord{
+		ID: plID, Slug: "pl", Body: mustDecodePlaylist(t, []byte(`{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}`)),
+	}, nil).AnyTimes()
+	return localPlaylistRef("pl")
+}
+
+func TestReplacePlaylistGroup_notOwner(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	req := validGroupCreateReq(ref) // curator == stored (immutability passes)
+	req.Signatures = []playlist.Signature{testSig("did:key:notGroupOwner")}
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req); !executor.IsForbiddenError(err) {
+		t.Fatalf("want forbidden (not owner), got %v", err)
+	}
+}
+
+func TestReplacePlaylistGroup_verifyCryptoFails(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (ok=false), got %v", err)
+	}
+}
+
+func TestReplacePlaylistGroup_verifyCryptoError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (verify err), got %v", err)
+	}
+}
+
+// --- group delete deny branches (happy path: TestDeletePlaylistGroup) ---
+
+func TestDeletePlaylistGroup_notOwner(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", "did:key:notGroupOwner")
+	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); !executor.IsForbiddenError(err) {
+		t.Fatalf("want forbidden (not owner), got %v", err)
+	}
+}
+
+func TestDeletePlaylistGroup_targetMismatch(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "wrong-slug", testCuratorKid)
+	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); !executor.IsDeleteRequestError(err) {
+		t.Fatalf("want delete-request error (target mismatch), got %v", err)
+	}
+}
+
+// --- channel replace deny/error branches ---
+
+// storedOwnedChannel returns a stored channel whose owner (publisher) is testPublisherKid, with a
+// parseable created (ReplaceChannel parses stored created before the auth checks).
+func storedOwnedChannel(id uuid.UUID, slug string) *store.ChannelRecord {
+	return &store.ChannelRecord{
+		ID:   id,
+		Slug: slug,
+		Body: channels.Channel{
+			ID: id.String(), Slug: slug, Version: "1.0.0",
+			Publisher: &identity.Entity{Key: testPublisherKid},
+			Created:   "2020-01-02T03:04:05Z",
+		},
+	}
+}
+
+func TestReplaceChannel_notOwner(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	req := validChannelCreateReq("cid", ref) // publisher == stored (immutability passes)
+	req.Signatures = []playlist.Signature{testSig("did:key:notPublisher")}
+	if _, err := e.ReplaceChannel(context.Background(), "cid", req); !executor.IsForbiddenError(err) {
+		t.Fatalf("want forbidden (not owner), got %v", err)
+	}
+}
+
+func TestReplaceChannel_verifyCryptoFails(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref)); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (ok=false), got %v", err)
+	}
+}
+
+func TestReplaceChannel_verifyCryptoError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref)); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (verify err), got %v", err)
+	}
+}
+
+// --- channel delete deny branches (happy path: TestDeleteChannel) ---
+
+func TestDeleteChannel_notOwner(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	req := deleteReq(models.DeleteTargetChannel, id.String(), "cid", "did:key:notPublisher")
+	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsForbiddenError(err) {
+		t.Fatalf("want forbidden (not owner), got %v", err)
+	}
+}
+
+func TestDeleteChannel_targetMismatch(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	req := deleteReq(models.DeleteTargetChannel, id.String(), "wrong-slug", testPublisherKid)
+	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsDeleteRequestError(err) {
+		t.Fatalf("want delete-request error (target mismatch), got %v", err)
+	}
+}
+
+// --- channel create error branches (group equivalents already covered) ---
+
+func TestCreateChannel_signError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(nil, errors.New("no key"))
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	_, err := e.CreateChannel(context.Background(), validChannelCreateReq("chan", ref))
+	if err == nil || !strings.Contains(err.Error(), "feed sign: no key") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCreateChannel_postSignValidationError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	ref := memberPlaylistExpect(t, mockStore)
+	signed := []byte(`{}`)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(nil, errors.New("bad channel")),
+	)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	_, err := e.CreateChannel(context.Background(), validChannelCreateReq("chan", ref))
+	if err == nil || !strings.Contains(err.Error(), "post-sign validation: bad channel") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestCreateChannel_extensionsDisabled(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -2370,6 +2612,264 @@ func TestReplaceChannel_notFound(t *testing.T) {
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
 	_, err := e.ReplaceChannel(context.Background(), "missing", validChannelCreateReq("x", localPlaylistRef("p")))
 	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// --- signatures-required guards, invalid created, create verify-failures, delete store errors ---
+
+func TestCreatePlaylist_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	req := validCreateReq()
+	req.Signatures = nil
+	if _, err := e.CreatePlaylist(context.Background(), req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required, got %v", err)
+	}
+}
+
+func TestCreatePlaylist_invalidCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	req := validCreateReq()
+	req.Created = stringPtr("nope")
+	if _, err := e.CreatePlaylist(context.Background(), req); !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid-timestamp, got %v", err)
+	}
+}
+
+func TestReplacePlaylist_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
+	req := validCreateReq()
+	req.Signatures = nil
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required, got %v", err)
+	}
+}
+
+func TestDeletePlaylist_storeError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), "id-1").Return(errors.New("db down"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); err == nil || !strings.Contains(err.Error(), "db down") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCreatePlaylistGroup_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	ref := memberPlaylistExpect(t, mockStore)
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	req := validGroupCreateReq(ref)
+	req.Signatures = nil
+	if _, err := e.CreatePlaylistGroup(context.Background(), req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required, got %v", err)
+	}
+}
+
+func TestCreatePlaylistGroup_invalidCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	ref := memberPlaylistExpect(t, mockStore)
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	req := validGroupCreateReq(ref)
+	req.Created = stringPtr("nope")
+	if _, err := e.CreatePlaylistGroup(context.Background(), req); !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid-timestamp, got %v", err)
+	}
+}
+
+func TestCreatePlaylistGroup_verifyFails(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(ref)); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error, got %v", err)
+	}
+}
+
+func TestReplacePlaylistGroup_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
+	req := validGroupCreateReq(localPlaylistRef("pl"))
+	req.Signatures = nil
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required, got %v", err)
+	}
+}
+
+func TestDeletePlaylistGroup_storeError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), "gid").Return(errors.New("db down"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
+	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); err == nil || !strings.Contains(err.Error(), "db down") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCreateChannel_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	ref := memberPlaylistExpect(t, mockStore)
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
+	req := validChannelCreateReq("chan", ref)
+	req.Signatures = nil
+	if _, err := e.CreateChannel(context.Background(), req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required, got %v", err)
+	}
+}
+
+func TestCreateChannel_invalidCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	ref := memberPlaylistExpect(t, mockStore)
+	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
+	req := validChannelCreateReq("chan", ref)
+	req.Created = stringPtr("nope")
+	if _, err := e.CreateChannel(context.Background(), req); !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid-timestamp, got %v", err)
+	}
+}
+
+func TestCreateChannel_verifyFails(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	ref := memberPlaylistExpect(t, mockStore)
+	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	if _, err := e.CreateChannel(context.Background(), validChannelCreateReq("chan", ref)); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error, got %v", err)
+	}
+}
+
+func TestReplaceChannel_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
+	req := validChannelCreateReq("cid", localPlaylistRef("pl"))
+	req.Signatures = nil
+	if _, err := e.ReplaceChannel(context.Background(), "cid", req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required, got %v", err)
+	}
+}
+
+// TestDeleteChannel_noPublisher covers publisherKey(nil) and the empty-owner-keys guard: a stored channel
+// without a publisher has no owner, so no signature can authorize its deletion.
+func TestDeleteChannel_noPublisher(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	rec := &store.ChannelRecord{ID: id, Slug: "cid", Body: channels.Channel{ID: id.String(), Slug: "cid"}}
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(rec, nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	req := deleteReq(models.DeleteTargetChannel, id.String(), "cid", testPublisherKid)
+	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsForbiddenError(err) {
+		t.Fatalf("want forbidden (no owner), got %v", err)
+	}
+}
+
+// --- replace store-write error branches (cover the post-verify sign/validate/persist path) ---
+
+func TestReplacePlaylist_storeError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(storedPlaylistRecord(t, id, "keep-me"), nil)
+	signed := []byte(`{"replaced":true}`)
+	parsed := mustDecodePlaylist(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil),
+		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
+	)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), "keep-me", &parsed).Return(errors.New("db down"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); err == nil || !strings.Contains(err.Error(), "db down") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestReplacePlaylistGroup_storeError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	signed := []byte(`{"g":true}`)
+	parsedGroup := mustDecodeGroup(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil),
+		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
+	)
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), "gid", gomock.Any()).Return(errors.New("db down"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); err == nil || !strings.Contains(err.Error(), "db down") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestReplaceChannel_storeError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+	signed := []byte(`{"c":true}`)
+	parsedChannel := mustDecodeChannel(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil),
+		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedChannel, nil),
+	)
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), id.String(), gomock.Any()).Return(errors.New("db down"))
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref)); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("got %v", err)
 	}
 }
