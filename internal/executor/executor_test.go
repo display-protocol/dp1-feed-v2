@@ -3524,3 +3524,86 @@ func TestReplacePlaylist_intentMissing(t *testing.T) {
 		t.Fatalf("want intent error (no authorization), got %v", err)
 	}
 }
+
+// Reference-only ingestion: a playlist this feed already holds is linked, not re-judged.
+//
+// The contract says ingestion never rewrites a stored playlist, so the remote representation of an
+// already-stored member is irrelevant — and must not be able to fail the mutation. Before this, resolution
+// validated and signature-verified the fetched body first, so a member whose origin later rotted, rotated
+// keys, or served junk would break every new group referencing that URL even though nothing about the
+// stored playlist needed to change.
+//
+// The mock is the assertion: ValidatePlaylist and VerifyPlaylistSignatures are never EXPECTed, so gomock
+// fails the test if resolution touches the remote body at all.
+func TestCreatePlaylistGroup_storedMemberIgnoresRemoteBody(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockStore := mocks.NewMockStore(ctrl)
+
+	storedID := uuid.MustParse("77777777-7777-4777-8777-777777777777")
+	storedRaw := json.RawMessage(`{"dpVersion":"1.1.0","id":"77777777-7777-4777-8777-777777777777","slug":"stored-one","title":"trusted"}`)
+
+	// The origin now serves a body that could never clear the create bar: no signatures, no curators, not
+	// even schema-valid. It does still name the id, which is all identity resolution needs.
+	rotted := []byte(`{"id":"77777777-7777-4777-8777-777777777777","garbage":true}`)
+
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), storedID.String()).
+		Return(&store.PlaylistRecord{ID: storedID, Slug: "stored-one", Raw: storedRaw}, nil)
+
+	signed := []byte(`{"kind":"signed-group-stored-member"}`)
+	wantGroup := mustDecodeGroup(t, signed)
+	gomock.InOrder(
+		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
+		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&wantGroup, nil),
+	)
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+		if len(in.Playlists) != 1 {
+			t.Fatalf("want one member, got %d", len(in.Playlists))
+		}
+		got := in.Playlists[0]
+		if got.ID != storedID || got.Slug != "stored-one" {
+			t.Fatalf("member identity came from the remote body, not the store: %+v", got)
+		}
+		// The stored bytes must be linked untouched — linking the fetched body would silently republish
+		// content whose signatures were never checked.
+		if string(got.Raw) != string(storedRaw) {
+			t.Fatalf("member raw is not the stored bytes:\n got %s\nwant %s", got.Raw, storedRaw)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, staticFetcher{body: rotted}, testPublicBase)
+	req := validGroupCreateReq("https://elsewhere.test/p.json")
+	req.Raw = mustJSONRaw(req)
+	if _, err := e.CreatePlaylistGroup(context.Background(), req); err != nil {
+		t.Fatalf("group creation must survive a member whose origin no longer validates: %v", err)
+	}
+}
+
+// The complement: an id this feed does not hold is *created* by the ingest, so the full create bar still
+// applies. Without this, the store lookup above would be a hole rather than a shortcut.
+func TestCreatePlaylistGroup_unknownRemoteIDStillFullyValidated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockStore := mocks.NewMockStore(ctrl)
+
+	newID := uuid.MustParse("88888888-8888-4888-8888-888888888888")
+	body := []byte(`{"id":"88888888-8888-4888-8888-888888888888","unsigned":true}`)
+
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), newID.String()).Return(nil, store.ErrNotFound)
+
+	// Not held here, so resolution must fall through to validation — and this body carries no curator
+	// signature, so the mutation fails rather than publishing it.
+	remote := &playlist.Playlist{ID: newID.String(), Slug: "remote"}
+	mockDP1.EXPECT().ValidatePlaylist(gomock.Any()).Return(remote, nil)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mockStore, mockDP1, false, staticFetcher{body: body}, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
+	if !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("an unheld remote id must still face full verification, got %v", err)
+	}
+}

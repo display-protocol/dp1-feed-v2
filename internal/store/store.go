@@ -51,6 +51,23 @@ var ErrDocumentDeleted = errors.New("document id was deleted and cannot be reuse
 // gone for good rather than already taken — so the two must not share a message.
 var ErrAlreadyExists = errors.New("document already exists")
 
+// AlreadyExistsError names which uniqueness rule a create violated, so the HTTP layer can tell an id
+// collision from a slug collision without parsing text.
+//
+// Detail is reported to the client verbatim. That is the whole reason this type exists: `err.Error()` on a
+// wrapped sentinel would hand the caller the internal chain ("store: document already exists: …"), which
+// both stutters and names layers no client should see. Detail must therefore read as a finished,
+// client-facing sentence on its own.
+type AlreadyExistsError struct {
+	Detail string
+}
+
+func (e *AlreadyExistsError) Error() string { return e.Detail }
+
+// Unwrap makes errors.Is(err, ErrAlreadyExists) hold, so callers that only care that it was a collision
+// keep working without knowing about this type.
+func (e *AlreadyExistsError) Unwrap() error { return ErrAlreadyExists }
+
 // Documents are written and read as raw JSON, never re-marshaled through the typed dp1-go structs.
 //
 // Why: DP-1 §7.1 signs the JCS form of the *entire* document, so every signer's payload_hash is bound

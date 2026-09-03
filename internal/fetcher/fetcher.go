@@ -158,7 +158,11 @@ var nonGlobalPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637)
 	netip.MustParsePrefix("fc00::/7"),       // unique-local
 	netip.MustParsePrefix("fe80::/10"),      // link-local
-	netip.MustParsePrefix("ff00::/8"),       // multicast
+	// Deprecated site-local (RFC 3879). IANA dropped it from the special-purpose registry when it was
+	// deprecated, so a list derived from that registry alone misses it — but deployments still route it
+	// internally, and fec0::/10 sits just past fe80::/10 rather than inside it.
+	netip.MustParsePrefix("fec0::/10"),
+	netip.MustParsePrefix("ff00::/8"), // multicast
 }
 
 // blockedAddr reports whether addr is one the feed must not contact.

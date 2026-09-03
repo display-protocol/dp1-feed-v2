@@ -108,13 +108,16 @@ func createConflict(err error, resource string) error {
 	if !errors.As(err, &pgErr) || pgErr.Code != uniqueViolationCode {
 		return nil
 	}
+	// Detail is what the client sees, so it names the rule that was violated rather than the constraint.
+	// The default arm keeps the constraint name because an unrecognized unique index is an operator
+	// problem: the message is the only clue about which one fired.
 	switch {
 	case strings.HasSuffix(pgErr.ConstraintName, "_pkey"):
-		return fmt.Errorf("%w: a %s with this id already exists", store.ErrAlreadyExists, resource)
+		return &store.AlreadyExistsError{Detail: fmt.Sprintf("a %s with this id already exists", resource)}
 	case strings.HasSuffix(pgErr.ConstraintName, "_slug_key"):
-		return fmt.Errorf("%w: a %s with this slug already exists", store.ErrAlreadyExists, resource)
+		return &store.AlreadyExistsError{Detail: fmt.Sprintf("a %s with this slug already exists", resource)}
 	default:
-		return fmt.Errorf("%w: %s violates %s", store.ErrAlreadyExists, resource, pgErr.ConstraintName)
+		return &store.AlreadyExistsError{Detail: fmt.Sprintf("this %s violates %s", resource, pgErr.ConstraintName)}
 	}
 }
 

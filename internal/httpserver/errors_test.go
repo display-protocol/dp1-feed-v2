@@ -151,12 +151,15 @@ func TestMapStoreError_documentDeleted(t *testing.T) {
 // already there, not that its id is permanently unusable.
 func TestMapStoreError_alreadyExists(t *testing.T) {
 	t.Parallel()
-	st, code, msg := mapExecutorError(fmt.Errorf("store: %w", fmt.Errorf("%w: a playlist with this id already exists", store.ErrAlreadyExists)))
+	wrapped := fmt.Errorf("create playlist: %w", &store.AlreadyExistsError{Detail: "a playlist with this id already exists"})
+	st, code, msg := mapExecutorError(fmt.Errorf("store: %w", wrapped))
 	if st != http.StatusConflict || code != "conflict" {
 		t.Fatalf("got status=%d code=%q, want 409/conflict", st, code)
 	}
-	if !strings.Contains(msg, "already exists") {
-		t.Fatalf("message should say the resource already exists, got %q", msg)
+	// The detail is reported verbatim: the wrapping chain the error picked up on its way through the
+	// store and executor is internal plumbing and must not reach the client.
+	if msg != "a playlist with this id already exists" {
+		t.Fatalf("message should be the bare detail, got %q", msg)
 	}
 	if strings.Contains(msg, "new id") {
 		t.Fatalf("message must not be confusable with the tombstone case, got %q", msg)

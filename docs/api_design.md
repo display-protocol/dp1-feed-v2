@@ -115,7 +115,10 @@ Three postures, by verb:
 **Membership ingestion is reference-only.** When a group or channel names a playlist URL, the feed
 **links** that playlist but never modifies it. A referenced id already stored here is linked as-is —
 whatever the remote document says is ignored, and its stored bytes, slug, owner and item index are
-untouched. A referenced id that is *new* to this feed is being created, so it is held to the same bar as
+untouched. Identity is resolved **before** the fetched body is judged, so this holds even when the origin
+has since rotted, rotated keys, or started serving something malformed: the id is enough to link the
+stored playlist, and a member's origin can never retroactively block groups that reference it. A
+referenced id that is *new* to this feed is being created, so it is held to the same bar as
 `POST`: the fetched document must be validly self-signed by a curator it declares, and must not name a
 tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
 re-ingesting a group does not refresh member bodies. (Without this, any client able to create a channel

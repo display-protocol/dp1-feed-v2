@@ -43,8 +43,11 @@ func mapStoreError(err error) (status int, code, msg string) {
 	}
 	// Distinct from the tombstone case above: there the id is gone for good, here it is already taken.
 	// Usually a retry of a POST whose response was lost, so the message says the resource is already there.
-	if errors.Is(err, store.ErrAlreadyExists) {
-		return http.StatusConflict, "conflict", err.Error()
+	// Detail is read off the typed error rather than err.Error(), which would leak the wrapping chain
+	// ("store: document already exists: …") into the response body.
+	var exists *store.AlreadyExistsError
+	if errors.As(err, &exists) {
+		return http.StatusConflict, "conflict", exists.Detail
 	}
 	if errors.Is(err, store.ErrListLimitExceeded) {
 		return http.StatusBadRequest, "bad_request", err.Error()

@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -72,6 +73,33 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("fetch %q: %w", uri, err)
 	}
+
+	// Reference-only contract: ingestion links a playlist this feed already holds, it never rewrites one.
+	// So identity is resolved before content is judged — if the id is already stored, the stored bytes are
+	// what gets linked and the remote representation is not consulted at all.
+	//
+	// Ordering is the whole point. Validating first made membership depend on a document that, by contract,
+	// is ignored: once a member was stored here, its origin could rot, rotate keys, or serve something
+	// malformed, and every later group or channel referencing that URL would fail to be created even though
+	// nothing about the stored playlist needed to change.
+	//
+	// This grants no new reach. A body claiming an id we already hold only earns a link to that stored
+	// playlist — exactly what the same-origin URL form above already offers any caller — and the stored row
+	// is returned untouched, so a forged body cannot alter, replace, or reveal anything.
+	if id, ok := playlistIDFromBody(body); ok {
+		rec, err := e.store.GetPlaylist(ctx, id.String())
+		switch {
+		case err == nil:
+			return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
+		case errors.Is(err, store.ErrNotFound):
+			// Not held here, so this ingest would create it: fall through to the full create bar below.
+			// A tombstoned id also lands here, and the store refuses to insert it (ErrDocumentDeleted),
+			// so retiring an id still cannot be undone through an ingest.
+		default:
+			return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
+		}
+	}
+
 	p, err := e.parseValidatedPlaylist(body)
 	if err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: %w", uri, err)
@@ -110,6 +138,27 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	// Keep the fetched bytes exactly as served: the remote document's signatures are bound to them, so a
 	// typed re-marshal here would store a member whose own signatures no longer verify.
 	return store.IngestedPlaylist{ID: id, Slug: slug, Raw: append(json.RawMessage(nil), body...)}, nil
+}
+
+// playlistIDFromBody pulls just the id out of a fetched body.
+//
+// Deliberately the cheapest possible parse — no schema, no signatures, no identity rules — because its
+// only job is to answer "do we already hold this?". A body that could never clear the create bar must
+// still be able to name a playlist this feed already trusts; running validation first is precisely the
+// bug this avoids. A body that is not JSON, or carries no usable id, simply has no answer to give, so the
+// caller falls through to the full create path and reports the real reason it is unacceptable.
+func playlistIDFromBody(body []byte) (uuid.UUID, bool) {
+	var probe struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return uuid.UUID{}, false
+	}
+	id, err := uuid.Parse(strings.TrimSpace(probe.ID))
+	if err != nil {
+		return uuid.UUID{}, false
+	}
+	return id, true
 }
 
 // resolvePlaylistURIs resolves every URI in uris. The returned slice has the same length and order

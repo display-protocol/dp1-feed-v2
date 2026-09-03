@@ -113,6 +113,8 @@ func TestBlockedIP_classification(t *testing.T) {
 		{"169.254.169.254", "link-local cloud metadata"},
 		{"fe80::1", "link-local"},
 		{"fe80::1%eth0", "link-local with a zone must not escape the prefix check"},
+		{"fec0::1", "deprecated site-local: sits past fe80::/10, so fc00::/7 and fe80::/10 both miss it"},
+		{"feff::1", "top of deprecated site-local"},
 		{"100.64.0.1", "carrier-grade NAT"},
 		{"100.127.255.254", "carrier-grade NAT"},
 		{"224.0.0.1", "multicast"},
