@@ -60,7 +60,7 @@ type signedIdentity struct {
 }
 
 // newSignedIdentity validates the identity fields of a signed submission. slug is taken verbatim
-// (no slugify): normalising it would change the signed bytes.
+// (no slugify): normalizing it would change the signed bytes.
 func newSignedIdentity(idStr, createdStr *string, slug string, raw json.RawMessage) (signedIdentity, error) {
 	if len(raw) == 0 {
 		return signedIdentity{}, errMissingRawBody

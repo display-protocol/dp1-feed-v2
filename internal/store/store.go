@@ -50,7 +50,7 @@ var ErrDocumentDeleted = errors.New("document id was deleted and cannot be reuse
 // orphans every non-feed signature. Raw is therefore the source of truth; Body is a decoded view for
 // internal reads (item index, membership, slug/id lookups) and must never be written back.
 //
-// The jsonb column reorders keys and normalises numeric text. Both are JCS-neutral (JCS sorts keys and
+// The jsonb column reorders keys and normalizes numeric text. Both are JCS-neutral (JCS sorts keys and
 // canonicalises numbers itself), so stored bytes stay hash-equivalent to what was signed. Anything that
 // is *not* JCS-neutral must not happen on the write path.
 

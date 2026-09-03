@@ -90,7 +90,7 @@ func TestIntegration_SignedPlaylist_VerbatimRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// created carries a +07:00 offset: the feed must not normalise it to UTC, which would change the
+	// created carries a +07:00 offset: the feed must not normalize it to UTC, which would change the
 	// signed bytes and orphan the curator signature.
 	unsigned := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `",` +
 		`"title":"Signed verbatim","created":"2026-01-02T03:04:05+07:00",` +
