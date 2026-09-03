@@ -22,7 +22,9 @@ database:
 
 auth:
   # Mutating routes are authorized by request signatures, not an API key.
-  # intent_max_clock_skew bounds how far a signed delete-intent's "created" may sit from server time.
+  # intent_max_clock_skew bounds how far a signed mutation intent's "created" may sit from server time.
+  # It applies to BOTH the PUT replace-intent and the DELETE intent, so widening it widens the replay
+  # window for edits as well as deletions; narrowing it can make slow or clock-skewed clients fail PUTs.
   # Override with DP1_FEED_INTENT_MAX_CLOCK_SKEW (Go duration, e.g. 5m).
   intent_max_clock_skew: "5m"
 

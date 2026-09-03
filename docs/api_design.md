@@ -212,7 +212,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |
-| **400** | `invalid_timestamp` | `created` is in the future, or a delete-intent `created` is outside the freshness window (`IsInvalidTimestampError`). |
+| **400** | `invalid_timestamp` | `created` is in the future, or a mutation-intent `created` — replace or delete — is outside the freshness window (`IsInvalidTimestampError`). |
 | **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
 | **400** | `bad_request` | Malformed delete-intent, or its `action`/`target` disagree with the stored resource (`IsDeleteRequestError`). |
 | **401** | `unauthorized` | Missing authentication — a mutating request whose body carries no signatures (`IsSignaturesRequiredError`; also enforced by `RequireSignatures`). |

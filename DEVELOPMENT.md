@@ -158,7 +158,7 @@ database:
 
 auth:
   # No API key — mutating routes are authorized by request signatures.
-  intent_max_clock_skew: 5m   # freshness window for signed DELETE intents
+  intent_max_clock_skew: 5m   # freshness window for signed PUT and DELETE intents
 
 playlist:
   fetch_timeout: 30s
@@ -268,7 +268,7 @@ cp config/.env.example config/.env
 The `.env` file contains all necessary environment variables for Docker deployment:
 
 - `DP1_FEED_DATABASE_URL` — PostgreSQL connection string (use `postgres` as hostname)
-- `DP1_FEED_INTENT_MAX_CLOCK_SKEW` — Freshness window for signed DELETE intents (Go duration, default 5m)
+- `DP1_FEED_INTENT_MAX_CLOCK_SKEW` — Freshness window for signed mutation intents, both PUT replace and DELETE (Go duration, default 5m)
 - `DP1_FEED_MAX_REQUEST_BYTES` — Inbound request body cap in bytes (default 5 MiB)
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking

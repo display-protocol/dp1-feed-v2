@@ -51,22 +51,33 @@ var ErrDocumentDeleted = errors.New("document id was deleted and cannot be reuse
 // gone for good rather than already taken — so the two must not share a message.
 var ErrAlreadyExists = errors.New("document already exists")
 
-// AlreadyExistsError names which uniqueness rule a create violated, so the HTTP layer can tell an id
-// collision from a slug collision without parsing text.
+// ErrStillReferenced is returned when a delete is refused because a group or channel still lists the
+// document as a member (the membership tables use ON DELETE RESTRICT).
 //
-// Detail is reported to the client verbatim. That is the whole reason this type exists: `err.Error()` on a
-// wrapped sentinel would hand the caller the internal chain ("store: document already exists: …"), which
-// both stutters and names layers no client should see. Detail must therefore read as a finished,
-// client-facing sentence on its own.
-type AlreadyExistsError struct {
+// This is a client-correctable conflict, not a fault: the caller removes the references, then retries.
+// Left unclassified it surfaced as 500, even though the API documents the delete as failing when the
+// resource is referenced. Restrict is deliberate — cascading would silently empty someone else's group.
+var ErrStillReferenced = errors.New("document is still referenced")
+
+// ConflictError explains a refused mutation in the caller's terms, and carries the sentinel that
+// classifies it (ErrAlreadyExists, ErrStillReferenced) so callers can branch with errors.Is.
+//
+// Detail is reported to the client verbatim, which is the whole reason this type exists: err.Error() on a
+// wrapped sentinel hands back the internal chain ("store: document already exists: ..."), which stutters
+// and names layers no client should see. Detail must therefore read as a finished, client-facing sentence
+// on its own, and must never contain a table or constraint name.
+type ConflictError struct {
 	Detail string
+	// Kind classifies the conflict. Every value must map to 409 at the HTTP layer, since that is what
+	// makes reporting Detail verbatim safe.
+	Kind error
 }
 
-func (e *AlreadyExistsError) Error() string { return e.Detail }
+func (e *ConflictError) Error() string { return e.Detail }
 
-// Unwrap makes errors.Is(err, ErrAlreadyExists) hold, so callers that only care that it was a collision
-// keep working without knowing about this type.
-func (e *AlreadyExistsError) Unwrap() error { return ErrAlreadyExists }
+// Unwrap makes errors.Is(err, ErrAlreadyExists) and friends hold, so callers that only care which kind of
+// conflict occurred need not know about this type.
+func (e *ConflictError) Unwrap() error { return e.Kind }
 
 // Documents are written and read as raw JSON, never re-marshaled through the typed dp1-go structs.
 //

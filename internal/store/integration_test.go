@@ -1442,7 +1442,20 @@ func TestIntegration_PlaylistGroup_cannotDeleteReferencedPlaylist(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected error when deleting playlist referenced by group, got nil")
 	}
-	// Note: specific error type depends on DB driver, but it should not be ErrNotFound
+	// The refusal must be a classified conflict, not a raw driver error: the API documents this DELETE as
+	// failing while referenced, and the caller fixes it by removing the references and retrying. Left
+	// unclassified it reached the client as 500, which reads as "the server broke", not "undo this first".
+	if !errors.Is(err, store.ErrStillReferenced) {
+		t.Fatalf("want ErrStillReferenced for a referenced playlist, got %v", err)
+	}
+	var conflict *store.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("want a store.ConflictError carrying client-facing detail, got %T", err)
+	}
+	// Detail is returned to clients verbatim, so it must name the resource, not the table or constraint.
+	if !strings.Contains(conflict.Detail, "playlist") || strings.Contains(conflict.Detail, "playlist_group_members") {
+		t.Fatalf("detail should name the resource without leaking schema identifiers, got %q", conflict.Detail)
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		t.Fatal("expected FK constraint error, got ErrNotFound")
 	}
