@@ -1,11 +1,13 @@
 # Gitleaks fingerprints for confirmed false positives (see .gitleaks.toml for rule-level allowlists).
 #
-# Each entry is commit:file:rule:line. Fingerprints pin a single historical occurrence, so they cannot
-# mask a future real secret the way a broad regex allowlist could. Only add one after confirming the
-# match is not a credential.
+# Each entry is commit:file:rule:line. A fingerprint pins one historical occurrence, so it cannot mask a
+# future real secret the way a broad regex allowlist could. Only add one after confirming the match is
+# not a credential.
 #
-# generic-api-key matched documentation prose, not a secret: the sentence read "a verifying signature
-# from a stored owner key is required, curators/publisher may not change", and the rule treats a
-# high-entropy token following the word "key" as a value. The wording was changed in a later commit, but
-# gitleaks scans history, so the original commit still needs this entry.
+# Both entries below are the same false positive in documentation prose, not a credential. The
+# generic-api-key rule treats a high-entropy word following the word "key" as if it were a value, and a
+# sentence in the API-design rule describing owner checks happened to read that way. The sentence was
+# reworded, but gitleaks scans history, so the commit that introduced it still matches — as did the
+# commit whose ignore-file comment quoted it back. Deliberately not restating the wording here.
 16137f475dff0db0ef299e7ccb5deb5a3393ab77:.cursor/rules/21-api-design-tbd.mdc:generic-api-key:41
+5508b23bbb2ee6a1d7f9131b51e40b614d4b59b7:.gitleaksignore:generic-api-key:8
