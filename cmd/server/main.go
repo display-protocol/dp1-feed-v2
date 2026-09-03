@@ -85,7 +85,10 @@ func main() {
 			zap.String("setting", "playlist.allow_private_fetch_destinations"))
 	}
 
-	execOptions := []executor.Option{executor.WithIntentClockSkew(cfg.Auth.IntentMaxClockSkew)}
+	execOptions := []executor.Option{
+		executor.WithIntentClockSkew(cfg.Auth.IntentMaxClockSkew),
+		executor.WithMaxPlaylistReferences(cfg.Playlist.MaxPlaylistReferences),
+	}
 	if len(cfg.Notifications.Clients) > 0 {
 		privateKey, err := notification.ParseP256PrivateKeyHex(cfg.Notifications.PrivateKeyHex)
 		if err != nil {

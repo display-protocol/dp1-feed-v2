@@ -93,7 +93,8 @@ Three postures, by verb:
      that exact content), `created` must fall within `auth.intent_max_clock_skew`, and the intent's own
      signatures must verify and include a **stored owner** (**`403`** otherwise).
    - The write is persisted by stored UUID, conditional on the generation observed at authorization
-     (**`409`** if the resource changed in between). The feed then co-signs and stores verbatim.
+     (**`409`** if the resource changed in between). The feed then co-signs and stores the document with
+     no field added, dropped or rewritten (see the note on content vs. bytes below).
 
    **Why the intent exists:** an owner's signatures live *inside* the document and are public via `GET`,
    so a previously published document could be replayed to roll a resource back. The per-signature `ts`
@@ -132,13 +133,19 @@ replayed to resurrect a deleted resource — while leaving `POST` itself open, s
 documents this feed has never seen keeps working. An owner who deletes and later wants the resource back
 must create it under a **new id**.
 
-**Documents are stored and served verbatim.** DP-1 §7.1 binds every signature to the JCS form of the
-whole document, so the feed verifies over the bytes it received, appends its `feed` entry to
-`signatures` over that same payload, and persists and returns those bytes unchanged. It never derives a
-slug, mints item ids, re-formats `created`, injects defaults (the channel `version` is now required), or
-strips a legacy top-level `signature`. Every field the document needs must therefore be present and
-signed by the client. Row `id`/`slug`/`created` are read-only projections of the document. (jsonb
-re-orders keys and normalises numeric text; both are JCS-neutral, so stored bytes stay hash-equivalent.)
+**Documents are stored and served without content changes.** DP-1 §7.1 binds every signature to the JCS
+form of the whole document, so the feed verifies over the bytes it received and appends its `feed` entry
+to `signatures` over that same payload. It never derives a slug, mints item ids, re-formats `created`,
+injects defaults (the channel `version` is now required), drops or adds a field, or strips a legacy
+top-level `signature`. Every field the document needs must therefore be present and signed by the client.
+Row `id`/`slug`/`created` are read-only projections of the document.
+
+**What is preserved is the content, not the byte sequence.** Appending the feed signature re-encodes the
+document, and the `jsonb` column re-orders keys and normalises numeric text. All of that is JCS-neutral,
+so every signature — yours and the feed's — still verifies against what you get back, and the signing
+digest is unchanged. It does mean a `GET` is *not* guaranteed byte-identical to what you submitted:
+compare or re-verify via JCS canonicalisation (or the signing digest), never by hashing the raw response
+body or diffing it against your request.
 
 **Request bodies are decoded strictly.** An unknown or misspelled JSON member, or a body holding more
 than one JSON value, is a **`400`** naming the field — never silently dropped, because a dropped member
@@ -209,6 +216,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | HTTP status | `error` (typical) | When |
 | ----------- | ----------------- | ---- |
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
+| **400** | `bad_request` | A group or channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |

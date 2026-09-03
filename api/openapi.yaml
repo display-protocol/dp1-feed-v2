@@ -30,13 +30,19 @@ info:
     what stops a captured document from resurrecting a deleted resource; CREATE itself stays open so
     cross-feed mirroring keeps working.
 
-    Documents are stored and served verbatim. DP-1 §7.1 binds every signature to the JCS form of the
-    whole document, so the feed verifies over the bytes you sent, appends its `feed` entry to
-    `signatures`, and persists and returns those bytes unchanged — it never derives a slug, mints item
-    ids, re-formats `created`, injects defaults, or strips a legacy `signature`. Consequently every
-    field the document needs must be present and signed by you, and request bodies are decoded
-    **strictly**: an unknown or misspelled member, or a body holding more than one JSON value, is a
-    `400` naming the field rather than being silently dropped.
+    Documents are stored and served without content changes. DP-1 §7.1 binds every signature to the JCS
+    form of the whole document, so the feed verifies over the bytes you sent and appends its `feed`
+    entry to `signatures` — it never derives a slug, mints item ids, re-formats `created`, injects
+    defaults, drops or adds a field, or strips a legacy `signature`. Consequently every field the
+    document needs must be present and signed by you, and request bodies are decoded **strictly**: an
+    unknown or misspelled member, or a body holding more than one JSON value, is a `400` naming the
+    field rather than being silently dropped.
+
+    What is preserved is the content, not the byte sequence: appending the feed signature re-encodes the
+    document and the `jsonb` column re-orders keys and normalises numeric text. Both are JCS-neutral, so
+    every signature still verifies and the signing digest is unchanged, but a `GET` is not guaranteed
+    byte-identical to what you submitted. Compare or re-verify through JCS canonicalisation or the
+    signing digest, not by hashing the raw response body.
 
     On PUT the identity (`id`, `slug`, and document `created`) is **validated for equality** against the
     stored resource, not substituted — a mismatch is a `400`. Request bodies are capped
@@ -1008,7 +1014,11 @@ components:
           type: string
         playlists:
           type: array
-          description: Array of playlist URIs or slugs
+          maxItems: 1000
+          description: >-
+            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
+            every reference this feed does not already store becomes an outbound fetch, so the count
+            is bounded before resolution. Over the cap is a `400`.
           items:
             type: string
         curator:
@@ -1048,6 +1058,11 @@ components:
           type: string
         playlists:
           type: array
+          maxItems: 1000
+          description: >-
+            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
+            every reference this feed does not already store becomes an outbound fetch, so the count
+            is bounded before resolution. Over the cap is a `400`.
           items:
             type: string
         # Additional fields...
@@ -1091,7 +1106,11 @@ components:
           example: "1.0.0"
         playlists:
           type: array
-          description: Array of playlist URIs or slugs
+          maxItems: 1000
+          description: >-
+            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
+            every reference this feed does not already store becomes an outbound fetch, so the count
+            is bounded before resolution. Over the cap is a `400`.
           items:
             type: string
         curators:
@@ -1138,6 +1157,11 @@ components:
           type: string
         playlists:
           type: array
+          maxItems: 1000
+          description: >-
+            Playlist URIs or slugs. Capped by `playlist.max_playlist_references` (default 1000):
+            every reference this feed does not already store becomes an outbound fetch, so the count
+            is bounded before resolution. Over the cap is a `400`.
           items:
             type: string
         # Additional fields...

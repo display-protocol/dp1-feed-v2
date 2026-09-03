@@ -105,6 +105,7 @@ type impl struct {
 	publicBase         string
 	notificationClient notification.Client
 	intentSkew         time.Duration
+	maxRefs            int
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -127,6 +128,16 @@ func WithIntentClockSkew(d time.Duration) Option {
 	}
 }
 
+// WithMaxPlaylistReferences caps how many playlist URIs one group or channel may reference. A
+// non-positive value leaves the executor default (defaultMaxRefs) in place.
+func WithMaxPlaylistReferences(n int) Option {
+	return func(e *impl) {
+		if n > 0 {
+			e.maxRefs = n
+		}
+	}
+}
+
 // New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
 func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
@@ -137,6 +148,7 @@ func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetc
 		fetch:             fetch,
 		publicBase:        strings.TrimSpace(publicBaseURL),
 		intentSkew:        defaultIntentSkew,
+		maxRefs:           defaultMaxRefs,
 	}
 	for _, option := range options {
 		option(e)
@@ -147,6 +159,11 @@ func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetc
 // defaultIntentSkew is the signed delete-intent freshness window when WithIntentClockSkew is not set.
 // Kept small to bound replay of a captured delete after the same id is re-created.
 const defaultIntentSkew = 5 * time.Minute
+
+// defaultMaxRefs bounds playlist references per group/channel when WithMaxPlaylistReferences is not set.
+// Mirrors config.DefaultMaxPlaylistReferences; duplicated rather than imported so the executor package
+// stays free of the config package (see docs/architecture.md on dependency direction).
+const defaultMaxRefs = 1000
 
 func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {
@@ -426,13 +443,17 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
 
-	// Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	// Sign and schema-validate BEFORE resolving URIs. Resolution issues outbound fetches, so a document
+	// that was never going to be stored must not first cost the feed (and whoever it points at) that
+	// traffic. Sequencing this earlier also means a malformed document reports its schema error rather
+	// than whichever reference happened to fail first.
+	signed, group, err := e.signAndValidatePlaylistGroup(req.Raw, si.created)
 	if err != nil {
 		return nil, err
 	}
 
-	signed, group, err := e.signAndValidatePlaylistGroup(req.Raw, si.created)
+	// Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
 	if err != nil {
 		return nil, err
 	}
@@ -522,14 +543,15 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		return nil, err
 	}
 
-	// 3. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	// 3. Feed co-signs the same bytes and validates (see ReplacePlaylist). Ahead of resolution so an
+	// invalid document costs no outbound fetches.
+	signed, group, err := e.signAndValidatePlaylistGroup(req.Raw, time.Now())
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. Feed co-signs the same bytes, validate, persist by stable UUID (see ReplacePlaylist).
-	signed, group, err := e.signAndValidatePlaylistGroup(req.Raw, time.Now())
+	// 4. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
 	if err != nil {
 		return nil, err
 	}
@@ -582,13 +604,15 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 		return nil, fmt.Errorf("publisher signature verification: %w", err)
 	}
 
-	// Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	// Validate before resolving URIs, so a document that cannot be stored never costs outbound fetches
+	// (see CreatePlaylistGroup).
+	signed, ch, err := e.signAndValidateChannel(req.Raw, si.created)
 	if err != nil {
 		return nil, err
 	}
 
-	signed, ch, err := e.signAndValidateChannel(req.Raw, si.created)
+	// Resolve every URI to stored playlist rows (parallel), preserving order for membership and FK targets.
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
 	if err != nil {
 		return nil, err
 	}
@@ -693,14 +717,15 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		return nil, err
 	}
 
-	// 3. Fresh fetch/lookup for every URI (only after authorization).
-	ingested, err := e.resolvePlaylistURIs(ctx, uris)
+	// 3. Feed co-signs the same bytes and validates, ahead of resolution so an invalid document costs no
+	// outbound fetches.
+	signed, ch, err := e.signAndValidateChannel(req.Raw, time.Now())
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. Feed co-signs the same bytes, validate, persist by stable UUID.
-	signed, ch, err := e.signAndValidateChannel(req.Raw, time.Now())
+	// 4. Fresh fetch/lookup for every URI (only after authorization and validation).
+	ingested, err := e.resolvePlaylistURIs(ctx, uris)
 	if err != nil {
 		return nil, err
 	}

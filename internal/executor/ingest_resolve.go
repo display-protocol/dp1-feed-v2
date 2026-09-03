@@ -166,11 +166,22 @@ func playlistIDFromBody(body []byte) (uuid.UUID, bool) {
 //
 // Steps:
 //  1. Reject an empty list (groups/channels require at least one playlist).
-//  2. Run resolveOnePlaylistRef for each index in parallel (errgroup), capped at 8 goroutines,
+//  2. Reject a list longer than the configured cap, before any fetch is issued.
+//  3. Run resolveOnePlaylistRef for each index in parallel (errgroup), capped at 8 goroutines,
 //     writing into out[i] so completion order does not reorder results.
+//
+// The count check is the fan-out bound and must stay ahead of step 3. Creation is open to any client and
+// every unstored URI becomes an outbound request, so without it the only ceiling is the request body
+// size: one valid self-signed document near that limit can name enough URIs to turn a single inbound
+// request into six figures of outbound ones. The concurrency limit paces that work, it does not bound it,
+// and the SSRF guard only constrains where each request may go. Allocation is deliberately deferred until
+// after the check so an oversized list cannot make the feed reserve memory for it either.
 func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.IngestedPlaylist, error) {
 	if len(uris) == 0 {
 		return nil, fmt.Errorf("playlists must be non-empty")
+	}
+	if max := e.maxRefs; max > 0 && len(uris) > max {
+		return nil, fmt.Errorf("%w: %d playlist references exceeds the maximum of %d", ErrTooManyReferences, len(uris), max)
 	}
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(8)

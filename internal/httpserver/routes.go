@@ -28,14 +28,21 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 		v1.PUT("/playlists/:id", RequireSignatures(log), h.ReplacePlaylist)
 		v1.DELETE("/playlists/:id", RequireSignatures(log), h.DeletePlaylist)
 
+		// Reference-resolving mutations carry an aggregate deadline. Group and channel writes resolve every
+		// playlist URI the document names, so their work is bounded by that budget as well as by the
+		// per-fetch timeout and the reference cap: without it, a document naming many slow-but-reachable
+		// hosts holds the handler for the sum of every fetch. Channel routes needed this already because
+		// notification delivery requires a deadline; groups fan out the same way and were missing it.
+		referenceMutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
+
 		v1.GET("/playlist-groups", h.ListPlaylistGroups)
 		v1.GET("/playlist-groups/:id", h.GetPlaylistGroup)
-		v1.POST("/playlist-groups", RequireSignatures(log), h.CreatePlaylistGroup)
-		v1.PUT("/playlist-groups/:id", RequireSignatures(log), h.ReplacePlaylistGroup)
+		v1.POST("/playlist-groups", referenceMutationDeadline, RequireSignatures(log), h.CreatePlaylistGroup)
+		v1.PUT("/playlist-groups/:id", referenceMutationDeadline, RequireSignatures(log), h.ReplacePlaylistGroup)
 		v1.DELETE("/playlist-groups/:id", RequireSignatures(log), h.DeletePlaylistGroup)
 
 		if cfg.Extensions.Enabled {
-			channelMutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
+			channelMutationDeadline := referenceMutationDeadline
 			v1.GET("/channels", h.ListChannels)
 			v1.GET("/channels/:id", h.GetChannel)
 			v1.POST("/channels", channelMutationDeadline, RequireSignatures(log), h.CreateChannel)

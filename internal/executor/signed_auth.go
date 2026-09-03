@@ -47,6 +47,11 @@ var (
 	// stored resource. Identity is immutable and is validated, never silently replaced: substituting stored
 	// values would change bytes the client signed and orphan the signature.
 	ErrSignedDocumentMismatch = errors.New("signed document does not match the stored resource")
+	// ErrTooManyReferences is returned when a group or channel lists more playlist URIs than the feed will
+	// resolve for one request. This is a fan-out bound rather than a schema rule: each unstored reference
+	// becomes an outbound fetch, and creation is open, so the count has to be capped before resolution
+	// begins. The client chose the list, so it is a 400.
+	ErrTooManyReferences = errors.New("too many playlist references")
 	// errMissingRawBody means the HTTP layer did not attach the request bytes to a submission (programming error).
 	errMissingRawBody = errors.New("signed submission is missing the raw request body")
 )
@@ -275,7 +280,12 @@ func (e *impl) verifyIntent(
 // A delete intent has no document, and must not claim to bind one.
 func (e *impl) requireIntentBindsDocument(intent *models.SignedIntent, docRaw json.RawMessage) error {
 	if len(docRaw) == 0 {
-		if strings.TrimSpace(intent.PayloadHash) != "" {
+		// Reject the member's PRESENCE, not just a non-empty value. The route's delete schema sets
+		// additionalProperties:false and does not list payloadHash, so any occurrence is off-contract — but
+		// null, "" and "   " all decode to the empty string, so a value check alone silently accepts three
+		// spellings the spec forbids. Presence is read from the raw body because that is the only place
+		// the distinction between "absent" and "explicitly null" survives decoding.
+		if intentDeclaresPayloadHash(intent) {
 			return fmt.Errorf("%w: payloadHash is not accepted for this action", ErrIntentInvalid)
 		}
 		return nil
@@ -288,6 +298,25 @@ func (e *impl) requireIntentBindsDocument(intent *models.SignedIntent, docRaw js
 		return fmt.Errorf("%w: payloadHash %q does not match the submitted document (%s)", ErrIntentInvalid, intent.PayloadHash, want)
 	}
 	return nil
+}
+
+// intentDeclaresPayloadHash reports whether the intent body carried a payloadHash member at all,
+// regardless of its value.
+//
+// Raw is the authority when present; the decoded string cannot distinguish an absent member from an
+// explicit null. Callers that build a SignedIntent in-process (tests, internal paths) leave Raw empty, so
+// the decoded value is the fallback. A body that fails to re-decode here is treated as declaring the
+// member: this runs only on the reject path, and refusing an unparseable intent is the safe direction.
+func intentDeclaresPayloadHash(intent *models.SignedIntent) bool {
+	if len(intent.Raw) == 0 {
+		return strings.TrimSpace(intent.PayloadHash) != ""
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(intent.Raw, &members); err != nil {
+		return true
+	}
+	_, declared := members["payloadHash"]
+	return declared
 }
 
 // requireFreshIntentTimestamp parses the intent's "created" and rejects it when it sits outside
@@ -338,5 +367,6 @@ func IsInvalidSubmissionError(err error) bool {
 	return err != nil && (errors.Is(err, ErrSlugRequired) ||
 		errors.Is(err, ErrItemIDRequired) ||
 		errors.Is(err, ErrPublisherRequired) ||
+		errors.Is(err, ErrTooManyReferences) ||
 		errors.Is(err, ErrSignedDocumentMismatch))
 }

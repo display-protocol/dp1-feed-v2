@@ -908,6 +908,61 @@ func TestDeletePlaylist_wrongTargetType(t *testing.T) {
 	}
 }
 
+// A delete intent carries no document, and the route's delete schema forbids payloadHash outright
+// (additionalProperties:false, property not listed). Rejecting only a non-empty value would accept three
+// spellings the contract forbids, because null, "" and "   " all decode to the empty string — so the
+// check is on the member's presence in the received bytes, which is the only place that distinction
+// survives decoding.
+func TestDeletePlaylist_payloadHashRejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "null", value: `null`},
+		{name: "empty string", value: `""`},
+		{name: "whitespace", value: `"   "`},
+		{name: "real digest", value: `"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+			id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+			mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+			req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
+			// Splice the member into the received bytes: the struct field cannot express "present but null",
+			// and Raw is what the presence check and the signatures both read.
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal(req.Raw, &members); err != nil {
+				t.Fatalf("unmarshal intent: %v", err)
+			}
+			members["payloadHash"] = json.RawMessage(tc.value)
+			raw, err := json.Marshal(members)
+			if err != nil {
+				t.Fatalf("marshal intent: %v", err)
+			}
+			// Re-decode so the struct field and Raw agree, exactly as bindDeleteRequest leaves them. Without
+			// this the case would be unfaithful: null/""/"   " decode to the empty string (which is the whole
+			// point), but a real digest decodes to that digest, and a test that skipped the decode would
+			// credit the presence check for a rejection the old value check already made.
+			var decoded models.SignedDeleteRequest
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatalf("re-decode intent: %v", err)
+			}
+			decoded.Raw = raw
+			req = &decoded
+
+			e := executor.New(mockStore, mockDP1, false, nil, "")
+			if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsIntentError(err) {
+				t.Fatalf("want intent error for payloadHash %s on a delete, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestDeletePlaylist_missingSignatures(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -1470,6 +1525,7 @@ func TestCreatePlaylistGroup_emptyPlaylists(t *testing.T) {
 	// Authorization precedes URI resolution, so a signed request is verified before the empty-playlists
 	// check inside resolvePlaylistURIs is reached.
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	expectGroupSignedAndValid(t, mockDP1)
 	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq())
 	if err == nil || !strings.Contains(err.Error(), "playlists must be non-empty") {
@@ -1482,11 +1538,78 @@ func TestCreatePlaylistGroup_externalURINoFetcher(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	expectGroupSignedAndValid(t, mockDP1)
 	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
 	if err == nil || !strings.Contains(err.Error(), "fetcher is not configured") {
 		t.Fatalf("got %v", err)
 	}
+}
+
+// Reference count is a fan-out bound: creation is open, and every unstored URI becomes an outbound
+// fetch, so the cap has to be enforced before resolution starts rather than discovered during it.
+//
+// Neither mock declares GetPlaylist or a fetcher. That is the assertion: an over-cap document must be
+// refused without a single lookup or fetch, so if the check ever moved after resolution, gomock would
+// fail on the unexpected call (and a nil fetcher would panic) rather than quietly passing.
+func TestCreatePlaylistGroup_tooManyReferences(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	refs := make([]string, 0, 4)
+	for i := range 4 {
+		refs = append(refs, localPlaylistRef(fmt.Sprintf("pl-%d", i)))
+	}
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase, executor.WithMaxPlaylistReferences(3))
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(refs...))
+	if !errors.Is(err, executor.ErrTooManyReferences) {
+		t.Fatalf("want ErrTooManyReferences for %d refs over a cap of 3, got %v", len(refs), err)
+	}
+	// The client chose the reference list, so this is their input being wrong, not an internal fault.
+	if !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want a 400-class submission error, got %v", err)
+	}
+}
+
+// The cap is a maximum, not a strict bound: a document sitting exactly on it must still be accepted, or
+// the limit a deployment configures would silently be one less than it says.
+func TestCreatePlaylistGroup_referencesAtCapAllowed(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	plID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	plBody := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl-one","title":"P"}`)
+	plDoc := mustDecodePlaylist(t, plBody)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "pl-one").Return(&store.PlaylistRecord{
+		ID: plID, Slug: "pl-one", Raw: plBody, Body: plDoc,
+	}, nil).Times(2)
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase, executor.WithMaxPlaylistReferences(2))
+	refs := []string{localPlaylistRef("pl-one"), localPlaylistRef("pl-one")}
+	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(refs...)); err != nil {
+		t.Fatalf("a group with exactly the maximum reference count must be accepted, got %v", err)
+	}
+}
+
+// expectGroupSignedAndValid satisfies the sign/validate pair that group creation now performs BEFORE it
+// resolves playlist references, so tests exercising resolution behavior reach the code they are about.
+// The ordering is deliberate (see CreatePlaylistGroup): a document that cannot be stored must not first
+// cost outbound fetches.
+func expectGroupSignedAndValid(t *testing.T, m *mocks.MockValidatorSigner) {
+	t.Helper()
+	signed := []byte(`{"kind":"signed-group"}`)
+	group := mustDecodeGroup(t, signed)
+	m.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil).AnyTimes()
+	m.EXPECT().ValidatePlaylistGroup(gomock.Any()).Return(&group, nil).AnyTimes()
 }
 
 // staticFetcher serves one fixed body for any remote playlist URI.
@@ -1502,6 +1625,7 @@ func TestCreatePlaylistGroup_remotePlaylistMustBeSelfSigned(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	expectGroupSignedAndValid(t, mockDP1)
 	remote := &playlist.Playlist{ID: "77777777-7777-4777-8777-777777777777", Slug: "remote"}
 	mockDP1.EXPECT().ValidatePlaylist(gomock.Any()).Return(remote, nil)
 	// Signatures verify cryptographically, but none matches a declared curator (there are none).
@@ -1545,6 +1669,7 @@ func TestCreatePlaylistGroup_remotePlaylistMustSatisfyPOSTIdentityRules(t *testi
 			ctrl := gomock.NewController(t)
 			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 			mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+			expectGroupSignedAndValid(t, mockDP1)
 			tc.remote.Curators = []identity.Entity{{Key: testCuratorKid}}
 			tc.remote.Signatures = []playlist.Signature{testSig(testCuratorKid)}
 			mockDP1.EXPECT().ValidatePlaylist(gomock.Any()).Return(tc.remote, nil)
@@ -1567,6 +1692,7 @@ func TestCreatePlaylistGroup_remotePlaylistFailingCryptoIsRejected(t *testing.T)
 	ctrl := gomock.NewController(t)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	expectGroupSignedAndValid(t, mockDP1)
 	remote := &playlist.Playlist{
 		ID:         "77777777-7777-4777-8777-777777777777",
 		Slug:       "remote",
@@ -1590,6 +1716,7 @@ func TestCreatePlaylistGroup_localPlaylistNotFound(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "missing").Return(nil, store.ErrNotFound)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	expectGroupSignedAndValid(t, mockDP1)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("missing")))
@@ -1675,10 +1802,9 @@ func TestCreatePlaylistGroup_signError(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
-	plID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
-	mockStore.EXPECT().GetPlaylist(gomock.Any(), "a").Return(&store.PlaylistRecord{
-		ID: plID, Slug: "a", Body: mustDecodePlaylist(t, []byte(`{"id":"44444444-4444-4444-4444-444444444444"}`)),
-	}, nil)
+	// No GetPlaylist expectation on purpose: signing precedes reference resolution, so a signing failure
+	// must abandon the request before any lookup or fetch happens. If that ordering regressed, resolution
+	// would call GetPlaylist and gomock would fail this test on the unexpected call.
 	mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(nil, errors.New("no key"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
@@ -1694,10 +1820,8 @@ func TestCreatePlaylistGroup_postSignValidationError(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
-	plID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
-	mockStore.EXPECT().GetPlaylist(gomock.Any(), "a").Return(&store.PlaylistRecord{
-		ID: plID, Slug: "a", Body: mustDecodePlaylist(t, []byte(`{"id":"55555555-5555-5555-5555-555555555555"}`)),
-	}, nil)
+	// No GetPlaylist expectation: post-sign validation runs before reference resolution, so a document
+	// rejected there must never reach a lookup or fetch (see TestCreatePlaylistGroup_signError).
 	signed := []byte(`{}`)
 	gomock.InOrder(
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
@@ -3593,6 +3717,7 @@ func TestCreatePlaylistGroup_unknownRemoteIDStillFullyValidated(t *testing.T) {
 	body := []byte(`{"id":"88888888-8888-4888-8888-888888888888","unsigned":true}`)
 
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	expectGroupSignedAndValid(t, mockDP1)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), newID.String()).Return(nil, store.ErrNotFound)
 
 	// Not held here, so resolution must fall through to validation — and this body carries no curator

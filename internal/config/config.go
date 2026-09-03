@@ -129,7 +129,21 @@ type PlaylistConfig struct {
 	// to any client, so whoever names a playlist URL decides where the feed sends a request; with this on,
 	// that becomes a probe of everything the feed can reach (loopback, cloud metadata, internal services).
 	AllowPrivateFetchDestinations bool `yaml:"allow_private_fetch_destinations"`
+	// MaxPlaylistReferences caps how many playlist URIs one group or channel may reference.
+	//
+	// This is a fan-out bound, not a modeling preference. Group and channel creation is open to any
+	// client, and every reference the document lists becomes an outbound fetch for URIs this feed does not
+	// already store. Without a cap the only limit is the request-body size, so a single valid,
+	// self-signed request near MaxRequestBytes can name six figures' worth of URIs and turn one inbound
+	// request into that many outbound ones. The SSRF guard constrains *where* those requests may go; it
+	// does nothing about how many there are. Zero falls back to DefaultMaxPlaylistReferences.
+	MaxPlaylistReferences int `yaml:"max_playlist_references"`
 }
+
+// DefaultMaxPlaylistReferences bounds playlist references per group/channel when config leaves it unset.
+// Chosen to sit far above any realistic curated collection while keeping worst-case fan-out per request
+// to something a deployment can absorb.
+const DefaultMaxPlaylistReferences = 1000
 
 // Load reads YAML from path (if non-empty), merges DP1_FEED_* environment overrides, validates
 // required fields, and sets Playlist.SigningKid from the Ed25519 public key (did:key).
@@ -183,8 +197,9 @@ func defaultConfig() *Config {
 		Auth:       AuthConfig{IntentMaxClockSkew: DefaultIntentMaxClockSkew},
 		Extensions: ExtensionsConfig{Enabled: true},
 		Playlist: PlaylistConfig{
-			FetchTimeout:      30 * time.Second,
-			FetchMaxBodyBytes: 4 << 20, // 4 MiB
+			FetchTimeout:          30 * time.Second,
+			FetchMaxBodyBytes:     4 << 20, // 4 MiB
+			MaxPlaylistReferences: DefaultMaxPlaylistReferences,
 		},
 		Notifications: NotificationConfig{Timeout: 15 * time.Second},
 	}
@@ -208,6 +223,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("max request bytes env: %w", err)
 		}
 		cfg.Server.MaxRequestBytes = n
+	}
+	if v := os.Getenv(envPrefix + "MAX_PLAYLIST_REFERENCES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("max playlist references env: %w", err)
+		}
+		cfg.Playlist.MaxPlaylistReferences = n
 	}
 	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
 		cfg.Sentry.DSN = v
@@ -283,6 +305,9 @@ func (c *Config) validate() error {
 	}
 	if c.Server.WriteTimeout <= c.Server.ResponseWriteReserve {
 		return fmt.Errorf("server write timeout must exceed response write reserve")
+	}
+	if c.Playlist.MaxPlaylistReferences < 0 {
+		return fmt.Errorf("max playlist references must not be negative")
 	}
 	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
 		return fmt.Errorf("notification timeout must be positive")
