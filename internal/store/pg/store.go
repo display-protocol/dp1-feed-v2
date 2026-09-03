@@ -64,6 +64,28 @@ func requireNotTombstoned(ctx context.Context, q interface {
 	return nil
 }
 
+// requireNoneTombstoned is requireNotTombstoned for a batch of ids (membership ingestion). It runs on the
+// caller's transaction so the check and the inserts commit together.
+//
+// Checking every referenced id, rather than only the ones that turn out to be missing, is safe and
+// simpler: a row that exists cannot be tombstoned (a delete removes the row and writes the tombstone in
+// one transaction, and the create guard blocks re-creating it), so a tombstoned id in the batch always
+// denotes a row that would otherwise be inserted here.
+func requireNoneTombstoned(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, ids []uuid.UUID) error {
+	const anyTombstoned = `SELECT id FROM deleted_documents WHERE resource_type = $1 AND id = ANY($2::uuid[]) LIMIT 1`
+	var deleted uuid.UUID
+	switch err := q.QueryRow(ctx, anyTombstoned, table, ids).Scan(&deleted); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("check %s tombstones: %w", table, err)
+	default:
+		return fmt.Errorf("%w: %s %s", store.ErrDocumentDeleted, table, deleted)
+	}
+}
+
 // classifyConditionalWrite explains a conditional UPDATE/DELETE that matched no row: if the row still
 // exists, the caller's expected updated_at was stale (a concurrent write, or a delete and re-create,
 // landed) → ErrConcurrentModification; if the row is gone → ErrNotFound.
@@ -580,39 +602,40 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 // Playlist groups (same row shape as playlists; membership in playlist_group_members)
 // =============================================================================
 
-// upsertPlaylistsBatch bulk-upserts playlists and rebuilds their item indexes in the same transaction.
-// Input may repeat the same id (group/channel membership order); both writes keep the first
-// occurrence per id so playlists.body and playlist_item_index are always derived from the same body.
-func upsertPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
-	const (
-		upsertPlaylists = `
-INSERT INTO playlists (id, slug, body)
-SELECT DISTINCT ON (x.id) x.id, x.slug, x.body::jsonb
-FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY AS x(id, slug, body, ord)
-ORDER BY x.id, x.ord
-ON CONFLICT (id) DO UPDATE SET
-	slug = EXCLUDED.slug,
-	body = EXCLUDED.body`
-
-		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = ANY($1::uuid[])`
-
-		insertItemIndex = `
+// insertMissingPlaylistsBatch inserts the referenced playlists this feed does not have yet and builds the
+// item index for exactly those rows. Membership ingestion may *link* a playlist but must never *modify*
+// one: group/channel creation is open, so an ON CONFLICT DO UPDATE here would let anyone who can create a
+// channel host a document carrying a victim's playlist id and overwrite that playlist's body, slug, owner
+// set and item index on this feed. A referenced id that already exists is therefore left exactly as
+// stored, and the remote document's contents are ignored (cross-feed divergence is reconciled elsewhere).
+//
+// Input may repeat the same id (membership order); DISTINCT ON keeps the first occurrence so the row and
+// its item index are always derived from the same body. Only newly inserted rows get an index, which is
+// why nothing is cleared first — an existing playlist's index must survive untouched.
+func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
+	// One statement: the data-modifying CTE reports which ids it actually inserted (ON CONFLICT DO NOTHING
+	// returns nothing for rows that already existed), and the outer INSERT indexes only those.
+	const insertMissing = `
 WITH input AS (
-	SELECT DISTINCT ON (x.id) x.id, x.body::jsonb AS body
-	FROM unnest($1::uuid[], $2::text[]) WITH ORDINALITY AS x(id, body, ord)
+	SELECT DISTINCT ON (x.id) x.id, x.slug, x.body::jsonb AS body
+	FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY AS x(id, slug, body, ord)
 	ORDER BY x.id, x.ord
+), inserted AS (
+	INSERT INTO playlists (id, slug, body)
+	SELECT id, slug, body FROM input
+	ON CONFLICT (id) DO NOTHING
+	RETURNING id, created_at
 ), playlist_items AS (
-	SELECT input.id, playlists.created_at, CASE
+	SELECT inserted.id, inserted.created_at, CASE
 		WHEN jsonb_typeof(input.body->'items') = 'array' THEN input.body->'items'
 		ELSE '[]'::jsonb
 	END AS items
-	FROM input
-	JOIN playlists ON playlists.id = input.id
+	FROM inserted
+	JOIN input ON input.id = inserted.id
 )
 INSERT INTO playlist_item_index (item_id, playlist_id, playlist_created_at, position, item)
 SELECT (elem->>'id')::uuid, playlist_items.id, playlist_items.created_at, (ord - 1)::int, elem
 FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY AS t(elem, ord)`
-	)
 
 	if len(playlists) == 0 {
 		return nil
@@ -629,14 +652,13 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 		slugs[i] = p.Slug
 		bodies[i] = string(p.Raw)
 	}
-	if _, err := tx.Exec(ctx, upsertPlaylists, ids, slugs, bodies); err != nil {
-		return fmt.Errorf("upsert playlist rows: %w", err)
+	// A tombstoned id is one this feed deleted, so no row exists and the statement below would insert it.
+	// Ingestion must not become a side door around the create-path tombstone guard.
+	if err := requireNoneTombstoned(ctx, tx, "playlists", ids); err != nil {
+		return err
 	}
-	if _, err := tx.Exec(ctx, clearItemIndex, ids); err != nil {
-		return fmt.Errorf("clear playlist item index: %w", err)
-	}
-	if _, err := tx.Exec(ctx, insertItemIndex, ids, bodies); err != nil {
-		return fmt.Errorf("insert playlist item index: %w", err)
+	if _, err := tx.Exec(ctx, insertMissing, ids, slugs, bodies); err != nil {
+		return fmt.Errorf("insert referenced playlists: %w", err)
 	}
 	return nil
 }
@@ -682,7 +704,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return err
 	}
 
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -841,7 +863,7 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 
 	// Upsert playlists
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -976,7 +998,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return err
 	}
 
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1135,7 +1157,7 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 
 	// Upsert playlists
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 

@@ -250,13 +250,17 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	remoteID := uuid.MustParse("77777777-2222-4333-8444-555555555555")
 	itemID := uuid.MustParse("88888888-2222-4333-8444-555555555555")
 
-	signer := newIntegrationSigner(t)
+	// A remote playlist this feed does not hold is *created* by the ingest, so it must clear the same bar
+	// as POST: self-signed by a key it declares as a curator. Signing it with the feed's own key would not
+	// do — the feed is not this document's author.
+	rpriv, rkid := newCuratorKeypair(t)
 	remote := playlist.Playlist{
 		DPVersion: "1.1.0",
 		ID:        remoteID.String(),
 		Slug:      "remote-inline-manifest",
 		Title:     "Remote inline manifest",
 		Created:   "2020-01-02T03:04:05Z",
+		Curators:  curatorEntities(rkid),
 		Items: []playlist.PlaylistItem{{
 			ID:             itemID.String(),
 			Source:         "https://cdn.example.com/remote.html",
@@ -267,7 +271,12 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedRemote, err := signer.SignPlaylist(unsigned, time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC))
+	remoteSig, err := dp1sign.SignMultiEd25519(unsigned, rpriv, playlist.RoleCurator, remote.Created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.Signatures = []playlist.Signature{remoteSig}
+	signedRemote, err := json.Marshal(remote)
 	if err != nil {
 		t.Fatal(err)
 	}

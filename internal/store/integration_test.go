@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/display-protocol/dp1-go/extension/channels"
+	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
@@ -1260,7 +1261,11 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 	}
 }
 
-func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) {
+// Membership ingestion may link an existing playlist but must never modify one. Group and channel
+// creation is open, so if ingest upserted, anyone able to create a group could host a document carrying a
+// victim's playlist id and overwrite that playlist's body, slug, owner set and item index on this feed.
+// This is that attack: a second ingest reuses the stored id with different content and a different owner.
+func TestIntegration_PlaylistGroupIngestNeverModifiesExistingPlaylist(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
@@ -1268,7 +1273,10 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	originalItemID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
 	original := playlist.Playlist{
 		DPVersion: "1.1.0",
+		ID:        playlistID.String(),
+		Slug:      "remote-ingest",
 		Title:     "Remotely ingested",
+		Curators:  []identity.Entity{{Name: "Owner A", Key: "did:key:ownerA"}},
 		Items: []playlist.PlaylistItem{
 			{ID: originalItemID.String(), Source: "https://example.com/original.html"},
 		},
@@ -1290,6 +1298,7 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 		t.Fatalf("CreatePlaylistGroup: %v", err)
 	}
 
+	// A playlist new to this feed is created by the ingest, index and all.
 	items, err := st.GetPlaylistItems(ctx, playlistID.String())
 	if err != nil {
 		t.Fatalf("GetPlaylistItems after create ingest: %v", err)
@@ -1297,31 +1306,101 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	if len(items) != 1 || items[0].ItemID != originalItemID {
 		t.Fatalf("item index after create ingest: %+v", items)
 	}
+	before, err := st.GetPlaylist(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylist after create ingest: %v", err)
+	}
 
-	replacementItemID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
-	replacement := playlist.Playlist{
+	// The spoof: same id, different content, different owner, different slug.
+	spoofItemID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
+	spoof := playlist.Playlist{
 		DPVersion: "1.1.0",
-		Title:     "Remotely re-ingested",
+		ID:        playlistID.String(),
+		Slug:      "hijacked",
+		Title:     "Hijacked",
+		Curators:  []identity.Entity{{Name: "Attacker B", Key: "did:key:attackerB"}},
 		Items: []playlist.PlaylistItem{
-			{ID: replacementItemID.String(), Source: "https://example.com/replacement.html"},
+			{ID: spoofItemID.String(), Source: "https://attacker.example/spoof.html"},
 		},
 	}
 	if err := st.UpdatePlaylistGroup(ctx, group.Slug, &store.PlaylistGroupInput{
 		Raw:       rawDoc(t, group),
-		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Raw: rawDoc(t, replacement)}},
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "hijacked", Raw: rawDoc(t, spoof)}},
 	}, grpUpdatedAt(t, ctx, st, group.Slug)); err != nil {
 		t.Fatalf("UpdatePlaylistGroup: %v", err)
 	}
 
+	after, err := st.GetPlaylist(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylist after re-ingest: %v", err)
+	}
+	if string(after.Raw) != string(before.Raw) {
+		t.Fatalf("ingest overwrote the stored playlist body:\n before=%s\n after =%s", before.Raw, after.Raw)
+	}
+	if after.Slug != before.Slug {
+		t.Fatalf("ingest moved the stored playlist slug: got %q, want %q", after.Slug, before.Slug)
+	}
+	if len(after.Body.Curators) != 1 || after.Body.Curators[0].Key != "did:key:ownerA" {
+		t.Fatalf("ingest changed the owner set: %+v", after.Body.Curators)
+	}
+
+	// The victim's item index is untouched: the spoof's item was never indexed.
 	items, err = st.GetPlaylistItems(ctx, playlistID.String())
 	if err != nil {
 		t.Fatalf("GetPlaylistItems after re-ingest: %v", err)
 	}
-	if len(items) != 1 || items[0].ItemID != replacementItemID {
-		t.Fatalf("item index after re-ingest: %+v", items)
+	if len(items) != 1 || items[0].ItemID != originalItemID {
+		t.Fatalf("ingest rebuilt the item index: %+v", items)
 	}
-	if _, err := st.GetPlaylistItem(ctx, originalItemID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("stale item lookup: got %v, want ErrNotFound", err)
+	if _, err := st.GetPlaylistItem(ctx, spoofItemID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("spoof item was indexed: got %v, want ErrNotFound", err)
+	}
+
+	// The group still links the (unmodified) playlist.
+	linked, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, PlaylistGroupFilter: group.Slug})
+	if err != nil {
+		t.Fatalf("ListPlaylists in group: %v", err)
+	}
+	if len(linked) != 1 || linked[0].ID != playlistID {
+		t.Fatalf("group membership: %+v", linked)
+	}
+}
+
+// A referenced id this feed has deleted must not be re-created through ingestion — otherwise membership
+// would be a side door around the create-path tombstone guard.
+func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	playlistID := uuid.MustParse("10000000-0000-4000-8000-0000000000aa")
+	doc := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        playlistID.String(),
+		Slug:      "tombstoned-ingest",
+		Title:     "Doomed",
+	}
+	if err := st.CreatePlaylist(ctx, playlistID, doc.Slug, rawDoc(t, doc)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+		t.Fatalf("DeletePlaylist: %v", err)
+	}
+
+	groupID := uuid.MustParse("30000000-0000-4000-8000-0000000000aa")
+	group := playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "tombstoned-ingest-group",
+		Title:     "Group referencing a deleted playlist",
+		Playlists: []string{"https://origin.example/playlist.json"},
+	}
+	err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:        groupID,
+		Slug:      group.Slug,
+		Raw:       rawDoc(t, group),
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: doc.Slug, Raw: rawDoc(t, doc)}},
+	})
+	if !errors.Is(err, store.ErrDocumentDeleted) {
+		t.Fatalf("CreatePlaylistGroup with tombstoned member: got %v, want ErrDocumentDeleted", err)
 	}
 }
 

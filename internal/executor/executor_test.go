@@ -1489,6 +1489,52 @@ func TestCreatePlaylistGroup_externalURINoFetcher(t *testing.T) {
 	}
 }
 
+// staticFetcher serves one fixed body for any remote playlist URI.
+type staticFetcher struct{ body []byte }
+
+func (f staticFetcher) FetchPlaylist(_ context.Context, _ string) ([]byte, error) { return f.body, nil }
+
+// A remote playlist this feed does not hold is created by the ingest, so it must clear the same bar as
+// POST. An unsigned (or badly signed) remote document must fail the whole group mutation rather than be
+// published here under the referencing party's request.
+func TestCreatePlaylistGroup_remotePlaylistMustBeSelfSigned(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	remote := &playlist.Playlist{ID: "77777777-7777-4777-8777-777777777777", Slug: "remote"}
+	mockDP1.EXPECT().ValidatePlaylist(gomock.Any()).Return(remote, nil)
+	// Signatures verify cryptographically, but none matches a declared curator (there are none).
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil)
+
+	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, staticFetcher{body: []byte(`{"remote":true}`)}, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
+	if !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature verification error for unsigned remote playlist, got %v", err)
+	}
+}
+
+func TestCreatePlaylistGroup_remotePlaylistFailingCryptoIsRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil)
+	remote := &playlist.Playlist{
+		ID:         "77777777-7777-4777-8777-777777777777",
+		Slug:       "remote",
+		Curators:   []identity.Entity{{Key: testCuratorKid}},
+		Signatures: []playlist.Signature{testSig(testCuratorKid)},
+	}
+	mockDP1.EXPECT().ValidatePlaylist(gomock.Any()).Return(remote, nil)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: testCuratorKid}}, nil)
+
+	e := executor.New(mocks.NewMockStore(ctrl), mockDP1, false, staticFetcher{body: []byte(`{"remote":true}`)}, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq("https://elsewhere.test/p.json"))
+	if !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature verification error, got %v", err)
+	}
+}
+
 func TestCreatePlaylistGroup_localPlaylistNotFound(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -2380,11 +2426,16 @@ func TestCreateChannel_playlistResolutionPreservesPerFetchTimeoutAcrossBatches(t
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	// A referenced remote playlist this feed does not hold is created by the ingest, so it must be
+	// self-signed by a declared curator (same bar as POST) — see resolveOnePlaylistRef.
 	remotePlaylist := &playlist.Playlist{
-		ID:   "77777777-7777-4777-8777-777777777777",
-		Slug: "remote",
+		ID:         "77777777-7777-4777-8777-777777777777",
+		Slug:       "remote",
+		Curators:   []identity.Entity{{Key: testCuratorKid}},
+		Signatures: []playlist.Signature{testSig(testCuratorKid)},
 	}
 	mockDP1.EXPECT().ValidatePlaylistWithExtension(gomock.Any()).Return(remotePlaylist, nil).Times(9)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 	signed := []byte(`{"kind":"signed-channel"}`)
 	wantChannel := mustDecodeChannel(t, signed)
 	gomock.InOrder(
