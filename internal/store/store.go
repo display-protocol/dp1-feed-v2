@@ -30,6 +30,18 @@ var ErrNotFound = errors.New("not found")
 // Surfaces as HTTP 409; the client should re-read and retry.
 var ErrConcurrentModification = errors.New("document was modified concurrently")
 
+// ErrDocumentDeleted is returned when a create names an id this feed has already deleted.
+//
+// Create is intentionally open — a feed must be able to mirror a document it does not own — so the only
+// thing standing between an observer and resurrecting a deleted resource is that the old bytes still
+// carry a valid owner signature. Retiring the id closes that: `id` is inside the signed payload, so it
+// cannot be forged on a replayed document. The check runs in the same transaction as the insert, so it
+// cannot be raced by a concurrent delete.
+//
+// Consequence: an id deleted on this feed can never be re-created here; a genuine re-publish needs a new
+// id. Surfaces as HTTP 409.
+var ErrDocumentDeleted = errors.New("document id was deleted and cannot be reused")
+
 // Documents are written and read as raw JSON, never re-marshaled through the typed dp1-go structs.
 //
 // Why: DP-1 §7.1 signs the JCS form of the *entire* document, so every signer's payload_hash is bound

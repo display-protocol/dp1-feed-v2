@@ -53,8 +53,8 @@ func testSig(kid string) playlist.Signature {
 // created defaults to now so the freshness window passes; callers override it for staleness tests.
 func deleteReq(targetType, id, slug, kid string) *models.SignedDeleteRequest {
 	r := &models.SignedDeleteRequest{
-		Action:     models.DeleteAction,
-		Target:     models.DeleteTarget{Type: targetType, ID: id, Slug: slug},
+		Action:     models.IntentActionDelete,
+		Target:     models.IntentTarget{Type: targetType, ID: id, Slug: slug},
 		Created:    time.Now().UTC().Format(time.RFC3339),
 		Signatures: []playlist.Signature{testSig(kid)},
 	}
@@ -64,6 +64,35 @@ func deleteReq(targetType, id, slug, kid string) *models.SignedDeleteRequest {
 	}
 	r.Raw = raw
 	return r
+}
+
+// testPayloadHash is what the mocked PayloadHash returns, so a replace intent can name the document it
+// authorizes without the test computing a real digest.
+const testPayloadHash = "sha256:deadbeef"
+
+// replaceIntent builds a valid signed replace-intent for a stored resource. Unit tests mock the crypto,
+// so the intent only has to be well-formed, fresh, and signed by kid.
+func replaceIntent(targetType, id, slug, kid string) *models.SignedIntent {
+	r := &models.SignedIntent{
+		Action:      models.IntentActionReplace,
+		Target:      models.IntentTarget{Type: targetType, ID: id, Slug: slug},
+		PayloadHash: testPayloadHash,
+		Created:     time.Now().UTC().Format(time.RFC3339),
+		Signatures:  []playlist.Signature{testSig(kid)},
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		panic(err)
+	}
+	r.Raw = raw
+	return r
+}
+
+// expectIntentOK arms the mocked crypto a valid replace-intent needs: the document digest it names and
+// verification of the intent's own signatures.
+func expectIntentOK(m *mocks.MockValidatorSigner) {
+	m.EXPECT().PayloadHash(gomock.Any()).Return(testPayloadHash, nil).AnyTimes()
+	m.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 }
 
 // testItemID is a fixed UUID so signed submissions carry a deterministic item id (the feed no longer
@@ -762,7 +791,7 @@ func TestReplacePlaylist_itemMissingID(t *testing.T) {
 	req := validCreateReq()
 	req.Items = []playlist.PlaylistItem{{Source: "https://example.com/x"}}
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req); !executor.IsInvalidSubmissionError(err) {
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, nil); !executor.IsInvalidSubmissionError(err) {
 		t.Fatalf("want invalid-submission (item id), got %v", err)
 	}
 }
@@ -780,7 +809,7 @@ func TestDeletePlaylist(t *testing.T) {
 	mockStore.EXPECT().DeletePlaylist(gomock.Any(), id.String(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); err != nil {
 		t.Fatal(err)
 	}
@@ -798,7 +827,7 @@ func TestDeletePlaylist_notOwner(t *testing.T) {
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", "did:key:someoneElse")
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", "did:key:someoneElse")
 	err := e.DeletePlaylist(context.Background(), "id-1", req)
 	if !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (not owner), got %v", err)
@@ -816,9 +845,9 @@ func TestDeletePlaylist_targetMismatch(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(&store.PlaylistRecord{ID: id, Slug: "id-1", Body: body}, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "wrong-slug", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "wrong-slug", testCuratorKid)
 	err := e.DeletePlaylist(context.Background(), "id-1", req)
-	if !executor.IsDeleteRequestError(err) {
+	if !executor.IsIntentError(err) {
 		t.Fatalf("want delete-request error (target mismatch), got %v", err)
 	}
 }
@@ -833,8 +862,8 @@ func TestDeletePlaylist_staleTimestamp(t *testing.T) {
 	body := playlist.Playlist{ID: id.String(), Slug: "id-1", Curators: []identity.Entity{{Key: testCuratorKid}}}
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(&store.PlaylistRecord{ID: id, Slug: "id-1", Body: body}, nil)
 
-	e := executor.New(mockStore, mockDP1, false, nil, "", executor.WithDeleteClockSkew(time.Minute))
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	e := executor.New(mockStore, mockDP1, false, nil, "", executor.WithIntentClockSkew(time.Minute))
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	req.Created = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 	err := e.DeletePlaylist(context.Background(), "id-1", req)
 	if !executor.IsInvalidTimestampError(err) {
@@ -857,9 +886,9 @@ func TestDeletePlaylist_wrongAction(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	req.Action = "nuke"
-	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsDeleteRequestError(err) {
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsIntentError(err) {
 		t.Fatalf("want delete-request error (bad action), got %v", err)
 	}
 }
@@ -873,8 +902,8 @@ func TestDeletePlaylist_wrongTargetType(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetChannel, id.String(), "id-1", testCuratorKid)
-	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsDeleteRequestError(err) {
+	req := deleteReq(models.IntentTargetChannel, id.String(), "id-1", testCuratorKid)
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsIntentError(err) {
 		t.Fatalf("want delete-request error (wrong target type), got %v", err)
 	}
 }
@@ -888,7 +917,7 @@ func TestDeletePlaylist_missingSignatures(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	req.Signatures = nil
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsSignaturesRequiredError(err) {
 		t.Fatalf("want signatures-required error, got %v", err)
@@ -904,7 +933,7 @@ func TestDeletePlaylist_malformedCreated(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	req.Created = "nope"
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsInvalidTimestampError(err) {
 		t.Fatalf("want invalid-timestamp error (malformed created), got %v", err)
@@ -919,8 +948,8 @@ func TestDeletePlaylist_futureTimestamp(t *testing.T) {
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
 
-	e := executor.New(mockStore, mockDP1, false, nil, "", executor.WithDeleteClockSkew(time.Minute))
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	e := executor.New(mockStore, mockDP1, false, nil, "", executor.WithIntentClockSkew(time.Minute))
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	req.Created = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsInvalidTimestampError(err) {
 		t.Fatalf("want invalid-timestamp error (future), got %v", err)
@@ -937,7 +966,7 @@ func TestDeletePlaylist_verifyError(t *testing.T) {
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (verify err), got %v", err)
 	}
@@ -953,7 +982,7 @@ func TestDeletePlaylist_verifyFalse(t *testing.T) {
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (ok=false), got %v", err)
 	}
@@ -970,12 +999,12 @@ func TestDeletePlaylist_missingRaw(t *testing.T) {
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	// No Raw set: verifyDeleteIntent rejects a delete-intent whose signed bytes were not captured.
 	req := &models.SignedDeleteRequest{
-		Action:     models.DeleteAction,
-		Target:     models.DeleteTarget{Type: models.DeleteTargetPlaylist, ID: id.String(), Slug: "id-1"},
+		Action:     models.IntentActionDelete,
+		Target:     models.IntentTarget{Type: models.IntentTargetPlaylist, ID: id.String(), Slug: "id-1"},
 		Created:    time.Now().UTC().Format(time.RFC3339),
 		Signatures: []playlist.Signature{testSig(testCuratorKid)},
 	}
-	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsDeleteRequestError(err) {
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsIntentError(err) {
 		t.Fatalf("want delete-request error (missing raw), got %v", err)
 	}
 }
@@ -991,7 +1020,7 @@ func TestReplacePlaylist_verifyCryptoFails(t *testing.T) {
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); !executor.IsSignatureVerificationError(err) {
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq(), nil); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (ok=false), got %v", err)
 	}
 }
@@ -1007,7 +1036,7 @@ func TestReplacePlaylist_verifyCryptoError(t *testing.T) {
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); !executor.IsSignatureVerificationError(err) {
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq(), nil); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (verify err), got %v", err)
 	}
 }
@@ -1017,6 +1046,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
@@ -1047,7 +1077,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 		{ID: testItemID, Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
 	}
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
+	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req, replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1068,6 +1098,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}]}`)
@@ -1097,7 +1128,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 	req.Curators = []identity.Entity{{Key: kid}}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
+	out, err := e.ReplacePlaylist(context.Background(), "keep-me", req, replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1131,7 +1162,7 @@ func TestReplacePlaylist_ownerImmutable(t *testing.T) {
 	req.Signatures = []playlist.Signature{testSig("did:key:z6MkNewOwnerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	_, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
+	_, err := e.ReplacePlaylist(context.Background(), "keep-me", req, nil)
 	if !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (owner immutable), got %v", err)
 	}
@@ -1155,7 +1186,7 @@ func TestReplacePlaylist_notOwner(t *testing.T) {
 	req.Signatures = []playlist.Signature{testSig("did:key:z6MkNotAnOwnerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	_, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
+	_, err := e.ReplacePlaylist(context.Background(), "keep-me", req, nil)
 	if !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (not owner), got %v", err)
 	}
@@ -1178,7 +1209,7 @@ func TestReplacePlaylistGroup_ownerImmutable(t *testing.T) {
 	req.Signatures = []playlist.Signature{testSig(req.Curator)}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	_, err := e.ReplacePlaylistGroup(context.Background(), "group-title", req)
+	_, err := e.ReplacePlaylistGroup(context.Background(), "group-title", req, nil)
 	if !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (group owner immutable), got %v", err)
 	}
@@ -1201,7 +1232,7 @@ func TestReplaceChannel_ownerImmutable(t *testing.T) {
 	req.Signatures = []playlist.Signature{testSig(req.Publisher.Key)}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	_, err := e.ReplaceChannel(context.Background(), "chan", req)
+	_, err := e.ReplaceChannel(context.Background(), "chan", req, nil)
 	if !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (channel owner immutable), got %v", err)
 	}
@@ -1212,6 +1243,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
@@ -1237,7 +1269,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplacePlaylist(context.Background(), "daily", req)
+	out, err := e.ReplacePlaylist(context.Background(), "daily", req, replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1253,7 +1285,7 @@ func TestReplacePlaylist_notFound(t *testing.T) {
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "x").Return(nil, store.ErrNotFound)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	_, err := e.ReplacePlaylist(context.Background(), "x", validCreateReq())
+	_, err := e.ReplacePlaylist(context.Background(), "x", validCreateReq(), nil)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1289,7 +1321,7 @@ func TestPlaylist_replace_parseDocumentCreatedFails(t *testing.T) {
 			}, nil)
 
 			e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-			_, err := e.ReplacePlaylist(context.Background(), "pl", validCreateReq())
+			_, err := e.ReplacePlaylist(context.Background(), "pl", validCreateReq(), nil)
 			if err == nil || !strings.Contains(err.Error(), "parse document created") {
 				t.Fatalf("expected parse document created error, got %v", err)
 			}
@@ -1678,7 +1710,7 @@ func TestDeletePlaylistGroup(t *testing.T) {
 	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), id.String(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
 	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); err != nil {
 		t.Fatal(err)
 	}
@@ -1689,6 +1721,7 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 
 	gid := uuid.MustParse("33333333-3333-3333-3333-333333333333")
@@ -1731,7 +1764,7 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 	req := validGroupCreateReq(localPlaylistRef("pl"))
 	req.Title = "New group title"
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplacePlaylistGroup(context.Background(), "keep-g", req)
+	out, err := e.ReplacePlaylistGroup(context.Background(), "keep-g", req, replaceIntent(models.IntentTargetPlaylistGroup, gid.String(), "group-title", testCuratorKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1745,6 +1778,7 @@ func TestReplacePlaylistGroup_withSignatures_success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 
 	gid := uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	created := time.Date(2019, 6, 1, 12, 0, 0, 0, time.UTC)
@@ -1781,7 +1815,7 @@ func TestReplacePlaylistGroup_withSignatures_success(t *testing.T) {
 	req.Signatures = []playlist.Signature{{Kid: curatorKid, Alg: "ed25519", Sig: "sig"}}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplacePlaylistGroup(context.Background(), "keep-g", req)
+	out, err := e.ReplacePlaylistGroup(context.Background(), "keep-g", req, replaceIntent(models.IntentTargetPlaylistGroup, gid.String(), "group-title", curatorKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1797,7 +1831,7 @@ func TestReplacePlaylistGroup_notFound(t *testing.T) {
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "x").Return(nil, store.ErrNotFound)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, testPublicBase)
-	_, err := e.ReplacePlaylistGroup(context.Background(), "x", validGroupCreateReq(localPlaylistRef("y")))
+	_, err := e.ReplacePlaylistGroup(context.Background(), "x", validGroupCreateReq(localPlaylistRef("y")), nil)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1843,7 +1877,7 @@ func TestReplacePlaylistGroup_notOwner(t *testing.T) {
 	req := validGroupCreateReq(ref) // curator == stored (immutability passes)
 	req.Signatures = []playlist.Signature{testSig("did:key:notGroupOwner")}
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req); !executor.IsForbiddenError(err) {
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req, nil); !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (not owner), got %v", err)
 	}
 }
@@ -1859,7 +1893,7 @@ func TestReplacePlaylistGroup_verifyCryptoFails(t *testing.T) {
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
-	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); !executor.IsSignatureVerificationError(err) {
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref), nil); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (ok=false), got %v", err)
 	}
 }
@@ -1875,7 +1909,7 @@ func TestReplacePlaylistGroup_verifyCryptoError(t *testing.T) {
 	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
-	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); !executor.IsSignatureVerificationError(err) {
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref), nil); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (verify err), got %v", err)
 	}
 }
@@ -1892,7 +1926,7 @@ func TestDeletePlaylistGroup_notOwner(t *testing.T) {
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", "did:key:notGroupOwner")
+	req := deleteReq(models.IntentTargetPlaylistGroup, id.String(), "gid", "did:key:notGroupOwner")
 	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (not owner), got %v", err)
 	}
@@ -1907,8 +1941,8 @@ func TestDeletePlaylistGroup_targetMismatch(t *testing.T) {
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "gid"), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "wrong-slug", testCuratorKid)
-	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); !executor.IsDeleteRequestError(err) {
+	req := deleteReq(models.IntentTargetPlaylistGroup, id.String(), "wrong-slug", testCuratorKid)
+	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); !executor.IsIntentError(err) {
 		t.Fatalf("want delete-request error (target mismatch), got %v", err)
 	}
 }
@@ -1943,7 +1977,7 @@ func TestReplaceChannel_notOwner(t *testing.T) {
 	req := validChannelCreateReq("cid", ref) // publisher == stored (immutability passes)
 	req.Signatures = []playlist.Signature{testSig("did:key:notPublisher")}
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	if _, err := e.ReplaceChannel(context.Background(), "cid", req); !executor.IsForbiddenError(err) {
+	if _, err := e.ReplaceChannel(context.Background(), "cid", req, nil); !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (not owner), got %v", err)
 	}
 }
@@ -1959,7 +1993,7 @@ func TestReplaceChannel_verifyCryptoFails(t *testing.T) {
 	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref)); !executor.IsSignatureVerificationError(err) {
+	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref), nil); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (ok=false), got %v", err)
 	}
 }
@@ -1975,7 +2009,7 @@ func TestReplaceChannel_verifyCryptoError(t *testing.T) {
 	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref)); !executor.IsSignatureVerificationError(err) {
+	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref), nil); !executor.IsSignatureVerificationError(err) {
 		t.Fatalf("want signature-verification error (verify err), got %v", err)
 	}
 }
@@ -1992,7 +2026,7 @@ func TestDeleteChannel_notOwner(t *testing.T) {
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	req := deleteReq(models.DeleteTargetChannel, id.String(), "cid", "did:key:notPublisher")
+	req := deleteReq(models.IntentTargetChannel, id.String(), "cid", "did:key:notPublisher")
 	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (not owner), got %v", err)
 	}
@@ -2007,8 +2041,8 @@ func TestDeleteChannel_targetMismatch(t *testing.T) {
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	req := deleteReq(models.DeleteTargetChannel, id.String(), "wrong-slug", testPublisherKid)
-	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsDeleteRequestError(err) {
+	req := deleteReq(models.IntentTargetChannel, id.String(), "wrong-slug", testPublisherKid)
+	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsIntentError(err) {
 		t.Fatalf("want delete-request error (target mismatch), got %v", err)
 	}
 }
@@ -2091,7 +2125,7 @@ func TestReplaceChannel_extensionsDisabled(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	out, err := e.ReplaceChannel(context.Background(), "c", validChannelCreateReq("c", localPlaylistRef("p")))
+	out, err := e.ReplaceChannel(context.Background(), "c", validChannelCreateReq("c", localPlaylistRef("p")), nil)
 	if !executor.IsExtensionsDisabled(err) {
 		t.Fatalf("got %v", err)
 	}
@@ -2104,7 +2138,7 @@ func TestDeleteChannel_extensionsDisabled(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	err := e.DeleteChannel(context.Background(), "c", deleteReq(models.DeleteTargetChannel, "id", "c", testPublisherKid))
+	err := e.DeleteChannel(context.Background(), "c", deleteReq(models.IntentTargetChannel, "id", "c", testPublisherKid))
 	if !executor.IsExtensionsDisabled(err) {
 		t.Fatalf("got %v", err)
 	}
@@ -2413,7 +2447,7 @@ func TestDeleteChannel(t *testing.T) {
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
-	req := deleteReq(models.DeleteTargetChannel, cid.String(), "cid", testPublisherKid)
+	req := deleteReq(models.IntentTargetChannel, cid.String(), "cid", testPublisherKid)
 	if err := e.DeleteChannel(notifiedMutationContext(t), "cid", req); err != nil {
 		t.Fatal(err)
 	}
@@ -2444,7 +2478,7 @@ func TestDeleteChannel_notificationSurvivesRequestCancellationAfterCommit(t *tes
 
 	notifications := &contextRecordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
-	req := deleteReq(models.DeleteTargetChannel, cid.String(), "cid", testPublisherKid)
+	req := deleteReq(models.IntentTargetChannel, cid.String(), "cid", testPublisherKid)
 	if err := e.DeleteChannel(ctx, "cid", req); err != nil {
 		t.Fatal(err)
 	}
@@ -2474,7 +2508,7 @@ func TestDeleteChannel_doesNotBeginMutationAfterRequestCancellation(t *testing.T
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
-	req := deleteReq(models.DeleteTargetChannel, cid.String(), "cid", testPublisherKid)
+	req := deleteReq(models.IntentTargetChannel, cid.String(), "cid", testPublisherKid)
 	err := e.DeleteChannel(ctx, "cid", req)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("DeleteChannel error = %v, want context.Canceled", err)
@@ -2508,7 +2542,7 @@ func TestDeleteChannel_detachedMutationContextIsBounded(t *testing.T) {
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	req := deleteReq(models.DeleteTargetChannel, cid.String(), "cid", testPublisherKid)
+	req := deleteReq(models.IntentTargetChannel, cid.String(), "cid", testPublisherKid)
 	err := e.DeleteChannel(ctx, "cid", req)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("DeleteChannel error = %v, want context.DeadlineExceeded", err)
@@ -2523,6 +2557,7 @@ func TestReplaceChannel_success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 
 	cid := uuid.MustParse("44444444-4444-4444-4444-444444444444")
@@ -2565,7 +2600,7 @@ func TestReplaceChannel_success(t *testing.T) {
 	req := validChannelCreateReq("ch-slug", localPlaylistRef("pl2"))
 	req.Title = "New title"
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplaceChannel(notifiedMutationContext(t), "ch-slug", req)
+	out, err := e.ReplaceChannel(notifiedMutationContext(t), "ch-slug", req, replaceIntent(models.IntentTargetChannel, cid.String(), "ch-slug", testPublisherKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2582,6 +2617,7 @@ func TestReplaceChannel_withSignatures_success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 
 	cid := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	created := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -2617,7 +2653,7 @@ func TestReplaceChannel_withSignatures_success(t *testing.T) {
 	req.Signatures = []playlist.Signature{{Kid: pubKid, Alg: "ed25519", Sig: "sig"}}
 
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	out, err := e.ReplaceChannel(context.Background(), "ch-slug", req)
+	out, err := e.ReplaceChannel(context.Background(), "ch-slug", req, replaceIntent(models.IntentTargetChannel, cid.String(), "ch-slug", pubKid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2633,7 +2669,7 @@ func TestReplaceChannel_notFound(t *testing.T) {
 	mockStore.EXPECT().GetChannel(gomock.Any(), "missing").Return(nil, store.ErrNotFound)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, testPublicBase)
-	_, err := e.ReplaceChannel(context.Background(), "missing", validChannelCreateReq("x", localPlaylistRef("p")))
+	_, err := e.ReplaceChannel(context.Background(), "missing", validChannelCreateReq("x", localPlaylistRef("p")), nil)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -2672,7 +2708,7 @@ func TestReplacePlaylist_missingSignatures(t *testing.T) {
 	req := validCreateReq()
 	req.Signatures = nil
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req); !executor.IsSignaturesRequiredError(err) {
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, nil); !executor.IsSignaturesRequiredError(err) {
 		t.Fatalf("want signatures-required, got %v", err)
 	}
 }
@@ -2688,7 +2724,7 @@ func TestDeletePlaylist_storeError(t *testing.T) {
 	mockStore.EXPECT().DeletePlaylist(gomock.Any(), id.String(), gomock.Any()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("got %v", err)
 	}
@@ -2742,7 +2778,7 @@ func TestReplacePlaylistGroup_missingSignatures(t *testing.T) {
 	req := validGroupCreateReq(localPlaylistRef("pl"))
 	req.Signatures = nil
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req); !executor.IsSignaturesRequiredError(err) {
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req, nil); !executor.IsSignaturesRequiredError(err) {
 		t.Fatalf("want signatures-required, got %v", err)
 	}
 }
@@ -2758,7 +2794,7 @@ func TestDeletePlaylistGroup_storeError(t *testing.T) {
 	mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), id.String(), gomock.Any()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylistGroup, id.String(), "gid", testCuratorKid)
 	if err := e.DeletePlaylistGroup(context.Background(), "gid", req); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("got %v", err)
 	}
@@ -2812,7 +2848,7 @@ func TestReplaceChannel_missingSignatures(t *testing.T) {
 	req := validChannelCreateReq("cid", localPlaylistRef("pl"))
 	req.Signatures = nil
 	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	if _, err := e.ReplaceChannel(context.Background(), "cid", req); !executor.IsSignaturesRequiredError(err) {
+	if _, err := e.ReplaceChannel(context.Background(), "cid", req, nil); !executor.IsSignaturesRequiredError(err) {
 		t.Fatalf("want signatures-required, got %v", err)
 	}
 }
@@ -2830,7 +2866,7 @@ func TestDeleteChannel_noPublisher(t *testing.T) {
 	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	req := deleteReq(models.DeleteTargetChannel, id.String(), "cid", testPublisherKid)
+	req := deleteReq(models.IntentTargetChannel, id.String(), "cid", testPublisherKid)
 	if err := e.DeleteChannel(context.Background(), "cid", req); !executor.IsForbiddenError(err) {
 		t.Fatalf("want forbidden (no owner), got %v", err)
 	}
@@ -2843,6 +2879,7 @@ func TestReplacePlaylist_storeError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(storedPlaylistRecord(t, id, "test-playlist"), nil)
 	signed := []byte(`{"replaced":true}`)
@@ -2855,7 +2892,7 @@ func TestReplacePlaylist_storeError(t *testing.T) {
 	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), gomock.Any(), gomock.Any()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); err == nil || !strings.Contains(err.Error(), "db down") {
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq(), replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid)); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -2865,6 +2902,7 @@ func TestReplacePlaylistGroup_storeError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "group-title"), nil)
 	ref := memberPlaylistExpect(t, mockStore)
@@ -2878,7 +2916,7 @@ func TestReplacePlaylistGroup_storeError(t *testing.T) {
 	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), id.String(), gomock.Any(), gomock.Any()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
-	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref)); err == nil || !strings.Contains(err.Error(), "db down") {
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", validGroupCreateReq(ref), replaceIntent(models.IntentTargetPlaylistGroup, id.String(), "group-title", testCuratorKid)); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -2888,6 +2926,7 @@ func TestReplaceChannel_storeError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
 	ref := memberPlaylistExpect(t, mockStore)
@@ -2901,7 +2940,7 @@ func TestReplaceChannel_storeError(t *testing.T) {
 	mockStore.EXPECT().UpdateChannel(gomock.Any(), id.String(), gomock.Any(), gomock.Any()).Return(errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
-	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref)); err == nil || !strings.Contains(err.Error(), "db down") {
+	if _, err := e.ReplaceChannel(context.Background(), "cid", validChannelCreateReq("cid", ref), replaceIntent(models.IntentTargetChannel, id.String(), "cid", testPublisherKid)); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -3183,6 +3222,7 @@ func TestReplacePlaylist_forwardsAuthorizedGeneration(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	authorizedAt := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
@@ -3202,7 +3242,7 @@ func TestReplacePlaylist_forwardsAuthorizedGeneration(t *testing.T) {
 	req := validCreateReq()
 	req.Title = "New title"
 	req.Raw = mustJSONRaw(req)
-	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req); err != nil {
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -3212,6 +3252,7 @@ func TestReplacePlaylist_concurrentModification(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	expectIntentOK(mockDP1)
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(storedPlaylistRecord(t, id, "test-playlist"), nil)
@@ -3227,7 +3268,7 @@ func TestReplacePlaylist_concurrentModification(t *testing.T) {
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := validCreateReq()
 	req.Raw = mustJSONRaw(req)
-	_, err := e.ReplacePlaylist(context.Background(), "keep-me", req)
+	_, err := e.ReplacePlaylist(context.Background(), "keep-me", req, replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid))
 	if !errors.Is(err, store.ErrConcurrentModification) {
 		t.Fatalf("want ErrConcurrentModification, got %v", err)
 	}
@@ -3248,7 +3289,7 @@ func TestDeletePlaylist_forwardsAuthorizedGeneration(t *testing.T) {
 	mockStore.EXPECT().DeletePlaylist(gomock.Any(), id.String(), authorizedAt).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	if err := e.DeletePlaylist(context.Background(), "id-1", req); err != nil {
 		t.Fatal(err)
 	}
@@ -3267,9 +3308,118 @@ func TestDeletePlaylist_concurrentModification(t *testing.T) {
 		Return(store.ErrConcurrentModification)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
-	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req := deleteReq(models.IntentTargetPlaylist, id.String(), "id-1", testCuratorKid)
 	err := e.DeletePlaylist(context.Background(), "id-1", req)
 	if !errors.Is(err, store.ErrConcurrentModification) {
 		t.Fatalf("want ErrConcurrentModification, got %v", err)
+	}
+}
+
+// --- PUT signed mutation-intent (replay protection) -------------------------------------------------
+//
+// The document's own signatures prove the owner authored the content; the intent proves the owner is
+// asking for it to replace THIS resource NOW. Each of these cases is a way that second proof can be
+// missing or wrong, and every one of them is a replay the document signatures alone would have allowed.
+
+// replaceIntentFixture wires a replace that passes every document-level check, so the only thing left to
+// vary is the intent.
+func replaceIntentFixture(t *testing.T, ctrl *gomock.Controller) (*mocks.MockStore, *mocks.MockValidatorSigner, uuid.UUID, *models.PlaylistReplaceRequest) {
+	t.Helper()
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(storedPlaylistRecord(t, id, "test-playlist"), nil)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	return mockStore, mockDP1, id, validCreateReq()
+}
+
+func TestReplacePlaylist_intentStaleCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore, mockDP1, id, req := replaceIntentFixture(t, ctrl)
+	mockDP1.EXPECT().PayloadHash(gomock.Any()).Return(testPayloadHash, nil).AnyTimes()
+
+	intent := replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid)
+	intent.Created = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	intent.Raw = mustJSONRaw(intent)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "", executor.WithIntentClockSkew(time.Minute))
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, intent); !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid-timestamp (stale intent), got %v", err)
+	}
+}
+
+func TestReplacePlaylist_intentNotOwner(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore, mockDP1, id, req := replaceIntentFixture(t, ctrl)
+	mockDP1.EXPECT().PayloadHash(gomock.Any()).Return(testPayloadHash, nil).AnyTimes()
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+
+	// The intent verifies cryptographically but is signed by a key the stored playlist does not own.
+	intent := replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", "did:key:z6MkNotAnOwnerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, intent); !executor.IsForbiddenError(err) {
+		t.Fatalf("want forbidden (intent not signed by an owner), got %v", err)
+	}
+}
+
+func TestReplacePlaylist_intentPayloadHashMismatch(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore, mockDP1, id, req := replaceIntentFixture(t, ctrl)
+	// The document hashes to testPayloadHash, but the intent names a different document.
+	mockDP1.EXPECT().PayloadHash(gomock.Any()).Return(testPayloadHash, nil).AnyTimes()
+
+	intent := replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid)
+	intent.PayloadHash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	intent.Raw = mustJSONRaw(intent)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, intent); !executor.IsIntentError(err) {
+		t.Fatalf("want intent error (payloadHash does not bind this document), got %v", err)
+	}
+}
+
+func TestReplacePlaylist_intentWrongAction(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore, mockDP1, id, req := replaceIntentFixture(t, ctrl)
+
+	// A delete-intent must not authorize a replace, even signed by the owner.
+	intent := replaceIntent(models.IntentTargetPlaylist, id.String(), "test-playlist", testCuratorKid)
+	intent.Action = models.IntentActionDelete
+	intent.Raw = mustJSONRaw(intent)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, intent); !executor.IsIntentError(err) {
+		t.Fatalf("want intent error (wrong action), got %v", err)
+	}
+}
+
+func TestReplacePlaylist_intentWrongTarget(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore, mockDP1, id, req := replaceIntentFixture(t, ctrl)
+
+	// An intent signed for a different resource must not authorize this one.
+	intent := replaceIntent(models.IntentTargetPlaylist, "22222222-2222-2222-2222-222222222222", "test-playlist", testCuratorKid)
+	_ = id
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, intent); !executor.IsIntentError(err) {
+		t.Fatalf("want intent error (target id does not match), got %v", err)
+	}
+}
+
+func TestReplacePlaylist_intentMissing(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore, mockDP1, _, req := replaceIntentFixture(t, ctrl)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, nil); !executor.IsIntentError(err) {
+		t.Fatalf("want intent error (no authorization), got %v", err)
 	}
 }

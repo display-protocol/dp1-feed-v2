@@ -208,7 +208,8 @@ func TestIntegration_SignedPlaylist_PutIdentityValidated(t *testing.T) {
 
 	// Different id in the signed document → identity mismatch, refused.
 	other := uuid.MustParse("abababab-2222-4333-8444-555555555555")
-	raw := doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, json.RawMessage(signWith(t, priv, body(other.String(), "v2"), playlist.RoleCurator)), http.StatusBadRequest)
+	raw := doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, priv, "playlist", id.String(), slug, json.RawMessage(signWith(t, priv, body(other.String(), "v2"), playlist.RoleCurator))), http.StatusBadRequest)
 	var resp ErrorResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		t.Fatal(err)
@@ -218,7 +219,8 @@ func TestIntegration_SignedPlaylist_PutIdentityValidated(t *testing.T) {
 	}
 
 	// Same identity replaces the document; signatures verify over the response and the later GET.
-	replaced := mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, json.RawMessage(signWith(t, priv, body(id.String(), "v2"), playlist.RoleCurator)), http.StatusOK)
+	replaced := mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, priv, "playlist", id.String(), slug, json.RawMessage(signWith(t, priv, body(id.String(), "v2"), playlist.RoleCurator))), http.StatusOK)
 	mustVerifyAll(t, "signed PUT response", replaced)
 	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
 	mustVerifyAll(t, "GET after signed PUT", gotRaw)
@@ -229,4 +231,42 @@ func TestIntegration_SignedPlaylist_PutIdentityValidated(t *testing.T) {
 	if got.Title != "v2" {
 		t.Fatalf("title after signed PUT: %q", got.Title)
 	}
+}
+
+// TestIntegration_DeletedIDCannotBeResurrected walks the actual replay: publish a document, delete it
+// with an owner-signed intent, then re-POST the very same bytes an observer could have captured from the
+// public GET. Create is open by design, so the only thing that refuses the replay is the tombstone.
+func TestIntegration_DeletedIDCannotBeResurrected(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	id := uuid.MustParse("dddddddd-9999-4333-8444-555555555555")
+	const slug = "resurrect-me"
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `","created":"2026-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + kid + `"}],` +
+		`"items":[{"id":"dddddddd-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}],` +
+		`"title":"v1"}`)
+	// Exactly the bytes a client sends — and, once published, exactly what any observer can read back.
+	replayable := json.RawMessage(signWith(t, priv, unsigned, playlist.RoleCurator))
+
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", replayable, http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/playlists/"+slug,
+		signedDeleteBody(t, priv, "playlist", id.String(), slug), http.StatusNoContent)
+
+	raw := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", replayable, http.StatusConflict)
+	var resp ErrorResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "conflict" {
+		t.Fatalf("replayed create after delete: want conflict, got %+v", resp)
+	}
+	mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusNotFound)
 }

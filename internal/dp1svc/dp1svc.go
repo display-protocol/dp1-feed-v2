@@ -56,6 +56,11 @@ type ValidatorSigner interface {
 	// hand-built object. Returns ok=true when every entry verifies; on failure ok=false and failed lists
 	// the entries that did not verify.
 	VerifySignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
+
+	// PayloadHash returns the DP-1 §7.1 signing digest of raw ("sha256:<hex>" over the JCS form with
+	// signature/signatures stripped) — the same value a signature carries in payload_hash. A signed
+	// mutation intent uses it to name the exact document it authorizes.
+	PayloadHash(raw []byte) (string, error)
 }
 
 // Service holds the operator Ed25519 key and did:key kid used in v1.1+ multi-signature entries.
@@ -239,4 +244,9 @@ func (s *Service) VerifyChannelSignatures(raw []byte) (bool, []playlist.Signatur
 // schema-agnostic verifier the document-specific helpers are themselves built on.
 func (s *Service) VerifySignatures(raw []byte) (bool, []playlist.Signature, error) {
 	return sign.VerifyMultiSignaturesJSON(raw)
+}
+
+// PayloadHash implements ValidatorSigner; delegates to dp1-go sign.PayloadHashString.
+func (s *Service) PayloadHash(raw []byte) (string, error) {
+	return sign.PayloadHashString(raw)
 }

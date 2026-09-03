@@ -80,7 +80,7 @@ func main() {
 	}
 	f := fetcher.NewHTTPFetcher(cfg.Playlist.FetchTimeout, cfg.Playlist.FetchMaxBodyBytes)
 
-	execOptions := []executor.Option{executor.WithDeleteClockSkew(cfg.Auth.DeleteMaxClockSkew)}
+	execOptions := []executor.Option{executor.WithIntentClockSkew(cfg.Auth.IntentMaxClockSkew)}
 	if len(cfg.Notifications.Clients) > 0 {
 		privateKey, err := notification.ParseP256PrivateKeyHex(cfg.Notifications.PrivateKeyHex)
 		if err != nil {

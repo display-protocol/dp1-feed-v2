@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -31,8 +32,8 @@ import (
 // is mocked in these tests, so the signature need not verify — only the JSON must decode.
 func deleteIntentBody(targetType, id, slug string) *bytes.Reader {
 	b, _ := json.Marshal(models.SignedDeleteRequest{
-		Action:     models.DeleteAction,
-		Target:     models.DeleteTarget{Type: targetType, ID: id, Slug: slug},
+		Action:     models.IntentActionDelete,
+		Target:     models.IntentTarget{Type: targetType, ID: id, Slug: slug},
 		Created:    "2026-01-01T00:00:00Z",
 		Signatures: []playlist.Signature{{Kid: "did:key:test", Alg: "ed25519", Sig: "s"}},
 	})
@@ -747,6 +748,31 @@ func TestGetPlaylistItem(t *testing.T) {
 	}
 }
 
+// putEnvelope builds a PUT body: the document plus the signed intent that authorizes replacing this
+// resource with it. These handler tests mock the executor, so the intent only has to parse — the
+// executor is what verifies it.
+func putEnvelope(doc any, targetType, id, slug string) []byte {
+	d, err := json.Marshal(doc)
+	if err != nil {
+		panic(err)
+	}
+	a, err := json.Marshal(models.SignedIntent{
+		Action:      models.IntentActionReplace,
+		Target:      models.IntentTarget{Type: targetType, ID: id, Slug: slug},
+		PayloadHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		Created:     time.Now().UTC().Format(time.RFC3339),
+		Signatures:  []playlist.Signature{{Alg: "ed25519", Kid: "did:key:test", Sig: "sig"}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	b, err := json.Marshal(map[string]json.RawMessage{"document": d, "authorization": a})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 func TestReplacePlaylist(t *testing.T) {
 	playlistID := uuid.New().String()
 	validBody := models.PlaylistReplaceRequest{
@@ -767,7 +793,7 @@ func TestReplacePlaylist(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
+					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any(), gomock.Any()).
 					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}), nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -793,7 +819,7 @@ func TestReplacePlaylist(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
+					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any(), gomock.Any()).
 					Return(nil, store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -808,7 +834,7 @@ func TestReplacePlaylist(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
+					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any(), gomock.Any()).
 					Return(nil, nil)
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -833,7 +859,7 @@ func TestReplacePlaylist(t *testing.T) {
 				Log:  zaptest.NewLogger(t),
 			}
 
-			bodyBytes, _ := json.Marshal(tt.body)
+			bodyBytes := putEnvelope(tt.body, models.IntentTargetPlaylist, playlistID, "slug")
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/playlists/"+playlistID, bytes.NewReader(bodyBytes))
@@ -900,7 +926,7 @@ func TestDeletePlaylist(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.DeleteTargetPlaylist, playlistID, "slug"))
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.IntentTargetPlaylist, playlistID, "slug"))
 			c.Params = gin.Params{{Key: "id", Value: playlistID}}
 
 			h.DeletePlaylist(c)
@@ -930,7 +956,7 @@ func TestDeletePlaylist_forbidden(t *testing.T) {
 	h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.DeleteTargetPlaylist, playlistID, "slug"))
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.IntentTargetPlaylist, playlistID, "slug"))
 	c.Params = gin.Params{{Key: "id", Value: playlistID}}
 
 	h.DeletePlaylist(c)
@@ -1209,7 +1235,7 @@ func TestReplacePlaylistGroup(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
+					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any(), gomock.Any()).
 					Return(groupRecPtr(playlistgroup.Group{Title: "Updated Group"}), nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -1235,7 +1261,7 @@ func TestReplacePlaylistGroup(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
+					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any(), gomock.Any()).
 					Return(nil, nil)
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -1260,7 +1286,7 @@ func TestReplacePlaylistGroup(t *testing.T) {
 				Log:  zaptest.NewLogger(t),
 			}
 
-			bodyBytes, _ := json.Marshal(tt.body)
+			bodyBytes := putEnvelope(tt.body, models.IntentTargetPlaylistGroup, groupID, "slug")
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/playlist-groups/"+groupID, bytes.NewReader(bodyBytes))
@@ -1318,7 +1344,7 @@ func TestDeletePlaylistGroup(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlist-groups/"+groupID, deleteIntentBody(models.DeleteTargetPlaylistGroup, groupID, "slug"))
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlist-groups/"+groupID, deleteIntentBody(models.IntentTargetPlaylistGroup, groupID, "slug"))
 			c.Params = gin.Params{{Key: "id", Value: groupID}}
 
 			h.DeletePlaylistGroup(c)
@@ -1608,7 +1634,7 @@ func TestReplaceChannel(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
+					ReplaceChannel(gomock.Any(), channelID, gomock.Any(), gomock.Any()).
 					Return(channelRecPtr(channels.Channel{Title: "Updated Channel"}), nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -1623,7 +1649,7 @@ func TestReplaceChannel(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
+					ReplaceChannel(gomock.Any(), channelID, gomock.Any(), gomock.Any()).
 					Return(nil, executor.ErrExtensionsDisabled)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -1649,7 +1675,7 @@ func TestReplaceChannel(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
+					ReplaceChannel(gomock.Any(), channelID, gomock.Any(), gomock.Any()).
 					Return(nil, nil)
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -1674,7 +1700,7 @@ func TestReplaceChannel(t *testing.T) {
 				Log:  zaptest.NewLogger(t),
 			}
 
-			bodyBytes, _ := json.Marshal(tt.body)
+			bodyBytes := putEnvelope(tt.body, models.IntentTargetChannel, channelID, "slug")
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/channels/"+channelID, bytes.NewReader(bodyBytes))
@@ -1753,7 +1779,7 @@ func TestDeleteChannel(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channelID, deleteIntentBody(models.DeleteTargetChannel, channelID, "slug"))
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channelID, deleteIntentBody(models.IntentTargetChannel, channelID, "slug"))
 			c.Params = gin.Params{{Key: "id", Value: channelID}}
 
 			h.DeleteChannel(c)

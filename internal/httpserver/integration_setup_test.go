@@ -74,7 +74,7 @@ func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Serve
 			WriteTimeout: 30 * time.Second,
 			IdleTimeout:  120 * time.Second,
 		},
-		Auth:       config.AuthConfig{DeleteMaxClockSkew: 5 * time.Minute},
+		Auth:       config.AuthConfig{IntentMaxClockSkew: 5 * time.Minute},
 		Logging:    config.LoggingConfig{Debug: true},
 		Extensions: config.ExtensionsConfig{Enabled: true},
 		Playlist: config.PlaylistConfig{
@@ -273,4 +273,38 @@ func doRaw(t *testing.T, srv *Server, method, path string, body any, wantStatus 
 		t.Fatalf("%s %s: status=%d want %d body=%s", method, path, rec.Code, wantStatus, rec.Body.String())
 	}
 	return rec.Body.Bytes()
+}
+
+// signedReplaceEnvelope builds a PUT body: the signed document plus an owner-signed mutation intent.
+//
+// The intent carries its own `created` inside the bytes its signature covers, which is what bounds
+// replay — the per-signature `ts` cannot, because it sits outside the signing digest. payloadHash ties
+// the intent to this exact document, so a captured intent cannot install different content.
+func signedReplaceEnvelope(t *testing.T, priv ed25519.PrivateKey, targetType, id, slug string, doc any) map[string]any {
+	t.Helper()
+	docBytes, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadHash, err := dp1sign.PayloadHashString(docBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Format(time.RFC3339)
+	intent := map[string]any{
+		"action":      "replace",
+		"target":      map[string]any{"type": targetType, "id": id, "slug": slug},
+		"payloadHash": payloadHash,
+		"created":     created,
+	}
+	unsigned, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent["signatures"] = []playlist.Signature{sig}
+	return map[string]any{"document": doc, "authorization": intent}
 }

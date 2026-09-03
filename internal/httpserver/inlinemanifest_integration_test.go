@@ -78,7 +78,7 @@ func TestIntegration_InlineManifestHTTPRoundTrip(t *testing.T) {
 	// curator re-signs every field, including the unchanged inlineManifest, and the feed co-signs.
 	doc.Title = "Inline manifest replaced"
 	putBody := signedPlaylistBody(t, priv, doc)
-	replacedRaw := mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, putBody, http.StatusOK)
+	replacedRaw := mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedReplaceEnvelope(t, priv, "playlist", doc.ID, doc.Slug, putBody), http.StatusOK)
 	assertPlaylistInlineManifest(t, "PUT response", replacedRaw, itemID)
 }
 

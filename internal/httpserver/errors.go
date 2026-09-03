@@ -38,6 +38,9 @@ func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrConcurrentModification) {
 		return http.StatusConflict, "conflict", "the resource changed since it was authorized; re-read and retry"
 	}
+	if errors.Is(err, store.ErrDocumentDeleted) {
+		return http.StatusConflict, "conflict", "this id was deleted on this feed and cannot be reused; publish under a new id"
+	}
 	if errors.Is(err, store.ErrListLimitExceeded) {
 		return http.StatusBadRequest, "bad_request", err.Error()
 	}
@@ -57,7 +60,7 @@ func mapExecutorError(err error) (status int, code, msg string) {
 	if executor.IsForbiddenError(err) {
 		return http.StatusForbidden, "forbidden", err.Error()
 	}
-	if executor.IsDeleteRequestError(err) {
+	if executor.IsIntentError(err) {
 		return http.StatusBadRequest, "bad_request", err.Error()
 	}
 	if executor.IsInvalidSubmissionError(err) {

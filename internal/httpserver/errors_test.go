@@ -89,8 +89,8 @@ func TestMapExecutorError_signatureAuthzErrors(t *testing.T) {
 		{"not_owner", executor.ErrNotResourceOwner, http.StatusForbidden, "forbidden"},
 		{"owner_immutable", executor.ErrOwnerImmutable, http.StatusForbidden, "forbidden"},
 		{"owner_immutable_wrapped", fmt.Errorf("x: %w", executor.ErrOwnerImmutable), http.StatusForbidden, "forbidden"},
-		{"delete_request_invalid", executor.ErrDeleteRequestInvalid, http.StatusBadRequest, "bad_request"},
-		{"delete_request_wrapped", fmt.Errorf("x: %w", executor.ErrDeleteRequestInvalid), http.StatusBadRequest, "bad_request"},
+		{"delete_request_invalid", executor.ErrIntentInvalid, http.StatusBadRequest, "bad_request"},
+		{"delete_request_wrapped", fmt.Errorf("x: %w", executor.ErrIntentInvalid), http.StatusBadRequest, "bad_request"},
 		{"slug_required", executor.ErrSlugRequired, http.StatusBadRequest, "bad_request"},
 		{"item_id_required", executor.ErrItemIDRequired, http.StatusBadRequest, "bad_request"},
 		{"item_id_required_wrapped", fmt.Errorf("x: %w", executor.ErrItemIDRequired), http.StatusBadRequest, "bad_request"},
@@ -129,5 +129,19 @@ func TestMapStoreError_concurrentModification(t *testing.T) {
 	}
 	if !strings.Contains(msg, "re-read and retry") {
 		t.Fatalf("message should tell the client what to do, got %q", msg)
+	}
+}
+
+// A create naming a deleted id is a conflict, not a generic 500: the id is retired on this feed so a
+// replay of the old (still validly signed) bytes cannot resurrect it, and the client needs to know that
+// re-publishing requires a new id.
+func TestMapStoreError_documentDeleted(t *testing.T) {
+	t.Parallel()
+	st, code, msg := mapExecutorError(fmt.Errorf("store: %w", store.ErrDocumentDeleted))
+	if st != http.StatusConflict || code != "conflict" {
+		t.Fatalf("got status=%d code=%q", st, code)
+	}
+	if !strings.Contains(msg, "new id") {
+		t.Fatalf("message should tell the client to publish under a new id, got %q", msg)
 	}
 }

@@ -16,8 +16,17 @@ info:
     cryptographic signatures it carries. POST (create) is open: the body must be validly self-signed by a
     key it declares in `curators`/`publisher`. PUT (replace) and DELETE are owner-bound: the request must
     be signed by a key the *stored* document already names as an owner, and the owner set is immutable on
-    replace. DELETE carries a signed delete-intent body (`SignedDeleteRequest`). The feed always adds its
-    own `feed` signature. There is no PATCH, and the registry has no write endpoint.
+    replace. The feed always adds its own `feed` signature. There is no PATCH, and the registry has no
+    write endpoint.
+
+    Because an owner's signatures live inside the document and are public via GET, a previously published
+    document could otherwise be replayed. PUT and DELETE therefore also carry a **signed mutation-intent**
+    (`SignedIntent`) whose `created` is inside the signed payload — the per-signature `ts` is not covered
+    by the signature and so cannot bound replay. PUT sends `SignedReplaceRequest` (the document plus an
+    intent bound to its `payloadHash`); DELETE sends `SignedDeleteRequest`. Intents must be fresh within
+    `auth.intent_max_clock_skew`. Deleted ids are tombstoned and cannot be re-created (`409`), which is
+    what stops a captured document from resurrecting a deleted resource; CREATE itself stays open so
+    cross-feed mirroring keeps working.
 
     Documents are stored and served verbatim. DP-1 §7.1 binds every signature to the JCS form of the
     whole document, so the feed verifies over the bytes you sent, appends its `feed` entry to
@@ -183,6 +192,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/DeletedIdConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
 
@@ -221,10 +232,12 @@ paths:
       tags: [playlists]
       summary: Replace playlist
       description: >-
-        Fully replaces a playlist. Owner-bound and owner-immutable: the body must carry a non-empty
-        `signatures` array with a valid signature from a key the stored playlist already lists in
-        `curators`, and the `curators` set may not change. Returns 403 if the signer is not an owner or the
-        owner set changed.
+        Fully replaces a playlist. The body is a `SignedReplaceRequest`: the full re-signed `document`
+        plus an `authorization` intent bound to that document's `payloadHash`. Owner-bound and immutable:
+        the document must be signed by a key the stored playlist lists in `curators`, the `curators` set
+        may not change, and the identity (`id`, `slug`, `created`) must equal the stored resource's. The
+        intent must also be signed by a stored owner and be fresh. 403 if the signer is not an owner or the
+        owner set changed; 409 if the resource changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -232,7 +245,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PlaylistInput'
+              $ref: '#/components/schemas/SignedReplaceRequest'
       responses:
         '200':
           description: Playlist replaced
@@ -331,6 +344,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/DeletedIdConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
 
@@ -368,9 +383,11 @@ paths:
       tags: [playlist-groups]
       summary: Replace playlist-group
       description: >-
-        Fully replaces a playlist-group. Owner-bound and owner-immutable: the body must carry a non-empty
-        `signatures` array with a valid signature from the stored `curator`, and `curator` may not change.
-        Returns 403 if the signer is not the owner or the owner changed.
+        Fully replaces a playlist-group. The body is a `SignedReplaceRequest`: the full re-signed
+        `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound and immutable:
+        the document and the intent must both be signed by the stored `curator`, which may not change, and
+        the identity must equal the stored resource's. 403 if the signer is not the owner or the owner
+        changed; 409 if the resource changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -378,7 +395,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PlaylistGroupInput'
+              $ref: '#/components/schemas/SignedReplaceRequest'
       responses:
         '200':
           description: Playlist-group replaced
@@ -480,6 +497,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/DeletedIdConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '404':
@@ -518,9 +537,11 @@ paths:
       tags: [channels]
       summary: Replace channel
       description: >-
-        Fully replaces a channel (requires extensions). Owner-bound and owner-immutable: the body must carry
-        a non-empty `signatures` array with a valid signature from the stored `publisher`, and `publisher`
-        may not change. Returns 403 if the signer is not the publisher or the publisher changed.
+        Fully replaces a channel (requires extensions). The body is a `SignedReplaceRequest`: the full
+        re-signed `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound and
+        immutable: the document and the intent must both be signed by the stored `publisher`, which may not
+        change, and the identity must equal the stored resource's (`curators` may change). 403 if the signer
+        is not the publisher or the publisher changed; 409 if the resource changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -528,7 +549,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ChannelInput'
+              $ref: '#/components/schemas/SignedReplaceRequest'
       responses:
         '200':
           description: Channel replaced
@@ -1182,44 +1203,60 @@ components:
           description: Base64-encoded signature
           example: "dGVzdC1zaWduYXR1cmU="
 
-    SignedDeleteRequest:
+    IntentTarget:
+      type: object
+      description: Binds an intent to exactly one stored resource; every field is checked against the stored row.
+      required: [type, id, slug]
+      properties:
+        type:
+          type: string
+          enum: ["playlist", "playlist-group", "channel"]
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+
+    SignedIntent:
       type: object
       description: >-
-        Signed delete-intent — the body of a DELETE. It is a feed-local envelope (DP-1 defines no delete
-        document) signed by an owner of the target resource. The server verifies the signatures over these
-        bytes with `signatures` removed (§7.1 digest), requires a signer whose kid is an owner of the
-        stored resource (curator for playlists/groups, publisher for channels), and rejects a `created`
-        outside the configured freshness window.
-      required:
-        - action
-        - target
-        - created
-        - signatures
+        A signed mutation-intent: the feed-local envelope that authorizes a mutation of an EXISTING
+        resource (DP-1 defines no such document, so this shape is the feed's).
+
+
+        Why it exists: an owner's signatures live inside the document and are public via GET, so an
+        observer could replay a previously published document — PUT it to roll a resource back to an older
+        version, or POST it after a delete to resurrect it. The per-signature `ts` cannot bound that
+        replay, because `ts` is NOT covered by the signature (`sig` is computed over the JCS form of the
+        document with `signatures` stripped), so it can be rewritten on a replayed body. Only a value
+        inside a signed payload is trustworthy — hence the intent carries its own `created` and is signed
+        as its own small document. Because the bound is wall-clock rather than per-feed bookkeeping, a
+        stale intent is stale on every feed, which is what makes this hold for documents mirrored across
+        feeds.
+
+
+        The server verifies the signatures over the intent bytes (§7.1 digest, `signatures` stripped),
+        requires a signer whose kid is an owner of the STORED resource (curator for playlists/groups,
+        publisher for channels), and rejects a `created` outside `auth.intent_max_clock_skew`.
+      required: [action, target, created, signatures]
       properties:
         action:
           type: string
-          description: Must be "delete".
-          enum: ["delete"]
+          enum: ["replace", "delete"]
+          description: The mutation this intent authorizes; must match the request method.
         target:
-          type: object
-          description: Identifies the exact resource to delete; must match the stored row.
-          required:
-            - type
-            - id
-            - slug
-          properties:
-            type:
-              type: string
-              enum: ["playlist", "playlist-group", "channel"]
-            id:
-              type: string
-              format: uuid
-            slug:
-              type: string
+          $ref: '#/components/schemas/IntentTarget'
+        payloadHash:
+          type: string
+          description: >-
+            DP-1 signing digest of the document this intent authorizes, binding the intent to that exact
+            content so a captured intent cannot install different bytes. Required when `action` is
+            "replace"; omitted for "delete", which carries no document.
+          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         created:
           type: string
           format: date-time
-          description: RFC3339 timestamp; must be within the server's delete freshness window.
+          description: RFC3339; must be within `auth.intent_max_clock_skew` of server time.
           example: "2025-06-01T12:00:00Z"
         signatures:
           type: array
@@ -1227,6 +1264,32 @@ components:
           description: Owner signatures over the intent (JCS with `signatures` removed).
           items:
             $ref: '#/components/schemas/Signature'
+
+    SignedDeleteRequest:
+      description: >-
+        The DELETE body — a bare signed intent whose `action` is "delete", with no `payloadHash`.
+      allOf:
+        - $ref: '#/components/schemas/SignedIntent'
+
+    SignedReplaceRequest:
+      type: object
+      description: >-
+        The PUT body. It pairs the full signed replacement document with the intent that authorizes
+        replacing this resource with it. Both are verified independently: the document by its own owner
+        signatures (and stored verbatim), the intent by its signatures plus freshness and `payloadHash`
+        binding. One without the other authorizes nothing.
+      required: [document, authorization]
+      properties:
+        document:
+          description: >-
+            The complete signed replacement document (`PlaylistInput` / `PlaylistGroupInput` /
+            `ChannelInput` shape for the route). Stored and served verbatim.
+          type: object
+        authorization:
+          allOf:
+            - $ref: '#/components/schemas/SignedIntent'
+          description: >-
+            Signed intent whose `action` is "replace", with `payloadHash` set to the document's digest.
 
     Note:
       type: object
@@ -1336,6 +1399,19 @@ components:
           example:
             error: conflict
             message: the resource changed since it was authorized; re-read and retry
+
+    DeletedIdConflict:
+      description: >-
+        The `id` names a document this feed has already deleted. Ids are not reusable, so a tombstoned id
+        cannot be re-created — this is what stops a previously published document from being replayed to
+        resurrect a deleted resource. Create the resource under a new id.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: conflict
+            message: document id was deleted and cannot be reused
 
     PayloadTooLarge:
       description: The request body exceeds the configured size limit (server.max_request_bytes).

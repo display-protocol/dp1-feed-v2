@@ -43,6 +43,21 @@ func (m *MockValidatorSigner) EXPECT() *MockValidatorSignerMockRecorder {
 	return m.recorder
 }
 
+// PayloadHash mocks base method.
+func (m *MockValidatorSigner) PayloadHash(raw []byte) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PayloadHash", raw)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// PayloadHash indicates an expected call of PayloadHash.
+func (mr *MockValidatorSignerMockRecorder) PayloadHash(raw any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PayloadHash", reflect.TypeOf((*MockValidatorSigner)(nil).PayloadHash), raw)
+}
+
 // SignChannel mocks base method.
 func (m *MockValidatorSigner) SignChannel(raw []byte, ts time.Time) ([]byte, error) {
 	m.ctrl.T.Helper()

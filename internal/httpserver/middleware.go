@@ -64,21 +64,49 @@ func RequireSignatures(log *zap.Logger) gin.HandlerFunc {
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-		var bodyCheck struct {
-			Signatures []json.RawMessage `json:"signatures"`
-		}
-		if err := json.Unmarshal(body, &bodyCheck); err != nil {
-			log.Warn("unauthorized: invalid JSON body", zap.String("path", c.Request.URL.Path), zap.Error(err))
-			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing authentication: request body must carry signatures"})
-			return
-		}
-		if len(bodyCheck.Signatures) == 0 {
+		if !bodyCarriesSignatures(body) {
 			log.Warn("unauthorized: no signatures", zap.String("path", c.Request.URL.Path))
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing authentication: request body must carry signatures"})
 			return
 		}
 		c.Next()
 	}
+}
+
+// bodyCarriesSignatures reports whether a mutating body carries signatures anywhere the API accepts them.
+// This is presence only — authenticity and authority are the executor's job; the point is to reject an
+// unsigned request before any handler or database work.
+//
+// Two shapes are legitimate: a bare signed document or delete-intent (POST, DELETE) carries `signatures`
+// at the top level, while a PUT carries a `document` and the `authorization` intent that permits
+// replacing the resource with it, each signed in its own right.
+func bodyCarriesSignatures(body []byte) bool {
+	var envelope struct {
+		Signatures    []json.RawMessage `json:"signatures"`
+		Document      json.RawMessage   `json:"document"`
+		Authorization json.RawMessage   `json:"authorization"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return false
+	}
+	if len(envelope.Signatures) > 0 {
+		return true
+	}
+	// Both halves of a replace must be signed; one without the other authorizes nothing.
+	return hasSignatures(envelope.Document) && hasSignatures(envelope.Authorization)
+}
+
+func hasSignatures(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var doc struct {
+		Signatures []json.RawMessage `json:"signatures"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return false
+	}
+	return len(doc.Signatures) > 0
 }
 
 // ZapLogger emits basic request logs (method, path, status, latency).

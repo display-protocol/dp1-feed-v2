@@ -37,9 +37,11 @@ alwaysApply: true
 ## Authentication
 
 - **Signatures only — no API key.** `RequireSignatures` (`internal/httpserver/middleware.go`) rejects any POST/PUT/DELETE whose body lacks a non-empty `signatures` array; the executor verifies authenticity and ownership.
-- **Create (POST):** open — body must be validly self-signed by its declared curator/publisher.
-- **Replace (PUT):** owner-bound and owner-immutable — a verifying signature from a stored owner key is required, and curators/publisher may not change (else `403 forbidden`).
-- **Delete (DELETE):** body is a signed delete-intent (`SignedDeleteRequest`) that must target the resource, fall within `auth.delete_max_clock_skew`, and be signed by a stored owner.
+- **Create (POST):** open — body must be validly self-signed by its declared curator/publisher. Deleted ids are tombstoned and cannot be re-created (`409`).
+- **Replace (PUT):** body is `SignedReplaceRequest` = `{document, authorization}`. Owner-bound and owner-immutable: a verifying signature from a stored owner key is required, curators/publisher may not change, and identity (`id`/`slug`/`created`) must equal the stored row (else `403`/`400`). The `authorization` intent must be fresh and carry `payloadHash` = the document's digest.
+- **Delete (DELETE):** body is a signed delete-intent (`SignedDeleteRequest`) that must target the resource, fall within `auth.intent_max_clock_skew`, and be signed by a stored owner; it tombstones the id.
+- **Replay bound:** the per-signature `ts` is NOT covered by the signature, so freshness lives in the intent's own signed `created`. Writes/deletes are conditional on the generation read at authorization (`409` on mismatch).
+- **Verbatim:** documents are verified, co-signed, stored and served as the exact submitted bytes; bodies are decoded strictly and capped (`413`).
 - **No PATCH.** Registry is read-only over the API. Ownership is document-declared; no global key allowlist.
 - Reads public unless network-restricted; no built-in OAuth.
 

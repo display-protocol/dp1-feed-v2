@@ -85,18 +85,20 @@ type DatabaseConfig struct {
 }
 
 // AuthConfig tunes signature-based authorization for mutating routes. There is no API key: every
-// mutating request is authorized by the cryptographic signatures it carries (POST/PUT in the document
-// body, DELETE in a signed delete-intent body).
+// mutating request is authorized by the cryptographic signatures it carries — POST by the document's own
+// signatures, PUT and DELETE additionally by a signed mutation-intent.
 type AuthConfig struct {
-	// DeleteMaxClockSkew bounds how far a signed delete-intent's "created" may sit from server time in
-	// either direction. It caps replay of a captured delete after the same id is re-created, so it must
-	// stay small; it also has to tolerate honest client/server clock drift. Zero falls back to the
-	// package default (see defaultConfig).
-	DeleteMaxClockSkew time.Duration `yaml:"delete_max_clock_skew"`
+	// IntentMaxClockSkew bounds how far a signed mutation-intent's "created" may sit from server time in
+	// either direction, for both replace and delete. Because that "created" is inside the intent's signed
+	// payload it cannot be forged, which is what makes it a usable replay bound (the per-signature "ts" is
+	// NOT covered by the signature). Keep it small — it is the window in which a captured intent could be
+	// replayed — while still tolerating honest client/server clock drift. Zero falls back to the package
+	// default (see defaultConfig).
+	IntentMaxClockSkew time.Duration `yaml:"intent_max_clock_skew"`
 }
 
-// DefaultDeleteMaxClockSkew is the delete-intent freshness window used when config leaves it unset.
-const DefaultDeleteMaxClockSkew = 5 * time.Minute
+// DefaultIntentMaxClockSkew is the mutation-intent freshness window used when config leaves it unset.
+const DefaultIntentMaxClockSkew = 5 * time.Minute
 
 // SentryConfig is optional; empty DSN disables Sentry.
 type SentryConfig struct {
@@ -172,7 +174,7 @@ func defaultConfig() *Config {
 			MaxConnLifetime: time.Hour,
 		},
 		Logging:    LoggingConfig{Debug: false},
-		Auth:       AuthConfig{DeleteMaxClockSkew: DefaultDeleteMaxClockSkew},
+		Auth:       AuthConfig{IntentMaxClockSkew: DefaultIntentMaxClockSkew},
 		Extensions: ExtensionsConfig{Enabled: true},
 		Playlist: PlaylistConfig{
 			FetchTimeout:      30 * time.Second,
@@ -187,12 +189,12 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv(envPrefix + "DATABASE_URL"); v != "" {
 		cfg.Database.URL = v
 	}
-	if v := os.Getenv(envPrefix + "DELETE_MAX_CLOCK_SKEW"); v != "" {
+	if v := os.Getenv(envPrefix + "INTENT_MAX_CLOCK_SKEW"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return fmt.Errorf("delete max clock skew env: %w", err)
+			return fmt.Errorf("intent max clock skew env: %w", err)
 		}
-		cfg.Auth.DeleteMaxClockSkew = d
+		cfg.Auth.IntentMaxClockSkew = d
 	}
 	if v := os.Getenv(envPrefix + "MAX_REQUEST_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -255,8 +257,8 @@ func (c *Config) validate() error {
 	if c.Database.URL == "" {
 		return fmt.Errorf("database url is required (yaml database.url or DP1_FEED_DATABASE_URL)")
 	}
-	if c.Auth.DeleteMaxClockSkew < 0 {
-		return fmt.Errorf("auth delete max clock skew must not be negative")
+	if c.Auth.IntentMaxClockSkew < 0 {
+		return fmt.Errorf("auth intent max clock skew must not be negative")
 	}
 	if c.Server.MaxRequestBytes < 0 {
 		return fmt.Errorf("server max request bytes must not be negative")

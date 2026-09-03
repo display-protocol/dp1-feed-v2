@@ -41,6 +41,29 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// Tombstones. A deleted document's id is retired on this feed so a replay of its (public, still validly
+// signed) bytes cannot resurrect it through the open create path. resource_type is the document's table
+// name — an internal constant, never client input.
+const (
+	tombstoneInsert = `INSERT INTO deleted_documents (resource_type, id) VALUES ($1, $2) ON CONFLICT DO NOTHING`
+	tombstoneExists = `SELECT EXISTS (SELECT 1 FROM deleted_documents WHERE resource_type = $1 AND id = $2)`
+)
+
+// requireNotTombstoned fails a create whose id this feed has already deleted. It runs on the caller's
+// transaction so the check and the insert commit together.
+func requireNotTombstoned(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, id uuid.UUID) error {
+	var deleted bool
+	if err := q.QueryRow(ctx, tombstoneExists, table, id).Scan(&deleted); err != nil {
+		return fmt.Errorf("check %s tombstone: %w", table, err)
+	}
+	if deleted {
+		return fmt.Errorf("%w: %s %s", store.ErrDocumentDeleted, table, id)
+	}
+	return nil
+}
+
 // classifyConditionalWrite explains a conditional UPDATE/DELETE that matched no row: if the row still
 // exists, the caller's expected updated_at was stale (a concurrent write, or a delete and re-create,
 // landed) → ErrConcurrentModification; if the row is gone → ErrNotFound.
@@ -116,6 +139,10 @@ RETURNING created_at`
 	}
 	// Commit succeeds → Rollback becomes no-op. On failure, Rollback aborts the tx.
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := requireNotTombstoned(ctx, tx, "playlists", id); err != nil {
+		return err
+	}
 
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx, insertPlaylist, id, slug, bodyJSON).Scan(&createdAt); err != nil {
@@ -539,6 +566,10 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 	if ct.RowsAffected() == 0 {
 		return classifyConditionalWrite(ctx, tx, table, rowID)
 	}
+	// Same transaction as the delete: a tombstone that could be lost would leave the id resurrectable.
+	if _, err := tx.Exec(ctx, tombstoneInsert, table, rowID); err != nil {
+		return fmt.Errorf("record %s tombstone: %w", table, err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -646,6 +677,10 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := requireNotTombstoned(ctx, tx, "playlist_groups", in.ID); err != nil {
+		return err
+	}
 
 	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
@@ -936,6 +971,10 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := requireNotTombstoned(ctx, tx, "channels", in.ID); err != nil {
+		return err
+	}
 
 	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)

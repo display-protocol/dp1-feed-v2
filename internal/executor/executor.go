@@ -59,7 +59,7 @@ type Executor interface {
 	// ListPlaylists returns one page of playlist bodies and an optional next cursor (optional channel or playlist-group filter; id or slug).
 	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]store.PlaylistRecord, string, error)
 	// ReplacePlaylist performs a full PUT (owner-bound, owner immutable): verify owner signature, feed co-sign, validate, update.
-	ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*store.PlaylistRecord, error)
+	ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest, intent *models.SignedIntent) (*store.PlaylistRecord, error)
 	// DeletePlaylist verifies the signed delete-intent against the stored owner keys, then removes the playlist row.
 	DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
@@ -75,7 +75,7 @@ type Executor interface {
 	// ListPlaylistGroups returns one page of playlist-group bodies.
 	ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.PlaylistGroupRecord, string, error)
 	// ReplacePlaylistGroup re-resolves playlist URIs, verifies the owner signature, re-signs, and commits updates in one transaction.
-	ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest) (*store.PlaylistGroupRecord, error)
+	ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest, intent *models.SignedIntent) (*store.PlaylistGroupRecord, error)
 	// DeletePlaylistGroup verifies the signed delete-intent against the stored curator, then removes the playlist-group row (membership CASCADE).
 	DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
@@ -86,7 +86,7 @@ type Executor interface {
 	// ListChannels returns one page of channel bodies.
 	ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.ChannelRecord, string, error)
 	// ReplaceChannel re-resolves playlist URIs, verifies the owner (publisher) signature, re-signs, and commits updates in one transaction.
-	ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest) (*store.ChannelRecord, error)
+	ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error)
 	// DeleteChannel verifies the signed delete-intent against the stored publisher, then removes the channel row (membership CASCADE).
 	DeleteChannel(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
@@ -105,7 +105,7 @@ type impl struct {
 	fetch              fetcher.Fetcher
 	publicBase         string
 	notificationClient notification.Client
-	deleteSkew         time.Duration
+	intentSkew         time.Duration
 }
 
 // Option configures optional executor side-effect boundaries.
@@ -118,12 +118,12 @@ func WithNotificationClient(client notification.Client) Option {
 	}
 }
 
-// WithDeleteClockSkew sets the signed delete-intent freshness window. A non-positive value leaves the
-// executor default (defaultDeleteSkew) in place.
-func WithDeleteClockSkew(d time.Duration) Option {
+// WithIntentClockSkew sets the signed delete-intent freshness window. A non-positive value leaves the
+// executor default (defaultIntentSkew) in place.
+func WithIntentClockSkew(d time.Duration) Option {
 	return func(e *impl) {
 		if d > 0 {
-			e.deleteSkew = d
+			e.intentSkew = d
 		}
 	}
 }
@@ -137,7 +137,7 @@ func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetc
 		extensionsEnabled: extensionsEnabled,
 		fetch:             fetch,
 		publicBase:        strings.TrimSpace(publicBaseURL),
-		deleteSkew:        defaultDeleteSkew,
+		intentSkew:        defaultIntentSkew,
 	}
 	for _, option := range options {
 		option(e)
@@ -145,9 +145,9 @@ func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetc
 	return e
 }
 
-// defaultDeleteSkew is the signed delete-intent freshness window when WithDeleteClockSkew is not set.
+// defaultIntentSkew is the signed delete-intent freshness window when WithIntentClockSkew is not set.
 // Kept small to bound replay of a captured delete after the same id is re-created.
-const defaultDeleteSkew = 5 * time.Minute
+const defaultIntentSkew = 5 * time.Minute
 
 func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {
@@ -307,7 +307,7 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 // created must EQUAL the stored row's (validated by mustMatchStored, never substituted — substituting
 // would change bytes the client signed); the curator (owner) set may not change; every item must carry a
 // UUID id; all signatures must verify over the submitted bytes; and at least one must be a stored owner.
-func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*store.PlaylistRecord, error) {
+func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest, intent *models.SignedIntent) (*store.PlaylistRecord, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
 	}
@@ -344,6 +344,12 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
 		return nil, err
 	}
+	// The document proves the owner authored this content; the intent proves the owner is asking for it to
+	// replace THIS resource NOW. Without it the document's own (public) signatures would authorize replaying
+	// an older version to roll the resource back.
+	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetPlaylist, rec.ID, rec.Slug, ownerKeys, req.Raw); err != nil {
+		return nil, err
+	}
 
 	// 3) Feed co-signs the same bytes, validate, persist by stable UUID (never the caller-supplied slug:
 	// authorization was established for rec.ID). The store rebuilds playlist_item_index from items[].
@@ -363,13 +369,13 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 
 // DeletePlaylist authorizes a signed delete-intent against the stored playlist's curator (owner) keys,
 // then removes the playlist row. The intent must name this exact resource and carry a fresh, verifying
-// owner signature (see verifyDeleteIntent).
+// owner signature (see verifyIntent).
 func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
 		return err
 	}
-	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylist, entityKeySet(rec.Body.Curators)); err != nil {
+	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylist, rec.ID, rec.Slug, entityKeySet(rec.Body.Curators), nil); err != nil {
 		return err
 	}
 	// Delete by stable UUID, not the caller-supplied slug, and conditional on the updated_at this
@@ -484,7 +490,7 @@ func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string,
 
 // ReplacePlaylistGroup replaces a group with the client's signed document, stored verbatim, and
 // re-resolves membership. Owner-bound, identity- and owner-immutable (see ReplacePlaylist).
-func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest) (*store.PlaylistGroupRecord, error) {
+func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest, intent *models.SignedIntent) (*store.PlaylistGroupRecord, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
 	}
@@ -519,6 +525,12 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
 		return nil, err
 	}
+	// The document proves the owner authored this content; the intent proves the owner is asking for it to
+	// replace THIS resource NOW. Without it the document's own (public) signatures would authorize replaying
+	// an older version to roll the resource back.
+	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, ownerKeys, req.Raw); err != nil {
+		return nil, err
+	}
 
 	// 3. Fresh fetch/lookup for every URI; membership rows are replaced in the same store transaction.
 	ingested, err := e.resolvePlaylistURIs(ctx, uris)
@@ -549,7 +561,7 @@ func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return err
 	}
-	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetPlaylistGroup, stringOwnerKeySet(rec.Body.Curator)); err != nil {
+	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, stringOwnerKeySet(rec.Body.Curator), nil); err != nil {
 		return err
 	}
 	// Delete by stable UUID and conditional on the authorized updated_at (see DeletePlaylist).
@@ -643,7 +655,7 @@ func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort 
 // ReplaceChannel replaces a channel with the client's signed document, stored verbatim, and re-resolves
 // membership. Owner-bound, identity- and owner-immutable: the publisher (owner) may not change; channel
 // curators[] may. See ReplacePlaylist.
-func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest) (*store.ChannelRecord, error) {
+func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled
 	}
@@ -684,6 +696,12 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
 		return nil, err
 	}
+	// The document proves the owner authored this content; the intent proves the owner is asking for it to
+	// replace THIS resource NOW. Without it the document's own (public) signatures would authorize replaying
+	// an older version to roll the resource back.
+	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetChannel, rec.ID, rec.Slug, ownerKeys, req.Raw); err != nil {
+		return nil, err
+	}
 
 	// 3. Fresh fetch/lookup for every URI (only after authorization).
 	ingested, err := e.resolvePlaylistURIs(ctx, uris)
@@ -720,7 +738,7 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string, req *models.S
 	if err != nil {
 		return err
 	}
-	if err := e.verifyDeleteIntent(req, rec.ID, rec.Slug, models.DeleteTargetChannel, stringOwnerKeySet(publisherKey(rec.Body.Publisher))); err != nil {
+	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetChannel, rec.ID, rec.Slug, stringOwnerKeySet(publisherKey(rec.Body.Publisher)), nil); err != nil {
 		return err
 	}
 	// Delete by stable UUID and conditional on the authorized updated_at (see DeletePlaylist).

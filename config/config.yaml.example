@@ -22,9 +22,9 @@ database:
 
 auth:
   # Mutating routes are authorized by request signatures, not an API key.
-  # delete_max_clock_skew bounds how far a signed delete-intent's "created" may sit from server time.
-  # Override with DP1_FEED_DELETE_MAX_CLOCK_SKEW (Go duration, e.g. 5m).
-  delete_max_clock_skew: "5m"
+  # intent_max_clock_skew bounds how far a signed delete-intent's "created" may sit from server time.
+  # Override with DP1_FEED_INTENT_MAX_CLOCK_SKEW (Go duration, e.g. 5m).
+  intent_max_clock_skew: "5m"
 
 sentry:
   dsn: ""

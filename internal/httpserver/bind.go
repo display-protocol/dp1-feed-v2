@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+
+	"github.com/display-protocol/dp1-feed-v2/internal/models"
 )
 
 // Request bodies are decoded strictly: a JSON member that no request field models is a 400, never
@@ -43,18 +45,63 @@ func bindDocument(c *gin.Context, dst any) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := decodeDocument(raw, dst); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// decodeDocument strictly decodes raw into dst without reading the request: an unknown or misspelled
+// member, or more than one JSON value, is an error rather than a silent drop.
+func decodeDocument(raw []byte, dst any) error {
 	if !json.Valid(raw) {
-		return nil, errTrailingBody
+		return errTrailingBody
 	}
 	// encoding/json matches member names case-insensitively even with DisallowUnknownFields, so
 	// "Summary" would silently bind to summary. Check exact spellings first.
 	if err := checkExactMembers(raw, reflect.TypeOf(dst)); err != nil {
-		return nil, err
+		return err
 	}
-	if err := binding.JSON.BindBody(raw, dst); err != nil {
-		return nil, err
+	return binding.JSON.BindBody(raw, dst)
+}
+
+// bindSignedReplace decodes a PUT body: the document to install plus the signed intent authorizing it.
+//
+// Both halves are kept as the exact bytes received. The document bytes are what the executor verifies,
+// co-signs and stores verbatim; the authorization bytes are what the intent's own signature covers. A
+// re-encode of either would change what was signed, so neither is ever rebuilt from decoded fields.
+// Each half is decoded strictly in its own right, so an unknown member inside the document or the
+// intent is still a 400 naming the field.
+func bindSignedReplace(c *gin.Context, doc any) (json.RawMessage, *models.SignedIntent, error) {
+	raw, err := c.GetRawData()
+	if err != nil {
+		return nil, nil, err
 	}
-	return raw, nil
+	if !json.Valid(raw) {
+		return nil, nil, errTrailingBody
+	}
+	var wrapper models.SignedReplaceRequest
+	if err := checkExactMembers(raw, reflect.TypeOf(&wrapper)); err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, nil, err
+	}
+	if len(wrapper.Document) == 0 {
+		return nil, nil, errors.New(`request body must contain a "document" object`)
+	}
+	if len(wrapper.Authorization) == 0 {
+		return nil, nil, errors.New(`request body must contain an "authorization" object (the signed mutation intent)`)
+	}
+	if err := decodeDocument(wrapper.Document, doc); err != nil {
+		return nil, nil, err
+	}
+	var intent models.SignedIntent
+	if err := decodeDocument(wrapper.Authorization, &intent); err != nil {
+		return nil, nil, err
+	}
+	intent.Raw = wrapper.Authorization
+	return wrapper.Document, &intent, nil
 }
 
 // checkExactMembers walks the JSON in raw alongside the Go type it will decode into and rejects any

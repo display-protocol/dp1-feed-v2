@@ -79,22 +79,43 @@ Three postures, by verb:
    or mint item ids after signing, so every playlist item must already carry a UUID `id` (missing slug or
    item id → **`400` `bad_request`**). The signer becomes the resource's **owner**.
 
-2. **PUT (replace) — owner-bound and owner-immutable.** The body is a full document (same shapes as
-   create). **Identity is immutable and validated, not substituted**: the submitted `id`, `slug`, and
-   document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as an
-   instant, since formatting may differ). The write is persisted by stored UUID. The **owner set is
-   immutable** too: `curators` (playlists), `curator` (groups), and `publisher` (channels) must equal the
-   stored document's, or the request is refused **`403` `forbidden`** (channel `curators` may change). At
-   least one verifying signature's `kid` must be an owner of the **stored** document, else **`403`
-   `forbidden`**; all signatures must cryptographically verify (**`400`**). The owner re-signs the whole
-   document and the feed co-signs.
+2. **PUT (replace) — owner-bound, owner-immutable, replay-bound.** The body is a **`SignedReplaceRequest`**
+   envelope: `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
+   are verified independently — one without the other authorizes nothing.
+   - **Document:** **identity is immutable and validated, not substituted** — the submitted `id`, `slug`,
+     and document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as
+     an instant, since formatting may differ). The **owner set is immutable**: `curators` (playlists),
+     `curator` (groups), and `publisher` (channels) must equal the stored document's, else **`403`
+     `forbidden`** (channel `curators` may change). All signatures must cryptographically verify
+     (**`400`**) and at least one signer's `kid` must be an owner of the **stored** document (**`403`**).
+   - **Authorization intent:** `action` must be `"replace"`, `target` must name this resource,
+     `payloadHash` must equal the DP-1 signing digest of the submitted `document` (binding the intent to
+     that exact content), `created` must fall within `auth.intent_max_clock_skew`, and the intent's own
+     signatures must verify and include a **stored owner** (**`403`** otherwise).
+   - The write is persisted by stored UUID, conditional on the generation observed at authorization
+     (**`409`** if the resource changed in between). The feed then co-signs and stores verbatim.
+
+   **Why the intent exists:** an owner's signatures live *inside* the document and are public via `GET`,
+   so a previously published document could be replayed to roll a resource back. The per-signature `ts`
+   cannot bound that — it is **not** covered by the signature (`sig` is over the JCS document with
+   `signatures` stripped), so it can be rewritten on a replayed body. The intent's `created` *is* inside a
+   signed payload, and because the bound is wall-clock rather than per-feed bookkeeping, a stale intent is
+   stale on **every** feed — which is what makes this hold for documents mirrored across feeds.
 
 3. **DELETE — owner-bound, signed delete-intent.** The body is a `SignedDeleteRequest`
    (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
    exact stored resource (`id` and `slug`), its `created` must fall within the server's freshness window
-   (`auth.delete_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
+   (`auth.intent_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
    must verify over the intent bytes (JCS, `signatures` stripped), and at least one signer must be an owner
-   of the stored resource. DP-1 defines no delete document; this envelope is feed-local.
+   of the stored resource. DP-1 defines no delete document; this envelope is feed-local. The delete is
+   conditional on the generation observed at authorization (**`409`** if the resource changed in between),
+   and it **tombstones the id** in the same transaction.
+
+**Deleted ids are not reusable.** A successful DELETE records a tombstone, and a later `POST` naming that
+id is refused with **`409` `conflict`**. This is what stops a captured, still-valid document from being
+replayed to resurrect a deleted resource — while leaving `POST` itself open, so cross-feed mirroring of
+documents this feed has never seen keeps working. An owner who deletes and later wants the resource back
+must create it under a **new id**.
 
 **Documents are stored and served verbatim.** DP-1 §7.1 binds every signature to the JCS form of the
 whole document, so the feed verifies over the bytes it received, appends its `feed` entry to
@@ -179,6 +200,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
+| **409** | `conflict` | `POST` named an id this feed has already deleted (tombstoned); ids are not reusable — create under a new id. |
 | **413** | `payload_too_large` | Request body exceeds `server.max_request_bytes` (enforced before the body is buffered). |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
 

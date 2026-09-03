@@ -201,13 +201,13 @@ func (h *Handler) GetPlaylistItem(c *gin.Context) {
 func (h *Handler) ReplacePlaylist(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistReplaceRequest
-	raw, err := bindDocument(c, &req)
+	raw, intent, err := bindSignedReplace(c, &req)
 	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	req.Raw = raw
-	body, err := h.Exec.ReplacePlaylist(c.Request.Context(), id, &req)
+	body, err := h.Exec.ReplacePlaylist(c.Request.Context(), id, &req, intent)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -304,13 +304,13 @@ func (h *Handler) GetPlaylistGroup(c *gin.Context) {
 func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistGroupReplaceRequest
-	raw, err := bindDocument(c, &req)
+	raw, intent, err := bindSignedReplace(c, &req)
 	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	req.Raw = raw
-	body, err := h.Exec.ReplacePlaylistGroup(c.Request.Context(), id, &req)
+	body, err := h.Exec.ReplacePlaylistGroup(c.Request.Context(), id, &req, intent)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -415,13 +415,13 @@ func (h *Handler) GetChannel(c *gin.Context) {
 func (h *Handler) ReplaceChannel(c *gin.Context) {
 	id := c.Param("id")
 	var req models.ChannelReplaceRequest
-	raw, err := bindDocument(c, &req)
+	raw, intent, err := bindSignedReplace(c, &req)
 	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	req.Raw = raw
-	body, err := h.Exec.ReplaceChannel(c.Request.Context(), id, &req)
+	body, err := h.Exec.ReplaceChannel(c.Request.Context(), id, &req, intent)
 	if err != nil {
 		if executor.IsExtensionsDisabled(err) {
 			writeError(c.Writer, http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment")

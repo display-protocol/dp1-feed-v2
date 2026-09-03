@@ -29,9 +29,10 @@ var (
 	// ErrOwnerImmutable is returned when a replace would change the stored resource's owner set. Ownership
 	// is fixed at creation: the owner may change anything else, but not who the owner is.
 	ErrOwnerImmutable = errors.New("resource owner is immutable and cannot be changed")
-	// ErrDeleteRequestInvalid is returned when a signed delete-intent is malformed or does not match the
-	// resource it targets (wrong action, wrong target type, or id/slug that disagree with the stored row).
-	ErrDeleteRequestInvalid = errors.New("invalid delete request")
+	// ErrIntentInvalid is returned when a signed mutation intent is malformed or does not match what it
+	// claims to authorize: wrong action, wrong target type, id/slug that disagree with the stored row, or
+	// (for a replace) a payloadHash that is not the digest of the submitted document.
+	ErrIntentInvalid = errors.New("invalid mutation intent")
 	// ErrSlugRequired is returned when a create omits slug. The client signs over the document's slug, so
 	// the feed cannot derive or normalize one after signing without invalidating the signature.
 	ErrSlugRequired = errors.New("slug is required")
@@ -211,58 +212,94 @@ func sameKeySet(a, b map[string]struct{}) bool {
 	return true
 }
 
-// verifyDeleteIntent authorizes a DELETE. It checks the envelope (action + target identity), enforces the
-// freshness window on "created" (replay bound), verifies the signatures cryptographically over the intent
-// bytes, and finally requires a verifying signature from a stored owner key. ownerKeys are the stored
-// resource's owner kids; storedID/storedSlug/targetType pin the intent to this exact resource.
-func (e *impl) verifyDeleteIntent(req *models.SignedDeleteRequest, storedID uuid.UUID, storedSlug, targetType string, ownerKeys map[string]struct{}) error {
-	if req == nil || len(req.Raw) == 0 {
-		return fmt.Errorf("%w: missing signed body", ErrDeleteRequestInvalid)
+// verifyIntent authorizes a mutation of an existing resource against a signed intent.
+//
+// The intent is a document in its own right, so its `created` sits inside the bytes the signature covers
+// and cannot be rewritten on a replayed request — unlike the per-signature `ts`, which is not part of the
+// signing digest. That is what bounds replay here, and because the bound is wall-clock rather than
+// per-feed state, a stale intent is stale on every feed that mirrors the document.
+//
+// wantAction/targetType/storedID/storedSlug pin the intent to this exact operation and resource.
+// docRaw is the document the intent authorizes (replace) or nil (delete): when non-nil the intent must
+// name that document's signing digest in payloadHash, so a captured intent cannot install other content.
+// ownerKeys are the *stored* resource's owner kids.
+//
+// Checks run cheapest-first, and every failure mode is distinguishable by the caller: envelope mismatch
+// (400), stale/absent freshness (400), signature failure (400), non-owner signer (403).
+func (e *impl) verifyIntent(
+	intent *models.SignedIntent,
+	wantAction, targetType string,
+	storedID uuid.UUID,
+	storedSlug string,
+	ownerKeys map[string]struct{},
+	docRaw json.RawMessage,
+) error {
+	if intent == nil || len(intent.Raw) == 0 {
+		return fmt.Errorf("%w: missing signed authorization", ErrIntentInvalid)
 	}
-	if req.Action != models.DeleteAction {
-		return fmt.Errorf("%w: action must be %q", ErrDeleteRequestInvalid, models.DeleteAction)
+	if intent.Action != wantAction {
+		return fmt.Errorf("%w: action must be %q", ErrIntentInvalid, wantAction)
 	}
-	if req.Target.Type != targetType {
-		return fmt.Errorf("%w: target type %q does not match %q", ErrDeleteRequestInvalid, req.Target.Type, targetType)
+	if intent.Target.Type != targetType {
+		return fmt.Errorf("%w: target type %q does not match %q", ErrIntentInvalid, intent.Target.Type, targetType)
 	}
-	if strings.TrimSpace(req.Target.ID) != storedID.String() {
-		return fmt.Errorf("%w: target id %q does not match stored id %q", ErrDeleteRequestInvalid, req.Target.ID, storedID)
+	if strings.TrimSpace(intent.Target.ID) != storedID.String() {
+		return fmt.Errorf("%w: target id %q does not match stored id %q", ErrIntentInvalid, intent.Target.ID, storedID)
 	}
-	if req.Target.Slug != storedSlug {
-		return fmt.Errorf("%w: target slug %q does not match stored slug %q", ErrDeleteRequestInvalid, req.Target.Slug, storedSlug)
+	if intent.Target.Slug != storedSlug {
+		return fmt.Errorf("%w: target slug %q does not match stored slug %q", ErrIntentInvalid, intent.Target.Slug, storedSlug)
 	}
-	if err := e.requireFreshDeleteTimestamp(req.Created); err != nil {
+	if err := e.requireIntentBindsDocument(intent, docRaw); err != nil {
 		return err
 	}
-	if err := requireSignatures(req.Signatures); err != nil {
+	if err := e.requireFreshIntentTimestamp(intent.Created); err != nil {
+		return err
+	}
+	if err := requireSignatures(intent.Signatures); err != nil {
 		return err
 	}
 
-	ok, failed, err := e.dp1.VerifySignatures(req.Raw)
+	ok, failed, err := e.dp1.VerifySignatures(intent.Raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
 	}
 	if !ok {
-		failedKids := make([]string, 0, len(failed))
-		for _, sig := range failed {
-			failedKids = append(failedKids, sig.Kid)
-		}
-		return fmt.Errorf("%w: failed signatures: %v", ErrSignatureVerificationFailed, failedKids)
+		return signatureFailure(failed)
 	}
-	return requireStoredOwnerSignature(ownerKeys, req.Signatures)
+	return requireStoredOwnerSignature(ownerKeys, intent.Signatures)
 }
 
-// requireFreshDeleteTimestamp parses the intent's "created" and rejects it when it sits outside
-// ±deleteSkew of now. Bounding it in both directions caps replay of a captured delete after the same id
-// is re-created, and rejects clocks that are implausibly far ahead.
-func (e *impl) requireFreshDeleteTimestamp(created string) error {
+// requireIntentBindsDocument ties a replace intent to the exact document it authorizes. Without it a
+// captured intent for one document would authorize installing any other content the owner ever signed.
+// A delete intent has no document, and must not claim to bind one.
+func (e *impl) requireIntentBindsDocument(intent *models.SignedIntent, docRaw json.RawMessage) error {
+	if len(docRaw) == 0 {
+		if strings.TrimSpace(intent.PayloadHash) != "" {
+			return fmt.Errorf("%w: payloadHash is not accepted for this action", ErrIntentInvalid)
+		}
+		return nil
+	}
+	want, err := e.dp1.PayloadHash(docRaw)
+	if err != nil {
+		return fmt.Errorf("%w: cannot hash the submitted document: %w", ErrIntentInvalid, err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(intent.PayloadHash), want) {
+		return fmt.Errorf("%w: payloadHash %q does not match the submitted document (%s)", ErrIntentInvalid, intent.PayloadHash, want)
+	}
+	return nil
+}
+
+// requireFreshIntentTimestamp parses the intent's "created" and rejects it when it sits outside
+// ±intentSkew of now. Bounding it in both directions caps replay of a captured intent and rejects clocks
+// that are implausibly far ahead. The same window governs replace and delete.
+func (e *impl) requireFreshIntentTimestamp(created string) error {
 	t, err := time.Parse(time.RFC3339, strings.TrimSpace(created))
 	if err != nil {
 		return fmt.Errorf("%w: created must be RFC3339: %w", ErrInvalidTimestamp, err)
 	}
-	skew := e.deleteSkew
+	skew := e.intentSkew
 	if skew <= 0 {
-		skew = defaultDeleteSkew
+		skew = defaultIntentSkew
 	}
 	now := time.Now()
 	if t.Before(now.Add(-skew)) || t.After(now.Add(skew)) {
@@ -282,9 +319,9 @@ func IsForbiddenError(err error) bool {
 	return err != nil && (errors.Is(err, ErrNotResourceOwner) || errors.Is(err, ErrOwnerImmutable))
 }
 
-// IsDeleteRequestError reports whether err is a malformed/mismatched delete-intent (maps to 400 bad_request).
-func IsDeleteRequestError(err error) bool {
-	return err != nil && errors.Is(err, ErrDeleteRequestInvalid)
+// IsIntentError reports whether err is a malformed/mismatched signed mutation intent (400 bad_request).
+func IsIntentError(err error) bool {
+	return err != nil && errors.Is(err, ErrIntentInvalid)
 }
 
 // IsInvalidSubmissionError reports whether err is a client-correctable defect in a signed create/replace

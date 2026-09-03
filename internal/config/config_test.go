@@ -51,8 +51,8 @@ playlist:
 		t.Fatalf("signing key hex mismatch")
 	}
 	// Not set in yaml — the delete-intent freshness window keeps its default.
-	if cfg.Auth.DeleteMaxClockSkew != DefaultDeleteMaxClockSkew {
-		t.Fatalf("DeleteMaxClockSkew = %s, want default %s", cfg.Auth.DeleteMaxClockSkew, DefaultDeleteMaxClockSkew)
+	if cfg.Auth.IntentMaxClockSkew != DefaultIntentMaxClockSkew {
+		t.Fatalf("IntentMaxClockSkew = %s, want default %s", cfg.Auth.IntentMaxClockSkew, DefaultIntentMaxClockSkew)
 	}
 
 	priv, err := dp1svc.Ed25519PrivateKeyFromHex(testSeedHex)
@@ -81,7 +81,7 @@ playlist:
 func TestLoad_envOverrides(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://from-env/db")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
-	t.Setenv("DP1_FEED_DELETE_MAX_CLOCK_SKEW", "90s")
+	t.Setenv("DP1_FEED_INTENT_MAX_CLOCK_SKEW", "90s")
 	t.Setenv("DP1_FEED_SERVER_HOST", "10.0.0.1")
 	t.Setenv("DP1_FEED_SERVER_PORT", "12345")
 	t.Setenv("DP1_FEED_LOG_DEBUG", "true")
@@ -97,8 +97,8 @@ func TestLoad_envOverrides(t *testing.T) {
 	if cfg.Database.URL != "postgres://from-env/db" {
 		t.Fatalf("DATABASE_URL override: got %q", cfg.Database.URL)
 	}
-	if cfg.Auth.DeleteMaxClockSkew != 90*time.Second {
-		t.Fatalf("DELETE_MAX_CLOCK_SKEW override: got %s", cfg.Auth.DeleteMaxClockSkew)
+	if cfg.Auth.IntentMaxClockSkew != 90*time.Second {
+		t.Fatalf("INTENT_MAX_CLOCK_SKEW override: got %s", cfg.Auth.IntentMaxClockSkew)
 	}
 	if cfg.Server.Host != "10.0.0.1" || cfg.Server.Port != 12345 {
 		t.Fatalf("server override: host=%q port=%d", cfg.Server.Host, cfg.Server.Port)
@@ -182,14 +182,14 @@ func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
 	}
 }
 
-func TestLoad_invalidDeleteMaxClockSkewEnv(t *testing.T) {
+func TestLoad_invalidIntentMaxClockSkewEnv(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
-	t.Setenv("DP1_FEED_DELETE_MAX_CLOCK_SKEW", "not-a-duration")
+	t.Setenv("DP1_FEED_INTENT_MAX_CLOCK_SKEW", "not-a-duration")
 
 	_, err := Load("")
-	if err == nil || !strings.Contains(err.Error(), "delete max clock skew") {
-		t.Fatalf("Load error = %v, want delete max clock skew error", err)
+	if err == nil || !strings.Contains(err.Error(), "intent max clock skew") {
+		t.Fatalf("Load error = %v, want intent max clock skew error", err)
 	}
 }
 
@@ -476,18 +476,18 @@ playlist:
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if cfg.Auth.DeleteMaxClockSkew != DefaultDeleteMaxClockSkew {
-			t.Fatalf("DeleteMaxClockSkew = %s, want default %s", cfg.Auth.DeleteMaxClockSkew, DefaultDeleteMaxClockSkew)
+		if cfg.Auth.IntentMaxClockSkew != DefaultIntentMaxClockSkew {
+			t.Fatalf("IntentMaxClockSkew = %s, want default %s", cfg.Auth.IntentMaxClockSkew, DefaultIntentMaxClockSkew)
 		}
 	})
 
-	t.Run("negative_delete_max_clock_skew", func(t *testing.T) {
+	t.Run("negative_intent_max_clock_skew", func(t *testing.T) {
 		path := filepath.Join(dir, "neg-skew.yaml")
 		yaml := strings.TrimSpace(`
 database:
   url: postgres://x
 auth:
-  delete_max_clock_skew: -1s
+  intent_max_clock_skew: -1s
 playlist:
   signing_key_hex: "` + testSeedHex + `"
 `)
@@ -495,7 +495,7 @@ playlist:
 			t.Fatal(err)
 		}
 		_, err := Load(path)
-		if err == nil || !strings.Contains(err.Error(), "delete max clock skew must not be negative") {
+		if err == nil || !strings.Contains(err.Error(), "intent max clock skew must not be negative") {
 			t.Fatalf("Load error = %v, want negative skew error", err)
 		}
 	})

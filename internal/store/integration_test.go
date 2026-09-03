@@ -2136,3 +2136,41 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 		t.Fatalf("delete of missing row: want ErrNotFound, got %v", err)
 	}
 }
+
+// TestIntegration_Tombstone_blocksIDReuse pins the resurrect defence.
+//
+// Create is intentionally open, so nothing stops someone re-POSTing a document they saw earlier — its
+// owner signatures are public and still valid. Retiring the id on delete is what makes that replay fail,
+// and it works because `id` is inside the signed payload and so cannot be rewritten on a replayed body.
+func TestIntegration_Tombstone_blocksIDReuse(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	id := uuid.MustParse("cccccccc-cccc-cccc-cccc-ccccccccccc1")
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "tombstone me",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+	if err := st.CreatePlaylist(ctx, id, "tombstone-playlist", rawDoc(t, &pl)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String())); err != nil {
+		t.Fatalf("DeletePlaylist: %v", err)
+	}
+
+	// Replaying the same document (same id) must not resurrect the resource, even under a different slug.
+	err := st.CreatePlaylist(ctx, id, "tombstone-playlist-again", rawDoc(t, &pl))
+	if !errors.Is(err, store.ErrDocumentDeleted) {
+		t.Fatalf("re-create of a deleted id: want ErrDocumentDeleted, got %v", err)
+	}
+	if _, err := st.GetPlaylist(ctx, id.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("resource must stay deleted, got %v", err)
+	}
+
+	// A genuine re-publish under a fresh id is unaffected.
+	newID := uuid.MustParse("cccccccc-cccc-cccc-cccc-ccccccccccc2")
+	if err := st.CreatePlaylist(ctx, newID, "tombstone-playlist-new", rawDoc(t, &pl)); err != nil {
+		t.Fatalf("create under a new id must succeed: %v", err)
+	}
+}

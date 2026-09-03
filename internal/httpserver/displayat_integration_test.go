@@ -52,7 +52,7 @@ func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
 	putDoc := baseDoc("Daily displayAt replaced", playlist.PlaylistItem{
 		ID: item2ID.String(), Source: "https://cdn.example.com/day-2.html", DisplayAt: &putDisplayAt,
 	})
-	replacedPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedPlaylistBody(t, priv, putDoc), http.StatusOK)
+	replacedPlaylist := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedReplaceEnvelope(t, priv, "playlist", putDoc.ID, putDoc.Slug, signedPlaylistBody(t, priv, putDoc)), http.StatusOK)
 	assertPlaylistDisplayAt(t, "PUT response", replacedPlaylist, item2ID, putDisplayAt)
 	assertIndexedItemDisplayAt(t, srv, item2ID, putDisplayAt)
 
@@ -61,7 +61,7 @@ func TestIntegration_DisplayAtHTTPRoundTrip(t *testing.T) {
 	put2Doc := baseDoc("Daily displayAt replaced again", playlist.PlaylistItem{
 		ID: item3ID.String(), Source: "https://cdn.example.com/day-3.html", DisplayAt: &put2DisplayAt,
 	})
-	replacedAgain := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedPlaylistBody(t, priv, put2Doc), http.StatusOK)
+	replacedAgain := mustDoPlaylistJSON(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedReplaceEnvelope(t, priv, "playlist", put2Doc.ID, put2Doc.Slug, signedPlaylistBody(t, priv, put2Doc)), http.StatusOK)
 	assertPlaylistDisplayAt(t, "second PUT response", replacedAgain, item3ID, put2DisplayAt)
 	assertListPlaylistDisplayAt(t, srv, item3ID, put2DisplayAt)
 	assertIndexedItemDisplayAt(t, srv, item3ID, put2DisplayAt)
