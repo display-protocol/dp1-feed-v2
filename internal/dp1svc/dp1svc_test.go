@@ -99,6 +99,68 @@ func TestVerifyPlaylistSignatures(t *testing.T) {
 	})
 }
 
+// TestVerifySignatures covers the schema-agnostic verifier used to authorize signed delete-intents.
+func TestVerifySignatures(t *testing.T) {
+	t.Parallel()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := sign.Ed25519DIDKey(priv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(testSeedHex, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_signature", func(t *testing.T) {
+		t.Parallel()
+		// A signed delete-intent-shaped payload (not a playlist) still verifies via the generic path.
+		intent := map[string]any{
+			"action":  "delete",
+			"target":  map[string]any{"type": "playlist", "id": "id-1", "slug": "s-1"},
+			"created": "2025-06-01T12:00:00Z",
+		}
+		raw, err := json.Marshal(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sig, err := sign.SignMultiEd25519(raw, priv, playlist.RoleCurator, "2025-06-01T12:00:00Z")
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent["signatures"] = []playlist.Signature{sig}
+		signed, err := json.Marshal(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, failed, err := svc.VerifySignatures(signed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok || len(failed) != 0 {
+			t.Fatalf("expected ok=true no failures, got ok=%v failed=%v", ok, failed)
+		}
+	})
+
+	t.Run("no_signatures", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := svc.VerifySignatures([]byte(`{"action":"delete"}`))
+		if err == nil || !errors.Is(err, sign.ErrNoSignatures) {
+			t.Fatalf("expected ErrNoSignatures, got: %v", err)
+		}
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := svc.VerifySignatures([]byte(`{invalid`)); err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
 func TestVerifyPlaylistGroupSignatures(t *testing.T) {
 	t.Parallel()
 	_, priv, err := ed25519.GenerateKey(nil)

@@ -916,6 +916,54 @@ func TestDeletePlaylist(t *testing.T) {
 	}
 }
 
+// TestDeletePlaylist_forbidden covers the delete handler mapping an ownership failure to 403.
+func TestDeletePlaylist_forbidden(t *testing.T) {
+	playlistID := uuid.New().String()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	mockExec.EXPECT().
+		DeletePlaylist(gomock.Any(), playlistID, gomock.Any()).
+		Return(executor.ErrNotResourceOwner)
+
+	h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.DeleteTargetPlaylist, playlistID, "slug"))
+	c.Params = gin.Params{{Key: "id", Value: playlistID}}
+
+	h.DeletePlaylist(c)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "forbidden", resp.Error)
+}
+
+// TestDeletePlaylist_malformedBody covers the delete handler rejecting an unparseable body with 400,
+// before the executor is called.
+func TestDeletePlaylist_malformedBody(t *testing.T) {
+	playlistID := uuid.New().String()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl) // no DeletePlaylist call expected
+
+	h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, bytes.NewReader([]byte(`{invalid`)))
+	c.Params = gin.Params{{Key: "id", Value: playlistID}}
+
+	h.DeletePlaylist(c)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "bad_request", resp.Error)
+}
+
 func TestListPlaylistGroups(t *testing.T) {
 	tests := []struct {
 		name           string

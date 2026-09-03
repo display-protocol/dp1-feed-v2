@@ -182,6 +182,17 @@ func TestLoad_invalidNotificationClientsEnv(t *testing.T) {
 	}
 }
 
+func TestLoad_invalidDeleteMaxClockSkewEnv(t *testing.T) {
+	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
+	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)
+	t.Setenv("DP1_FEED_DELETE_MAX_CLOCK_SKEW", "not-a-duration")
+
+	_, err := Load("")
+	if err == nil || !strings.Contains(err.Error(), "delete max clock skew") {
+		t.Fatalf("Load error = %v, want delete max clock skew error", err)
+	}
+}
+
 func TestLoad_invalidNotificationClient(t *testing.T) {
 	t.Setenv("DP1_FEED_DATABASE_URL", "postgres://x")
 	t.Setenv("DP1_FEED_SIGNING_KEY_HEX", testSeedHex)

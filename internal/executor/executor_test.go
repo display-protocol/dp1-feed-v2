@@ -774,6 +774,176 @@ func TestDeletePlaylist_staleTimestamp(t *testing.T) {
 	}
 }
 
+// storedOwnedPlaylist is the stored record the delete-branch tests target (owner = testCuratorKid).
+func storedOwnedPlaylist(id uuid.UUID) *store.PlaylistRecord {
+	body := playlist.Playlist{ID: id.String(), Slug: "id-1", Curators: []identity.Entity{{Key: testCuratorKid}}}
+	return &store.PlaylistRecord{ID: id, Slug: "id-1", Body: body}
+}
+
+func TestDeletePlaylist_wrongAction(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req.Action = "nuke"
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsDeleteRequestError(err) {
+		t.Fatalf("want delete-request error (bad action), got %v", err)
+	}
+}
+
+func TestDeletePlaylist_wrongTargetType(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetChannel, id.String(), "id-1", testCuratorKid)
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsDeleteRequestError(err) {
+		t.Fatalf("want delete-request error (wrong target type), got %v", err)
+	}
+}
+
+func TestDeletePlaylist_missingSignatures(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req.Signatures = nil
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsSignaturesRequiredError(err) {
+		t.Fatalf("want signatures-required error, got %v", err)
+	}
+}
+
+func TestDeletePlaylist_malformedCreated(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req.Created = "nope"
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid-timestamp error (malformed created), got %v", err)
+	}
+}
+
+func TestDeletePlaylist_futureTimestamp(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "", executor.WithDeleteClockSkew(time.Minute))
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	req.Created = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsInvalidTimestampError(err) {
+		t.Fatalf("want invalid-timestamp error (future), got %v", err)
+	}
+}
+
+func TestDeletePlaylist_verifyError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (verify err), got %v", err)
+	}
+}
+
+func TestDeletePlaylist_verifyFalse(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+	mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := deleteReq(models.DeleteTargetPlaylist, id.String(), "id-1", testCuratorKid)
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (ok=false), got %v", err)
+	}
+}
+
+func TestDeletePlaylist_missingRaw(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "id-1").Return(storedOwnedPlaylist(id), nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	// No Raw set: verifyDeleteIntent rejects a delete-intent whose signed bytes were not captured.
+	req := &models.SignedDeleteRequest{
+		Action:     models.DeleteAction,
+		Target:     models.DeleteTarget{Type: models.DeleteTargetPlaylist, ID: id.String(), Slug: "id-1"},
+		Created:    time.Now().UTC().Format(time.RFC3339),
+		Signatures: []playlist.Signature{testSig(testCuratorKid)},
+	}
+	if err := e.DeletePlaylist(context.Background(), "id-1", req); !executor.IsDeleteRequestError(err) {
+		t.Fatalf("want delete-request error (missing raw), got %v", err)
+	}
+}
+
+// TestReplacePlaylist_verifyCryptoFails covers the signatureFailure path when a signature does not verify.
+func TestReplacePlaylist_verifyCryptoFails(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(storedPlaylistRecord(t, id, "keep-me"), nil)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(false, []playlist.Signature{{Kid: "x"}}, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (ok=false), got %v", err)
+	}
+}
+
+// TestReplacePlaylist_verifyCryptoError covers the verify-returns-error branch on replace.
+func TestReplacePlaylist_verifyCryptoError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(storedPlaylistRecord(t, id, "keep-me"), nil)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(false, nil, errors.New("boom"))
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", validCreateReq()); !executor.IsSignatureVerificationError(err) {
+		t.Fatalf("want signature-verification error (verify err), got %v", err)
+	}
+}
+
 func TestReplacePlaylist_success(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
