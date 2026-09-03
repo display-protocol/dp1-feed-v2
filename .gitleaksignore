@@ -1,0 +1,11 @@
+# Gitleaks fingerprints for confirmed false positives (see .gitleaks.toml for rule-level allowlists).
+#
+# Each entry is commit:file:rule:line. Fingerprints pin a single historical occurrence, so they cannot
+# mask a future real secret the way a broad regex allowlist could. Only add one after confirming the
+# match is not a credential.
+#
+# generic-api-key matched documentation prose, not a secret: the sentence read "a verifying signature
+# from a stored owner key is required, curators/publisher may not change", and the rule treats a
+# high-entropy token following the word "key" as a value. The wording was changed in a later commit, but
+# gitleaks scans history, so the original commit still needs this entry.
+16137f475dff0db0ef299e7ccb5deb5a3393ab77:.cursor/rules/21-api-design-tbd.mdc:generic-api-key:41
