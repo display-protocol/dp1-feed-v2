@@ -173,6 +173,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /api/v1/playlists/{id}:
     get:
@@ -338,6 +340,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /api/v1/playlist-groups/{id}:
     get:
@@ -504,6 +508,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '404':
           $ref: '#/components/responses/ExtensionsDisabled'
 
@@ -1393,15 +1399,28 @@ components:
 
     Conflict:
       description: >-
-        The stored document carries signatures from keys other than the feed's, so an API-key replace or
-        a PATCH would invalidate them. Replace it with a fully signed document instead.
+        A conflict the client can resolve and retry. One of: (a) the stored document carries signatures
+        from keys other than the feed's, so an API-key replace/PATCH would invalidate them — replace it
+        with a fully signed document instead; (b) the `slug` is already used by another document of the
+        same kind (on create); (c) the document was modified concurrently (an update's `updated_at` no
+        longer matches) — re-read and retry.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error: conflict
-            message: document carries signatures from other keys and can only be replaced by a fully signed document
+          examples:
+            foreignSignatures:
+              value:
+                error: conflict
+                message: document carries signatures from other keys and can only be replaced by a fully signed document
+            slugInUse:
+              value:
+                error: conflict
+                message: 'insert playlist: slug already in use'
+            concurrentModification:
+              value:
+                error: conflict
+                message: the document was modified concurrently; re-read and retry
 
     NotFound:
       description: Resource not found

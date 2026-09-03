@@ -110,35 +110,36 @@ func (s *Store) Ping(ctx context.Context) error {
 //
 // Process: insert the playlist row, then derive playlist_item_index rows from body.items
 // (array index → position). Missing or non-array "items" yields no index rows; each item needs a UUID "id".
-func (s *Store) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error {
+func (s *Store) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) (json.RawMessage, error) {
 	const insertPlaylist = `
 INSERT INTO playlists (id, slug, body)
 VALUES ($1, $2, $3::jsonb)
-RETURNING created_at`
+RETURNING created_at, body`
 
 	if err := requireDocument(raw, "playlist body"); err != nil {
-		return err
+		return nil, err
 	}
 	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	// Commit succeeds → Rollback becomes no-op. On failure, Rollback aborts the tx.
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var createdAt time.Time
-	if err := tx.QueryRow(ctx, insertPlaylist, id, slug, bodyJSON).Scan(&createdAt); err != nil {
-		return wrapWriteError("insert playlist", err)
+	var stored json.RawMessage
+	if err := tx.QueryRow(ctx, insertPlaylist, id, slug, bodyJSON).Scan(&createdAt, &stored); err != nil {
+		return nil, wrapWriteError("insert playlist", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, id, bodyJSON, createdAt); err != nil {
-		return fmt.Errorf("insert playlist_item_index: %w", err)
+		return nil, fmt.Errorf("insert playlist_item_index: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // GetPlaylist implements store.Store.
@@ -462,23 +463,23 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
 // The slug column follows the document's "slug" when present, so the row is addressable by the slug it
 // serves; a document without a slug keeps the row's.
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) (json.RawMessage, error) {
 	const (
 		updateByID = `UPDATE playlists
 SET body = $2::jsonb
-WHERE id = $1 AND updated_at = $3 RETURNING created_at`
+WHERE id = $1 AND updated_at = $3 RETURNING created_at, body`
 		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
 
 	if err := requireDocument(raw, "playlist body"); err != nil {
-		return err
+		return nil, err
 	}
 	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -488,30 +489,31 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 	} else {
 		if err := tx.QueryRow(ctx, selectIDBySlug, idOrSlug).Scan(&rowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
+				return nil, fmt.Errorf("%w", store.ErrNotFound)
 			}
-			return fmt.Errorf("lookup playlist slug: %w", err)
+			return nil, fmt.Errorf("lookup playlist slug: %w", err)
 		}
 	}
 
 	var playlistCreatedAt time.Time
-	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt)
+	var stored json.RawMessage
+	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt, &stored)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return classifyMissingUpdate(ctx, tx, "playlists", rowID)
+			return nil, classifyMissingUpdate(ctx, tx, "playlists", rowID)
 		}
-		return wrapWriteError("update playlist", err)
+		return nil, wrapWriteError("update playlist", err)
 	}
 	if _, err := tx.Exec(ctx, clearItemIndex, rowID); err != nil {
-		return fmt.Errorf("clear playlist_item_index: %w", err)
+		return nil, fmt.Errorf("clear playlist_item_index: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, rowID, bodyJSON, playlistCreatedAt); err != nil {
-		return fmt.Errorf("insert playlist_item_index: %w", err)
+		return nil, fmt.Errorf("insert playlist_item_index: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // DeletePlaylist implements store.Store.
@@ -624,42 +626,44 @@ FROM unnest($2::uuid[]) WITH ORDINALITY AS x(playlist_id, ord)`
 // CreatePlaylistGroup implements store.Store.
 //
 // Process (single tx): batch-upsert all referenced playlists, insert the group row, and create membership (delete not needed - new group).
-func (s *Store) CreatePlaylistGroup(ctx context.Context, in *store.PlaylistGroupInput) error {
+func (s *Store) CreatePlaylistGroup(ctx context.Context, in *store.PlaylistGroupInput) (json.RawMessage, error) {
 	const insertGroup = `
 INSERT INTO playlist_groups (id, slug, body)
-VALUES ($1, $2, $3::jsonb)`
+VALUES ($1, $2, $3::jsonb)
+RETURNING body`
 
 	if in == nil {
-		return fmt.Errorf("nil playlist group input")
+		return nil, fmt.Errorf("nil playlist group input")
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
+		return nil, fmt.Errorf("upsert playlists: %w", err)
 	}
 
 	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
-		return err
+		return nil, err
 	}
 	groupJSON := []byte(in.Raw)
 
-	if _, err := tx.Exec(ctx, insertGroup, in.ID, in.Slug, groupJSON); err != nil {
-		return wrapWriteError("insert playlist_group", err)
+	var stored json.RawMessage
+	if err := tx.QueryRow(ctx, insertGroup, in.ID, in.Slug, groupJSON).Scan(&stored); err != nil {
+		return nil, wrapWriteError("insert playlist_group", err)
 	}
 
 	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
-		return fmt.Errorf("insert playlist_group_members: %w", err)
+		return nil, fmt.Errorf("insert playlist_group_members: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // GetPlaylistGroup implements store.Store.
@@ -766,22 +770,22 @@ LIMIT $1`
 
 // UpdatePlaylistGroup implements store.Store (updated_at set by trigger; membership replaced).
 //
-// Process (single tx): batch-upsert all referenced playlists, update the group body (slug column follows
-// the document's slug, see UpdatePlaylist), clear and rebuild membership.
-func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
+// Process (single tx): batch-upsert all referenced playlists, update the group body (slug column
+// unchanged, see UpdatePlaylist), clear and rebuild membership.
+func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) (json.RawMessage, error) {
 	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb WHERE id = $1 AND updated_at = $3`
+		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb WHERE id = $1 AND updated_at = $3 RETURNING body`
 		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
 		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
 	)
 
 	if in == nil {
-		return fmt.Errorf("nil playlist group input")
+		return nil, fmt.Errorf("nil playlist group input")
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -792,43 +796,44 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	} else {
 		if err := tx.QueryRow(ctx, selectIDBySlug, idOrSlug).Scan(&rowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
+				return nil, fmt.Errorf("%w", store.ErrNotFound)
 			}
-			return fmt.Errorf("lookup playlist_group slug: %w", err)
+			return nil, fmt.Errorf("lookup playlist_group slug: %w", err)
 		}
 	}
 
 	// Upsert playlists
 	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
+		return nil, fmt.Errorf("upsert playlists: %w", err)
 	}
 
 	// Update group body
 	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
-		return err
+		return nil, err
 	}
 	groupJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON, expectedUpdatedAt)
+	var stored json.RawMessage
+	err = tx.QueryRow(ctx, updateByID, rowID, groupJSON, expectedUpdatedAt).Scan(&stored)
 	if err != nil {
-		return wrapWriteError("update playlist_group", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return classifyMissingUpdate(ctx, tx, "playlist_groups", rowID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, classifyMissingUpdate(ctx, tx, "playlist_groups", rowID)
+		}
+		return nil, wrapWriteError("update playlist_group", err)
 	}
 
 	// Replace membership
 	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
-		return fmt.Errorf("clear playlist_group_members: %w", err)
+		return nil, fmt.Errorf("clear playlist_group_members: %w", err)
 	}
 	if err := insertPlaylistGroupMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
-		return fmt.Errorf("insert playlist_group_members: %w", err)
+		return nil, fmt.Errorf("insert playlist_group_members: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // ListPlaylistsInGroup implements store.Store.
@@ -933,42 +938,44 @@ FROM unnest($2::uuid[]) WITH ORDINALITY AS x(playlist_id, ord)`
 // CreateChannel implements store.Store.
 //
 // Process mirrors CreatePlaylistGroup: batch-upsert playlists, insert channel row, create channel_members from slice order.
-func (s *Store) CreateChannel(ctx context.Context, in *store.ChannelInput) error {
+func (s *Store) CreateChannel(ctx context.Context, in *store.ChannelInput) (json.RawMessage, error) {
 	const insertChannel = `
 INSERT INTO channels (id, slug, body)
-VALUES ($1, $2, $3::jsonb)`
+VALUES ($1, $2, $3::jsonb)
+RETURNING body`
 
 	if in == nil {
-		return fmt.Errorf("nil channel input")
+		return nil, fmt.Errorf("nil channel input")
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
+		return nil, fmt.Errorf("upsert playlists: %w", err)
 	}
 
 	if err := requireDocument(in.Raw, "channel body"); err != nil {
-		return err
+		return nil, err
 	}
 	chJSON := []byte(in.Raw)
 
-	if _, err := tx.Exec(ctx, insertChannel, in.ID, in.Slug, chJSON); err != nil {
-		return wrapWriteError("insert channel", err)
+	var stored json.RawMessage
+	if err := tx.QueryRow(ctx, insertChannel, in.ID, in.Slug, chJSON).Scan(&stored); err != nil {
+		return nil, wrapWriteError("insert channel", err)
 	}
 
 	if err := insertChannelMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
-		return fmt.Errorf("insert channel_members: %w", err)
+		return nil, fmt.Errorf("insert channel_members: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // GetChannel implements store.Store.
@@ -1075,22 +1082,22 @@ LIMIT $1`
 
 // UpdateChannel implements store.Store (updated_at set by trigger; membership replaced).
 //
-// Process (single tx): batch-upsert all referenced playlists, update the channel body (slug column follows
-// the document's slug, see UpdatePlaylist), clear and rebuild membership.
-func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) error {
+// Process (single tx): batch-upsert all referenced playlists, update the channel body (slug column
+// unchanged, see UpdatePlaylist), clear and rebuild membership.
+func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) (json.RawMessage, error) {
 	const (
-		updateByID     = `UPDATE channels SET body = $2::jsonb WHERE id = $1 AND updated_at = $3`
+		updateByID     = `UPDATE channels SET body = $2::jsonb WHERE id = $1 AND updated_at = $3 RETURNING body`
 		selectIDBySlug = `SELECT id FROM channels WHERE slug = $1`
 		clearMembers   = `DELETE FROM channel_members WHERE channel_id = $1`
 	)
 
 	if in == nil {
-		return fmt.Errorf("nil channel input")
+		return nil, fmt.Errorf("nil channel input")
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -1101,43 +1108,44 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	} else {
 		if err := tx.QueryRow(ctx, selectIDBySlug, idOrSlug).Scan(&rowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
+				return nil, fmt.Errorf("%w", store.ErrNotFound)
 			}
-			return fmt.Errorf("lookup channel slug: %w", err)
+			return nil, fmt.Errorf("lookup channel slug: %w", err)
 		}
 	}
 
 	// Upsert playlists
 	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
+		return nil, fmt.Errorf("upsert playlists: %w", err)
 	}
 
 	// Update channel body
 	if err := requireDocument(in.Raw, "channel body"); err != nil {
-		return err
+		return nil, err
 	}
 	chJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON, expectedUpdatedAt)
+	var stored json.RawMessage
+	err = tx.QueryRow(ctx, updateByID, rowID, chJSON, expectedUpdatedAt).Scan(&stored)
 	if err != nil {
-		return wrapWriteError("update channel", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return classifyMissingUpdate(ctx, tx, "channels", rowID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, classifyMissingUpdate(ctx, tx, "channels", rowID)
+		}
+		return nil, wrapWriteError("update channel", err)
 	}
 
 	// Replace membership
 	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
-		return fmt.Errorf("clear channel_members: %w", err)
+		return nil, fmt.Errorf("clear channel_members: %w", err)
 	}
 	if err := insertChannelMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
-		return fmt.Errorf("insert channel_members: %w", err)
+		return nil, fmt.Errorf("insert channel_members: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // ListPlaylistsInChannel implements store.Store.

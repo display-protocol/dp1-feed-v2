@@ -178,8 +178,8 @@ Clients should branch on **`error`** (stable) and treat **`message`** as diagnos
 
 - The API does **not** define **`Idempotency-Key`** or similar headers.
 - **GET** and **DELETE** are safe to retry with usual caveats (delete twice may 404).
-- **POST** creates a new resource; retries may create duplicates unless the client deduplicates.
-- **PUT/PATCH** are last-write-wins; retries should send the same body if the intent is to repeat the same mutation.
+- **POST** creates a new resource; retries may create duplicates unless the client deduplicates. A `slug` already used by another document of the same kind returns **`409` `conflict`**.
+- **PUT/PATCH** use optimistic concurrency: each update is conditional on the `updated_at` the server read for the resource, so a write that races another committed write returns **`409` `conflict`** rather than overwriting it. To retry, **re-read** the resource (GET) and re-apply the change to the current version; blind retries of the same body will keep conflicting.
 
 Document any future idempotency strategy in OpenAPI and here before implementing.
 

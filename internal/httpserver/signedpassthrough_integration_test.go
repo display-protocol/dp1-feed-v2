@@ -556,3 +556,28 @@ func replaceOnce(s, old, repl string) string {
 	}
 	return s
 }
+
+// TestIntegration_WriteResponseMatchesGet: a write response returns the persisted (jsonb) bytes, so it
+// is byte-identical to a subsequent GET. Before, the write returned the pre-store signed bytes whose
+// key order differed from jsonb's, so POST and GET disagreed byte-for-byte despite being JCS-equivalent.
+func TestIntegration_WriteResponseMatchesGet(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	// API-key create: exercises the JSONB key reordering that made the two representations differ.
+	post := map[string]any{
+		"dpVersion": "1.1.0", "slug": "persisted", "title": "Persisted",
+		"summary": "s", "coverImage": "https://cdn.example.com/c.png",
+		"items": []map[string]any{{"id": "c3c3c3c3-2222-4333-8444-555555555555", "source": "https://cdn.example.com/a.html"}},
+	}
+	createResp := mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", post, http.StatusCreated)
+	getResp := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/persisted", nil, http.StatusOK)
+	if !bytes.Equal(createResp, getResp) {
+		t.Fatalf("POST response must be byte-identical to GET:\n POST=%s\n GET =%s", createResp, getResp)
+	}
+
+	patchResp := mustDoRaw(t, srv, http.MethodPatch, "/api/v1/playlists/persisted", map[string]any{"title": "Persisted v2"}, http.StatusOK)
+	getResp2 := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/persisted", nil, http.StatusOK)
+	if !bytes.Equal(patchResp, getResp2) {
+		t.Fatalf("PATCH response must be byte-identical to GET:\n PATCH=%s\n GET  =%s", patchResp, getResp2)
+	}
+}

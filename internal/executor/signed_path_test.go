@@ -269,7 +269,7 @@ func TestSlugTargetedWrites_useResolvedID(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "x"}, nil)
-		st.EXPECT().UpdatePlaylist(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil)
+		st.EXPECT().UpdatePlaylist(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil, nil)
 		e := executor.New(st, m, false, nil, "")
 		if _, err := e.UpdatePlaylist(context.Background(), "moving", &models.PlaylistUpdateRequest{Title: &title}); err != nil {
 			t.Fatal(err)
@@ -286,7 +286,7 @@ func TestSlugTargetedWrites_useResolvedID(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylistGroup(signed).Return(&playlistgroup.Group{Title: "x"}, nil)
-		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil)
+		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil, nil)
 		e := executor.New(st, m, false, nil, testPublicBase)
 		if _, err := e.UpdatePlaylistGroup(context.Background(), "moving", &models.PlaylistGroupUpdateRequest{Title: &title}); err != nil {
 			t.Fatal(err)
@@ -316,7 +316,7 @@ func TestUpdate_passesReadUpdatedAtAndSurfacesConflict(t *testing.T) {
 		m.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "x"}, nil)
 		// The store must receive exactly the updated_at that was read, and its conflict must propagate.
-		st.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), readAt).Return(store.ErrConcurrentModification)
+		st.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), readAt).Return(nil, store.ErrConcurrentModification)
 		e := executor.New(st, m, false, nil, "")
 		title := "x"
 		_, err := e.UpdatePlaylist(context.Background(), "p", &models.PlaylistUpdateRequest{Title: &title})
@@ -338,7 +338,7 @@ func TestUpdate_passesReadUpdatedAtAndSurfacesConflict(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidateChannel(signed).Return(&channels.Channel{Title: "x"}, nil)
-		st.EXPECT().UpdateChannel(gomock.Any(), gomock.Any(), gomock.Any(), readAt).Return(store.ErrConcurrentModification)
+		st.EXPECT().UpdateChannel(gomock.Any(), gomock.Any(), gomock.Any(), readAt).Return(nil, store.ErrConcurrentModification)
 		e := executor.New(st, m, true, nil, testPublicBase)
 		_, err := e.ReplaceChannel(context.Background(), "c", &models.ChannelReplaceRequest{Title: "x", Playlists: []string{localPlaylistRef("pl")}})
 		if !errors.Is(err, store.ErrConcurrentModification) {

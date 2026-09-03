@@ -326,10 +326,11 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.CreatePlaylist(ctx, id, slug, signed); err != nil {
+	stored, err := e.store.CreatePlaylist(ctx, id, slug, signed)
+	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistRecord{ID: id, Slug: slug, Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: id, Slug: slug, Raw: stored, Body: *pl}, nil
 }
 
 // createSignedPlaylist is the signed-document path for POST: verify the curator signatures over the
@@ -349,10 +350,11 @@ func (e *impl) createSignedPlaylist(ctx context.Context, req *models.PlaylistCre
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.CreatePlaylist(ctx, si.id, si.slug, signed); err != nil {
+	stored, err := e.store.CreatePlaylist(ctx, si.id, si.slug, signed)
+	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistRecord{ID: si.id, Slug: si.slug, Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: si.id, Slug: si.slug, Raw: stored, Body: *pl}, nil
 }
 
 // signAndValidatePlaylist appends the feed signature and validates the result (core or core+extension).
@@ -519,10 +521,11 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 	// The store rebuilds playlist_item_index from items[] in the same transaction.
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
+	stored, err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt)
+	if err != nil {
 		return nil, err
 	}
-	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *pl}, nil
 }
 
 // replaceSignedPlaylist is the signed-document path for PUT (see createSignedPlaylist).
@@ -544,10 +547,11 @@ func (e *impl) replaceSignedPlaylist(ctx context.Context, rec *store.PlaylistRec
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
+	stored, err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt)
+	if err != nil {
 		return nil, err
 	}
-	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *pl}, nil
 }
 
 // UpdatePlaylist performs a partial update (API-key path only): merges non-nil fields from req with the
@@ -624,10 +628,11 @@ func (e *impl) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
+	stored, err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt)
+	if err != nil {
 		return nil, err
 	}
-	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
+	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *pl}, nil
 }
 
 // DeletePlaylist removes a playlist.
@@ -734,10 +739,11 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 		if err != nil {
 			return nil, err
 		}
-		if err := e.store.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: si.id, Slug: si.slug, Raw: signed, Playlists: ingested}); err != nil {
+		stored, err := e.store.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: si.id, Slug: si.slug, Raw: signed, Playlists: ingested})
+		if err != nil {
 			return nil, fmt.Errorf("store: %w", err)
 		}
-		return &store.PlaylistGroupRecord{ID: si.id, Slug: si.slug, Raw: signed, Body: *group}, nil
+		return &store.PlaylistGroupRecord{ID: si.id, Slug: si.slug, Raw: stored, Body: *group}, nil
 	}
 
 	// API-key path.
@@ -758,10 +764,11 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: id, Slug: slug, Raw: signed, Playlists: ingested}); err != nil {
+	stored, err := e.store.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: id, Slug: slug, Raw: signed, Playlists: ingested})
+	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistGroupRecord{ID: id, Slug: slug, Raw: signed, Body: *group}, nil
+	return &store.PlaylistGroupRecord{ID: id, Slug: slug, Raw: stored, Body: *group}, nil
 }
 
 // GetPlaylistGroup returns the stored playlist-group for id or slug.
@@ -809,10 +816,11 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		if err != nil {
 			return nil, err
 		}
-		if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
+		stored, err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+		if err != nil {
 			return nil, fmt.Errorf("store: %w", err)
 		}
-		return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
+		return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *group}, nil
 	}
 
 	// API-key path.
@@ -832,10 +840,11 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
+	stored, err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
+	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *group}, nil
 }
 
 // UpdatePlaylistGroup performs a partial update (API-key path only): merges non-nil fields from req with
@@ -903,10 +912,11 @@ func (e *impl) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return nil, err
 	}
-	if err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt); err != nil {
+	stored, err := e.store.UpdatePlaylistGroup(ctx, rec.ID.String(), &store.PlaylistGroupInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
+	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *group}, nil
 }
 
 // DeletePlaylistGroup removes a playlist-group.
@@ -1013,13 +1023,16 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 		}
 	}
 
+	var stored json.RawMessage
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.CreateChannel(mutationCtx, &store.ChannelInput{ID: id, Slug: slug, Raw: signed, Playlists: ingested})
+		var cerr error
+		stored, cerr = e.store.CreateChannel(mutationCtx, &store.ChannelInput{ID: id, Slug: slug, Raw: signed, Playlists: ingested})
+		return cerr
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	e.notifyChannel(ctx, notification.ChannelAdded, id)
-	return &store.ChannelRecord{ID: id, Slug: slug, Raw: signed, Body: *ch}, nil
+	return &store.ChannelRecord{ID: id, Slug: slug, Raw: stored, Body: *ch}, nil
 }
 
 // GetChannel returns the stored channel for id or slug.
@@ -1098,13 +1111,16 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	}
 
 	// Write by UUID so the committed row and the notification identity cannot diverge on slug reuse.
+	var stored json.RawMessage
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+		var cerr error
+		stored, cerr = e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+		return cerr
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
-	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *ch}, nil
+	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *ch}, nil
 }
 
 // UpdateChannel performs a partial update (API-key path only): merges non-nil fields from req with the
@@ -1184,13 +1200,16 @@ func (e *impl) UpdateChannel(ctx context.Context, idOrSlug string, req *models.C
 	if err != nil {
 		return nil, err
 	}
+	var stored json.RawMessage
 	if err := e.runChannelMutation(ctx, func(mutationCtx context.Context) error {
-		return e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+		var cerr error
+		stored, cerr = e.store.UpdateChannel(mutationCtx, rec.ID.String(), &store.ChannelInput{Raw: signed, Playlists: ingested}, rec.UpdatedAt)
+		return cerr
 	}); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	e.notifyChannel(ctx, notification.ChannelUpdated, rec.ID)
-	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *ch}, nil
+	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: stored, Body: *ch}, nil
 }
 
 // DeleteChannel removes a channel.

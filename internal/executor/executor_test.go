@@ -157,7 +157,7 @@ func TestCreatePlaylist_success_coreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.CreatePlaylist(context.Background(), validCreateReq())
@@ -182,7 +182,7 @@ func TestCreatePlaylist_success_extensionValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	_, err := e.CreatePlaylist(context.Background(), validCreateReq())
@@ -231,7 +231,7 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
 	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, raw json.RawMessage) error {
+		DoAndReturn(func(_ context.Context, _ uuid.UUID, _ string, raw json.RawMessage) (json.RawMessage, error) {
 			body := mustDecodePlaylist(t, raw)
 			if len(body.Items) != 3 {
 				t.Fatalf("store body items: want 3, got %d", len(body.Items))
@@ -242,7 +242,7 @@ func TestCreatePlaylist_preservesItemDisplayAtWithExtensions(t *testing.T) {
 			if body.Items[2].DisplayAt != nil {
 				t.Fatalf("evergreen store item should omit displayAt, got %v", body.Items[2].DisplayAt)
 			}
-			return nil
+			return raw, nil
 		})
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
@@ -284,7 +284,7 @@ func TestCreatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.CreatePlaylist(context.Background(), req)
@@ -319,7 +319,7 @@ func TestCreatePlaylist_preservesItemInlineManifest(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.Any(), json.RawMessage(signed)).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
@@ -381,7 +381,7 @@ func TestCreatePlaylist_storeError(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&decoded, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("db down"))
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errors.New("db down"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	_, err := e.CreatePlaylist(context.Background(), validCreateReq())
@@ -407,7 +407,7 @@ func TestCreatePlaylist_optionalCreate_respectsProvidedID(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), wantID, gomock.Any(), json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), wantID, gomock.Any(), json.RawMessage(signed)).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
@@ -689,7 +689,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	req := validCreateReq()
@@ -743,7 +743,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(json.RawMessage(raw), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	req := validCreateReq()
@@ -789,7 +789,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	out, err := e.ReplacePlaylist(context.Background(), "daily", req)
@@ -914,7 +914,7 @@ func TestUpdatePlaylist_preservesPlaylistLevelNote(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -973,7 +973,7 @@ func TestUpdatePlaylist_preservesItemDisplayAt(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	newTitle := "Daily Updated"
@@ -1018,7 +1018,7 @@ func TestUpdatePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	items := []playlist.PlaylistItem{
 		{Source: "https://cdn.example.com/day1.html", DisplayAt: stringPtr("2026-07-21T00:00:00")},
@@ -1077,7 +1077,7 @@ func TestUpdatePlaylist_preservesItemInlineManifest(t *testing.T) {
 		}),
 		mockDP1.EXPECT().ValidatePlaylistWithExtension(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
 	newTitle := "Daily Updated"
@@ -1127,7 +1127,7 @@ func TestUpdatePlaylist_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1218,7 +1218,7 @@ func TestUpdatePlaylist_feedOnlySignatures_isMutable(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1261,7 +1261,7 @@ func TestUpdatePlaylist_success_multipleFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), json.RawMessage(signed), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), id.String(), json.RawMessage(signed), gomock.Any()).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	newTitle := "Updated Title"
@@ -1393,7 +1393,7 @@ func TestCreatePlaylistGroup_success_localResolve(t *testing.T) {
 		if !bytes.Equal(in.Raw, signed) {
 			t.Fatalf("raw: %s", in.Raw)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	out, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("pl-one")))
@@ -1435,7 +1435,7 @@ func TestCreatePlaylistGroup_optionalCreate_respectsProvidedID(t *testing.T) {
 		if in.ID != wantGroupID {
 			t.Fatalf("want group id %v, got %v", wantGroupID, in.ID)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	if _, err := e.CreatePlaylistGroup(context.Background(), req); err != nil {
@@ -1504,7 +1504,7 @@ func TestCreatePlaylistGroup_preservesLocalDisplayAtWithCoreValidation(t *testin
 		if len(in.Playlists) != 1 || displayAtValue(mustDecodePlaylist(t, in.Playlists[0].Raw).Items[0]) != "2026-07-21T00:00:00" {
 			t.Fatalf("expected local displayAt to be preserved, got %+v", in.Playlists)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("daily"))); err != nil {
@@ -1537,7 +1537,7 @@ func TestCreatePlaylistGroup_repeatedURIPreservesOrder(t *testing.T) {
 		if in.Playlists[0].ID != plID || in.Playlists[1].ID != plID {
 			t.Fatalf("ids: %+v", in.Playlists)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(
@@ -1604,7 +1604,7 @@ func TestCreatePlaylistGroup_storeError(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Return(errors.New("tx failed"))
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Return(nil, errors.New("tx failed"))
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(localPlaylistRef("a")))
@@ -1719,7 +1719,7 @@ func TestReplacePlaylistGroup_success(t *testing.T) {
 		if !bytes.Equal(in.Raw, signed) {
 			t.Fatalf("raw: %s", in.Raw)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	req := validGroupCreateReq(localPlaylistRef("pl"))
@@ -1771,7 +1771,7 @@ func TestReplacePlaylistGroup_withSignatures_success(t *testing.T) {
 		if !bytes.Equal(in.Raw, signed) || len(in.Playlists) != 1 || !bytes.Equal(in.Playlists[0].Raw, plBody) {
 			t.Fatalf("input: %+v", in)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	req := validGroupCreateReq(localPlaylistRef("pl"))
@@ -1840,7 +1840,7 @@ func TestUpdatePlaylistGroup_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidatePlaylistGroup(signed).Return(&parsedGroup, nil),
 	)
-	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	newTitle := "Updated Group Title"
@@ -1891,7 +1891,7 @@ func TestUpdatePlaylistGroup_success_updatePlaylists(t *testing.T) {
 		if len(in.Playlists) != 1 || in.Playlists[0].ID != newPlID {
 			t.Fatalf("expected new playlist, got: %+v", in.Playlists)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	newPlaylists := []string{localPlaylistRef("new-pl")}
@@ -2028,7 +2028,7 @@ func TestCreateChannel_whitespaceSlugFallsBackToAuto(t *testing.T) {
 		if in.Slug == "" || !strings.HasPrefix(in.Slug, "t-") {
 			t.Fatalf("expected auto slug from title \"T\", got %q", in.Slug)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
@@ -2062,7 +2062,7 @@ func TestCreateChannel_unslugifiableClientSlugFallsBackToTitle(t *testing.T) {
 		if in.Slug == "" || !strings.HasPrefix(in.Slug, "derive-me-") {
 			t.Fatalf("expected auto slug from title, got %q", in.Slug)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
@@ -2096,7 +2096,7 @@ func TestCreateChannel_unslugifiableTitleUsesChannelPrefix(t *testing.T) {
 		if in.Slug == "" || !strings.HasPrefix(in.Slug, "channel-") {
 			t.Fatalf("expected channel- prefix slug, got %q", in.Slug)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	_, err := e.CreateChannel(context.Background(), &models.ChannelCreateRequest{
@@ -2139,7 +2139,7 @@ func TestCreateChannel_success(t *testing.T) {
 		if !bytes.Equal(in.Raw, signed) {
 			t.Fatalf("raw: %s", in.Raw)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -2186,7 +2186,7 @@ func TestCreateChannel_optionalCreate_respectsProvidedID(t *testing.T) {
 		if in.ID != wantChID {
 			t.Fatalf("want channel id %v, got %v", wantChID, in.ID)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	if _, err := e.CreateChannel(context.Background(), req); err != nil {
@@ -2209,7 +2209,7 @@ func TestCreateChannel_storeError(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(errors.New("db"))
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(nil, errors.New("db"))
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -2308,7 +2308,7 @@ func TestCreateChannel_playlistResolutionPreservesPerFetchTimeoutAcrossBatches(t
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantChannel, nil),
 	)
-	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(nil, nil)
 
 	fetcher := delayedFetcher{delay: 40 * time.Millisecond, started: make(chan struct{}, 9)}
 	e := executor.New(
@@ -2480,7 +2480,7 @@ func TestReplaceChannel_success(t *testing.T) {
 		if !bytes.Equal(in.Raw, signed) {
 			t.Fatalf("raw: %s", in.Raw)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -2536,7 +2536,7 @@ func TestReplaceChannel_withSignatures_success(t *testing.T) {
 		if !bytes.Equal(in.Raw, signed) {
 			t.Fatalf("raw: %s", in.Raw)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	req := validChannelCreateReq("ch-slug", localPlaylistRef("pl2"))
@@ -2615,7 +2615,7 @@ func TestUpdateChannel_success_partialFields(t *testing.T) {
 		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
 		mockDP1.EXPECT().ValidateChannel(signed).Return(&parsedCh, nil),
 	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().UpdateChannel(gomock.Any(), cid.String(), gomock.Any(), gomock.Any()).Return(nil, nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -2680,7 +2680,7 @@ func TestUpdateChannel_success_updateMultipleFields(t *testing.T) {
 		if in.Playlists[0].ID != newPlID1 || in.Playlists[1].ID != newPlID2 {
 			t.Fatalf("playlist IDs mismatch: %+v", in.Playlists)
 		}
-	}).Return(nil)
+	}).Return(nil, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	newTitle := "Updated Channel"
@@ -2869,7 +2869,7 @@ func TestCreatePlaylistWithSignatures_success(t *testing.T) {
 	mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil)
 
 	// Row identity is projected from the document: id and slug verbatim.
-	mockStore.EXPECT().CreatePlaylist(gomock.Any(), uuid.MustParse(id), "test-playlist", json.RawMessage(signed)).Return(nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), uuid.MustParse(id), "test-playlist", json.RawMessage(signed)).Return(json.RawMessage(signed), nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
 	result, err := e.CreatePlaylist(context.Background(), req)

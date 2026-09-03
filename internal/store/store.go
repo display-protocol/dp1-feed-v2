@@ -163,7 +163,9 @@ type Store interface {
 
 	// CreatePlaylist inserts a new playlist row from the signed document bytes and playlist_item_index rows
 	// derived from its items (same transaction). raw must be a validated DP-1 playlist JSON object.
-	CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error
+	// Returns the persisted body bytes (jsonb, as GET/list serve them) so a write response and a later read
+	// are byte-identical; they remain JCS-equivalent to the signed input, so signatures verify against both.
+	CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) (json.RawMessage, error)
 	// GetPlaylist loads a playlist by UUID or slug.
 	GetPlaylist(ctx context.Context, idOrSlug string) (*PlaylistRecord, error)
 	// GetPlaylistItems returns all indexed items for a playlist, ordered by position.
@@ -175,37 +177,39 @@ type Store interface {
 	// ListPlaylists returns a page of playlists ordered by created_at and Sort.
 	ListPlaylists(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistRecord, string, error)
 	// UpdatePlaylist replaces the stored document bytes and rebuilds playlist_item_index from its items (same transaction).
-	// The slug column follows the document's "slug" when present (a row must be addressable by the slug it serves).
+	// The slug column is not changed (slug is immutable after creation; see the executor's write-path contract).
 	// The update is conditional on expectedUpdatedAt (the updated_at the caller read): a mismatch means a
 	// concurrent write landed and returns ErrConcurrentModification, so an authorization decision made on the
-	// stale read cannot silently overwrite the newer document.
-	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error
+	// stale read cannot silently overwrite the newer document. Returns the persisted body (see CreatePlaylist).
+	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) (json.RawMessage, error)
 	// DeletePlaylist removes a playlist row.
 	DeletePlaylist(ctx context.Context, idOrSlug string) error
 
 	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
-	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error
+	// Returns the persisted group body (see CreatePlaylist).
+	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) (json.RawMessage, error)
 	// GetPlaylistGroup loads a playlist-group by UUID or slug.
 	GetPlaylistGroup(ctx context.Context, idOrSlug string) (*PlaylistGroupRecord, error)
 	// ListPlaylistGroups returns a page ordered by created_at and Sort.
 	ListPlaylistGroups(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistGroupRecord, string, error)
-	// UpdatePlaylistGroup upserts playlists and item indexes, updates the group row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
-	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
-	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *PlaylistGroupInput, expectedUpdatedAt time.Time) error
+	// UpdatePlaylistGroup upserts playlists and item indexes, updates the group row body (slug unchanged, as UpdatePlaylist), and replaces ordered membership (single transaction).
+	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch. Returns the persisted body.
+	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *PlaylistGroupInput, expectedUpdatedAt time.Time) (json.RawMessage, error)
 	// ListPlaylistsInGroup returns full playlist rows in membership order (position 0 first). ErrNotFound if the group does not exist.
 	ListPlaylistsInGroup(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
 	// DeletePlaylistGroup removes a playlist-group row.
 	DeletePlaylistGroup(ctx context.Context, idOrSlug string) error
 
 	// CreateChannel upserts playlists and item indexes, inserts the channel row, and creates ordered membership (single transaction).
-	CreateChannel(ctx context.Context, in *ChannelInput) error
+	// Returns the persisted channel body (see CreatePlaylist).
+	CreateChannel(ctx context.Context, in *ChannelInput) (json.RawMessage, error)
 	// GetChannel loads a channel by UUID or slug.
 	GetChannel(ctx context.Context, idOrSlug string) (*ChannelRecord, error)
 	// ListChannels returns a page ordered by created_at and Sort.
 	ListChannels(ctx context.Context, p *ListPlaylistsParams) ([]ChannelRecord, string, error)
-	// UpdateChannel upserts playlists and item indexes, updates the channel row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
-	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
-	UpdateChannel(ctx context.Context, idOrSlug string, in *ChannelInput, expectedUpdatedAt time.Time) error
+	// UpdateChannel upserts playlists and item indexes, updates the channel row body (slug unchanged, as UpdatePlaylist), and replaces ordered membership (single transaction).
+	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch. Returns the persisted body.
+	UpdateChannel(ctx context.Context, idOrSlug string, in *ChannelInput, expectedUpdatedAt time.Time) (json.RawMessage, error)
 	// ListPlaylistsInChannel returns full playlist rows in membership order (position 0 first). ErrNotFound if the channel does not exist.
 	ListPlaylistsInChannel(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
 	// DeleteChannel removes a channel row.

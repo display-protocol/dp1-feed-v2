@@ -47,7 +47,7 @@ func expectPlaylistStages(m *mocks.MockValidatorSigner, st *mocks.MockStore, fai
 		return
 	}
 	m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "t"}, nil)
-	st.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errStage)
+	st.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errStage)
 }
 
 func expectGroupStages(m *mocks.MockValidatorSigner, st *mocks.MockStore, failAt stage) {
@@ -62,7 +62,7 @@ func expectGroupStages(m *mocks.MockValidatorSigner, st *mocks.MockStore, failAt
 		return
 	}
 	m.EXPECT().ValidatePlaylistGroup(signed).Return(&playlistgroup.Group{Title: "g"}, nil)
-	st.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Return(errStage)
+	st.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Return(nil, errStage)
 }
 
 func expectChannelStages(m *mocks.MockValidatorSigner, st *mocks.MockStore, failAt stage) {
@@ -77,7 +77,7 @@ func expectChannelStages(m *mocks.MockValidatorSigner, st *mocks.MockStore, fail
 		return
 	}
 	m.EXPECT().ValidateChannel(signed).Return(&channels.Channel{Title: "c"}, nil)
-	st.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(errStage)
+	st.EXPECT().CreateChannel(gomock.Any(), gomock.Any()).Return(nil, errStage)
 }
 
 func TestCreate_stageFailures(t *testing.T) {
@@ -161,7 +161,7 @@ func TestReplaceUpdate_storeAndParseFailures(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylist(signed).Return(&playlist.Playlist{Title: "x"}, nil)
-		st.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errStage)
+		st.EXPECT().UpdatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errStage)
 		e := executor.New(st, m, false, nil, "")
 		_, err := e.ReplacePlaylist(context.Background(), "p", &models.PlaylistReplaceRequest{DPVersion: "1.1.0", Title: "x", Items: []playlist.PlaylistItem{{Source: "https://x"}}})
 		if !errors.Is(err, errStage) {
@@ -194,7 +194,7 @@ func TestReplaceUpdate_storeAndParseFailures(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignPlaylistGroup(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidatePlaylistGroup(signed).Return(&playlistgroup.Group{Title: "x"}, nil)
-		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errStage)
+		st.EXPECT().UpdatePlaylistGroup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, errStage)
 		e := executor.New(st, m, false, nil, testPublicBase)
 		_, err := e.UpdatePlaylistGroup(context.Background(), "g", &models.PlaylistGroupUpdateRequest{Title: &title})
 		if !errors.Is(err, errStage) {
@@ -229,7 +229,7 @@ func TestReplaceUpdate_storeAndParseFailures(t *testing.T) {
 		signed := []byte(`{"title":"x"}`)
 		m.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil)
 		m.EXPECT().ValidateChannel(signed).Return(&channels.Channel{Title: "x"}, nil)
-		st.EXPECT().UpdateChannel(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(errStage)
+		st.EXPECT().UpdateChannel(gomock.Any(), rowID.String(), gomock.Any(), gomock.Any()).Return(nil, errStage)
 		e := executor.New(st, m, true, nil, testPublicBase)
 		_, err := e.UpdateChannel(context.Background(), "c", &models.ChannelUpdateRequest{Title: &title})
 		if !errors.Is(err, errStage) {

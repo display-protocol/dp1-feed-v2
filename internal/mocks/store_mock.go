@@ -46,11 +46,12 @@ func (m *MockStore) EXPECT() *MockStoreMockRecorder {
 }
 
 // CreateChannel mocks base method.
-func (m *MockStore) CreateChannel(ctx context.Context, in *store.ChannelInput) error {
+func (m *MockStore) CreateChannel(ctx context.Context, in *store.ChannelInput) (json.RawMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreateChannel", ctx, in)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(json.RawMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // CreateChannel indicates an expected call of CreateChannel.
@@ -60,11 +61,12 @@ func (mr *MockStoreMockRecorder) CreateChannel(ctx, in any) *gomock.Call {
 }
 
 // CreatePlaylist mocks base method.
-func (m *MockStore) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error {
+func (m *MockStore) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) (json.RawMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreatePlaylist", ctx, id, slug, raw)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(json.RawMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // CreatePlaylist indicates an expected call of CreatePlaylist.
@@ -74,11 +76,12 @@ func (mr *MockStoreMockRecorder) CreatePlaylist(ctx, id, slug, raw any) *gomock.
 }
 
 // CreatePlaylistGroup mocks base method.
-func (m *MockStore) CreatePlaylistGroup(ctx context.Context, in *store.PlaylistGroupInput) error {
+func (m *MockStore) CreatePlaylistGroup(ctx context.Context, in *store.PlaylistGroupInput) (json.RawMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreatePlaylistGroup", ctx, in)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(json.RawMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // CreatePlaylistGroup indicates an expected call of CreatePlaylistGroup.
@@ -343,11 +346,12 @@ func (mr *MockStoreMockRecorder) ReplaceChannelRegistry(ctx, publishers, channel
 }
 
 // UpdateChannel mocks base method.
-func (m *MockStore) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) error {
+func (m *MockStore) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) (json.RawMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateChannel", ctx, idOrSlug, in, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(json.RawMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdateChannel indicates an expected call of UpdateChannel.
@@ -357,11 +361,12 @@ func (mr *MockStoreMockRecorder) UpdateChannel(ctx, idOrSlug, in, expectedUpdate
 }
 
 // UpdatePlaylist mocks base method.
-func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
+func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) (json.RawMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, raw, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(json.RawMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdatePlaylist indicates an expected call of UpdatePlaylist.
@@ -371,11 +376,12 @@ func (mr *MockStoreMockRecorder) UpdatePlaylist(ctx, idOrSlug, raw, expectedUpda
 }
 
 // UpdatePlaylistGroup mocks base method.
-func (m *MockStore) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
+func (m *MockStore) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) (json.RawMessage, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdatePlaylistGroup", ctx, idOrSlug, in, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(json.RawMessage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdatePlaylistGroup indicates an expected call of UpdatePlaylistGroup.
