@@ -13,9 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	channels "github.com/display-protocol/dp1-go/extension/channels"
 	playlist "github.com/display-protocol/dp1-go/playlist"
-	playlistgroup "github.com/display-protocol/dp1-go/playlistgroup"
 	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 
@@ -62,10 +60,10 @@ func (mr *MockExecutorMockRecorder) APIInfo(version any) *gomock.Call {
 }
 
 // CreateChannel mocks base method.
-func (m *MockExecutor) CreateChannel(ctx context.Context, req *models.ChannelCreateRequest) (*channels.Channel, error) {
+func (m *MockExecutor) CreateChannel(ctx context.Context, req *models.ChannelCreateRequest) (*store.ChannelRecord, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreateChannel", ctx, req)
-	ret0, _ := ret[0].(*channels.Channel)
+	ret0, _ := ret[0].(*store.ChannelRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -77,10 +75,10 @@ func (mr *MockExecutorMockRecorder) CreateChannel(ctx, req any) *gomock.Call {
 }
 
 // CreatePlaylist mocks base method.
-func (m *MockExecutor) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*playlist.Playlist, error) {
+func (m *MockExecutor) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*store.PlaylistRecord, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreatePlaylist", ctx, req)
-	ret0, _ := ret[0].(*playlist.Playlist)
+	ret0, _ := ret[0].(*store.PlaylistRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -92,10 +90,10 @@ func (mr *MockExecutorMockRecorder) CreatePlaylist(ctx, req any) *gomock.Call {
 }
 
 // CreatePlaylistGroup mocks base method.
-func (m *MockExecutor) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGroupCreateRequest) (*playlistgroup.Group, error) {
+func (m *MockExecutor) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGroupCreateRequest) (*store.PlaylistGroupRecord, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreatePlaylistGroup", ctx, req)
-	ret0, _ := ret[0].(*playlistgroup.Group)
+	ret0, _ := ret[0].(*store.PlaylistGroupRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -107,52 +105,52 @@ func (mr *MockExecutorMockRecorder) CreatePlaylistGroup(ctx, req any) *gomock.Ca
 }
 
 // DeleteChannel mocks base method.
-func (m *MockExecutor) DeleteChannel(ctx context.Context, idOrSlug string) error {
+func (m *MockExecutor) DeleteChannel(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteChannel", ctx, idOrSlug)
+	ret := m.ctrl.Call(m, "DeleteChannel", ctx, idOrSlug, req)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // DeleteChannel indicates an expected call of DeleteChannel.
-func (mr *MockExecutorMockRecorder) DeleteChannel(ctx, idOrSlug any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) DeleteChannel(ctx, idOrSlug, req any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteChannel", reflect.TypeOf((*MockExecutor)(nil).DeleteChannel), ctx, idOrSlug)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteChannel", reflect.TypeOf((*MockExecutor)(nil).DeleteChannel), ctx, idOrSlug, req)
 }
 
 // DeletePlaylist mocks base method.
-func (m *MockExecutor) DeletePlaylist(ctx context.Context, idOrSlug string) error {
+func (m *MockExecutor) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeletePlaylist", ctx, idOrSlug)
+	ret := m.ctrl.Call(m, "DeletePlaylist", ctx, idOrSlug, req)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // DeletePlaylist indicates an expected call of DeletePlaylist.
-func (mr *MockExecutorMockRecorder) DeletePlaylist(ctx, idOrSlug any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) DeletePlaylist(ctx, idOrSlug, req any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePlaylist", reflect.TypeOf((*MockExecutor)(nil).DeletePlaylist), ctx, idOrSlug)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePlaylist", reflect.TypeOf((*MockExecutor)(nil).DeletePlaylist), ctx, idOrSlug, req)
 }
 
 // DeletePlaylistGroup mocks base method.
-func (m *MockExecutor) DeletePlaylistGroup(ctx context.Context, idOrSlug string) error {
+func (m *MockExecutor) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeletePlaylistGroup", ctx, idOrSlug)
+	ret := m.ctrl.Call(m, "DeletePlaylistGroup", ctx, idOrSlug, req)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // DeletePlaylistGroup indicates an expected call of DeletePlaylistGroup.
-func (mr *MockExecutorMockRecorder) DeletePlaylistGroup(ctx, idOrSlug any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) DeletePlaylistGroup(ctx, idOrSlug, req any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePlaylistGroup", reflect.TypeOf((*MockExecutor)(nil).DeletePlaylistGroup), ctx, idOrSlug)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePlaylistGroup", reflect.TypeOf((*MockExecutor)(nil).DeletePlaylistGroup), ctx, idOrSlug, req)
 }
 
 // GetChannel mocks base method.
-func (m *MockExecutor) GetChannel(ctx context.Context, idOrSlug string) (*channels.Channel, error) {
+func (m *MockExecutor) GetChannel(ctx context.Context, idOrSlug string) (*store.ChannelRecord, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetChannel", ctx, idOrSlug)
-	ret0, _ := ret[0].(*channels.Channel)
+	ret0, _ := ret[0].(*store.ChannelRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -180,10 +178,10 @@ func (mr *MockExecutorMockRecorder) GetChannelRegistry(ctx any) *gomock.Call {
 }
 
 // GetPlaylist mocks base method.
-func (m *MockExecutor) GetPlaylist(ctx context.Context, idOrSlug string) (*playlist.Playlist, error) {
+func (m *MockExecutor) GetPlaylist(ctx context.Context, idOrSlug string) (*store.PlaylistRecord, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetPlaylist", ctx, idOrSlug)
-	ret0, _ := ret[0].(*playlist.Playlist)
+	ret0, _ := ret[0].(*store.PlaylistRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -195,10 +193,10 @@ func (mr *MockExecutorMockRecorder) GetPlaylist(ctx, idOrSlug any) *gomock.Call 
 }
 
 // GetPlaylistGroup mocks base method.
-func (m *MockExecutor) GetPlaylistGroup(ctx context.Context, idOrSlug string) (*playlistgroup.Group, error) {
+func (m *MockExecutor) GetPlaylistGroup(ctx context.Context, idOrSlug string) (*store.PlaylistGroupRecord, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetPlaylistGroup", ctx, idOrSlug)
-	ret0, _ := ret[0].(*playlistgroup.Group)
+	ret0, _ := ret[0].(*store.PlaylistGroupRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -225,10 +223,10 @@ func (mr *MockExecutorMockRecorder) GetPlaylistItem(ctx, itemID any) *gomock.Cal
 }
 
 // ListChannels mocks base method.
-func (m *MockExecutor) ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]channels.Channel, string, error) {
+func (m *MockExecutor) ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.ChannelRecord, string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListChannels", ctx, limit, cursor, sort)
-	ret0, _ := ret[0].([]channels.Channel)
+	ret0, _ := ret[0].([]store.ChannelRecord)
 	ret1, _ := ret[1].(string)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
@@ -241,10 +239,10 @@ func (mr *MockExecutorMockRecorder) ListChannels(ctx, limit, cursor, sort any) *
 }
 
 // ListPlaylistGroups mocks base method.
-func (m *MockExecutor) ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]playlistgroup.Group, string, error) {
+func (m *MockExecutor) ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.PlaylistGroupRecord, string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListPlaylistGroups", ctx, limit, cursor, sort)
-	ret0, _ := ret[0].([]playlistgroup.Group)
+	ret0, _ := ret[0].([]store.PlaylistGroupRecord)
 	ret1, _ := ret[1].(string)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
@@ -273,10 +271,10 @@ func (mr *MockExecutorMockRecorder) ListPlaylistItems(ctx, limit, cursor, sort, 
 }
 
 // ListPlaylists mocks base method.
-func (m *MockExecutor) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]playlist.Playlist, string, error) {
+func (m *MockExecutor) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]store.PlaylistRecord, string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListPlaylists", ctx, limit, cursor, sort, channelFilter, playlistGroupFilter)
-	ret0, _ := ret[0].([]playlist.Playlist)
+	ret0, _ := ret[0].([]store.PlaylistRecord)
 	ret1, _ := ret[1].(string)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
@@ -289,106 +287,46 @@ func (mr *MockExecutorMockRecorder) ListPlaylists(ctx, limit, cursor, sort, chan
 }
 
 // ReplaceChannel mocks base method.
-func (m *MockExecutor) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest) (*channels.Channel, error) {
+func (m *MockExecutor) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReplaceChannel", ctx, idOrSlug, req)
-	ret0, _ := ret[0].(*channels.Channel)
+	ret := m.ctrl.Call(m, "ReplaceChannel", ctx, idOrSlug, req, intent)
+	ret0, _ := ret[0].(*store.ChannelRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ReplaceChannel indicates an expected call of ReplaceChannel.
-func (mr *MockExecutorMockRecorder) ReplaceChannel(ctx, idOrSlug, req any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) ReplaceChannel(ctx, idOrSlug, req, intent any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplaceChannel", reflect.TypeOf((*MockExecutor)(nil).ReplaceChannel), ctx, idOrSlug, req)
-}
-
-// ReplaceChannelRegistry mocks base method.
-func (m *MockExecutor) ReplaceChannelRegistry(ctx context.Context, req models.ChannelRegistry) (int, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReplaceChannelRegistry", ctx, req)
-	ret0, _ := ret[0].(int)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ReplaceChannelRegistry indicates an expected call of ReplaceChannelRegistry.
-func (mr *MockExecutorMockRecorder) ReplaceChannelRegistry(ctx, req any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplaceChannelRegistry", reflect.TypeOf((*MockExecutor)(nil).ReplaceChannelRegistry), ctx, req)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplaceChannel", reflect.TypeOf((*MockExecutor)(nil).ReplaceChannel), ctx, idOrSlug, req, intent)
 }
 
 // ReplacePlaylist mocks base method.
-func (m *MockExecutor) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest) (*playlist.Playlist, error) {
+func (m *MockExecutor) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest, intent *models.SignedIntent) (*store.PlaylistRecord, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReplacePlaylist", ctx, idOrSlug, req)
-	ret0, _ := ret[0].(*playlist.Playlist)
+	ret := m.ctrl.Call(m, "ReplacePlaylist", ctx, idOrSlug, req, intent)
+	ret0, _ := ret[0].(*store.PlaylistRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ReplacePlaylist indicates an expected call of ReplacePlaylist.
-func (mr *MockExecutorMockRecorder) ReplacePlaylist(ctx, idOrSlug, req any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) ReplacePlaylist(ctx, idOrSlug, req, intent any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplacePlaylist", reflect.TypeOf((*MockExecutor)(nil).ReplacePlaylist), ctx, idOrSlug, req)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplacePlaylist", reflect.TypeOf((*MockExecutor)(nil).ReplacePlaylist), ctx, idOrSlug, req, intent)
 }
 
 // ReplacePlaylistGroup mocks base method.
-func (m *MockExecutor) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest) (*playlistgroup.Group, error) {
+func (m *MockExecutor) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest, intent *models.SignedIntent) (*store.PlaylistGroupRecord, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReplacePlaylistGroup", ctx, idOrSlug, req)
-	ret0, _ := ret[0].(*playlistgroup.Group)
+	ret := m.ctrl.Call(m, "ReplacePlaylistGroup", ctx, idOrSlug, req, intent)
+	ret0, _ := ret[0].(*store.PlaylistGroupRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ReplacePlaylistGroup indicates an expected call of ReplacePlaylistGroup.
-func (mr *MockExecutorMockRecorder) ReplacePlaylistGroup(ctx, idOrSlug, req any) *gomock.Call {
+func (mr *MockExecutorMockRecorder) ReplacePlaylistGroup(ctx, idOrSlug, req, intent any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplacePlaylistGroup", reflect.TypeOf((*MockExecutor)(nil).ReplacePlaylistGroup), ctx, idOrSlug, req)
-}
-
-// UpdateChannel mocks base method.
-func (m *MockExecutor) UpdateChannel(ctx context.Context, idOrSlug string, req *models.ChannelUpdateRequest) (*channels.Channel, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateChannel", ctx, idOrSlug, req)
-	ret0, _ := ret[0].(*channels.Channel)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// UpdateChannel indicates an expected call of UpdateChannel.
-func (mr *MockExecutorMockRecorder) UpdateChannel(ctx, idOrSlug, req any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateChannel", reflect.TypeOf((*MockExecutor)(nil).UpdateChannel), ctx, idOrSlug, req)
-}
-
-// UpdatePlaylist mocks base method.
-func (m *MockExecutor) UpdatePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistUpdateRequest) (*playlist.Playlist, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, req)
-	ret0, _ := ret[0].(*playlist.Playlist)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// UpdatePlaylist indicates an expected call of UpdatePlaylist.
-func (mr *MockExecutorMockRecorder) UpdatePlaylist(ctx, idOrSlug, req any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePlaylist", reflect.TypeOf((*MockExecutor)(nil).UpdatePlaylist), ctx, idOrSlug, req)
-}
-
-// UpdatePlaylistGroup mocks base method.
-func (m *MockExecutor) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupUpdateRequest) (*playlistgroup.Group, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdatePlaylistGroup", ctx, idOrSlug, req)
-	ret0, _ := ret[0].(*playlistgroup.Group)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// UpdatePlaylistGroup indicates an expected call of UpdatePlaylistGroup.
-func (mr *MockExecutorMockRecorder) UpdatePlaylistGroup(ctx, idOrSlug, req any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePlaylistGroup", reflect.TypeOf((*MockExecutor)(nil).UpdatePlaylistGroup), ctx, idOrSlug, req)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplacePlaylistGroup", reflect.TypeOf((*MockExecutor)(nil).ReplacePlaylistGroup), ctx, idOrSlug, req, intent)
 }

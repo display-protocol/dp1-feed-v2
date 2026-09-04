@@ -95,7 +95,7 @@ jobs:
             -coverprofile=coverage-integration.out \
             -covermode=atomic \
             -coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg,github.com/display-protocol/dp1-feed-v2/internal/httpserver,github.com/display-protocol/dp1-feed-v2/internal/executor \
-            ./internal/store/ ./internal/httpserver
+            ./internal/store/... ./internal/httpserver
 
       - name: Display integration coverage summary
         run: go tool cover -func=coverage-integration.out | tail -20
@@ -106,6 +106,34 @@ jobs:
           name: coverage-integration
           path: coverage-integration.out
           retention-days: 1
+
+  # The README states a floor of PostgreSQL 16 while compose and the default test image run 18. A claimed
+  # floor nothing exercises is a claim waiting to be wrong: migrations run at startup and abort the
+  # process on failure, so a statement using a function added after 16 would pass every check here and
+  # then break a supported deployment on boot. This job runs the same suite against that floor. No
+  # coverage upload — it duplicates the run above and would collide on the artifact name.
+  integration-test-min-postgres:
+    name: Integration tests (minimum supported PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run integration tests against PostgreSQL 16
+        env:
+          DP1_TEST_POSTGRES_IMAGE: postgres:16-alpine
+        run: go test -count=1 -timeout=10m -tags=integration ./internal/store/... ./internal/httpserver
 
   merge-coverage:
     name: Merge and report coverage

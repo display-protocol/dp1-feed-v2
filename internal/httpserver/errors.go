@@ -29,10 +29,25 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, ErrorResponse{Error: code, Message: message})
 }
 
-// mapStoreError maps store.ErrNotFound, store.ErrListLimitExceeded, or falls through to 500.
+// mapStoreError maps store.ErrNotFound, store.ErrConcurrentModification, store.ErrListLimitExceeded,
+// or falls through to 500.
 func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrNotFound) {
 		return http.StatusNotFound, "not_found", err.Error()
+	}
+	if errors.Is(err, store.ErrConcurrentModification) {
+		return http.StatusConflict, "conflict", "the resource changed since it was authorized; re-read and retry"
+	}
+	if errors.Is(err, store.ErrDocumentDeleted) {
+		return http.StatusConflict, "conflict", "this id was deleted on this feed and cannot be reused; publish under a new id"
+	}
+	// Every store.ConflictError is a 409 the client can act on: an id or slug already taken, or a document
+	// a group still references. Detail is read off the typed error rather than err.Error(), which would
+	// leak the wrapping chain ("store: document already exists: …") into the response body. Distinct from
+	// the tombstone case above, where the id is gone for good rather than merely taken.
+	var conflict *store.ConflictError
+	if errors.As(err, &conflict) {
+		return http.StatusConflict, "conflict", conflict.Detail
 	}
 	if errors.Is(err, store.ErrListLimitExceeded) {
 		return http.StatusBadRequest, "bad_request", err.Error()
@@ -46,6 +61,21 @@ func mapStoreError(err error) (status int, code, msg string) {
 func mapExecutorError(err error) (status int, code, msg string) {
 	if executor.IsExtensionsDisabled(err) {
 		return http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment"
+	}
+	if executor.IsSignaturesRequiredError(err) {
+		return http.StatusUnauthorized, "unauthorized", err.Error()
+	}
+	if executor.IsForbiddenError(err) {
+		return http.StatusForbidden, "forbidden", err.Error()
+	}
+	if executor.IsIntentError(err) {
+		return http.StatusBadRequest, "bad_request", err.Error()
+	}
+	if executor.IsInvalidSubmissionError(err) {
+		return http.StatusBadRequest, "bad_request", err.Error()
+	}
+	if executor.IsBlockedFetchDestinationError(err) {
+		return http.StatusBadRequest, "bad_request", err.Error()
 	}
 	if executor.IsDP1SignError(err) {
 		return http.StatusBadRequest, "signature_invalid", err.Error()

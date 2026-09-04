@@ -99,6 +99,68 @@ func TestVerifyPlaylistSignatures(t *testing.T) {
 	})
 }
 
+// TestVerifySignatures covers the schema-agnostic verifier used to authorize signed delete-intents.
+func TestVerifySignatures(t *testing.T) {
+	t.Parallel()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := sign.Ed25519DIDKey(priv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(testSeedHex, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_signature", func(t *testing.T) {
+		t.Parallel()
+		// A signed delete-intent-shaped payload (not a playlist) still verifies via the generic path.
+		intent := map[string]any{
+			"action":  "delete",
+			"target":  map[string]any{"type": "playlist", "id": "id-1", "slug": "s-1"},
+			"created": "2025-06-01T12:00:00Z",
+		}
+		raw, err := json.Marshal(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sig, err := sign.SignMultiEd25519(raw, priv, playlist.RoleCurator, "2025-06-01T12:00:00Z")
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent["signatures"] = []playlist.Signature{sig}
+		signed, err := json.Marshal(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, failed, err := svc.VerifySignatures(signed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ok || len(failed) != 0 {
+			t.Fatalf("expected ok=true no failures, got ok=%v failed=%v", ok, failed)
+		}
+	})
+
+	t.Run("no_signatures", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := svc.VerifySignatures([]byte(`{"action":"delete"}`))
+		if err == nil || !errors.Is(err, sign.ErrNoSignatures) {
+			t.Fatalf("expected ErrNoSignatures, got: %v", err)
+		}
+	})
+
+	t.Run("invalid_json", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := svc.VerifySignatures([]byte(`{invalid`)); err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
 func TestVerifyPlaylistGroupSignatures(t *testing.T) {
 	t.Parallel()
 	_, priv, err := ed25519.GenerateKey(nil)
@@ -598,6 +660,82 @@ func TestService_SignPlaylist_preservesNonFeedSignatures(t *testing.T) {
 	}
 	if len(out.Signatures) != 2 {
 		t.Fatalf("want 2 signatures after re-sign, got %d", len(out.Signatures))
+	}
+}
+
+// A curator may legitimately hold the same key as the feed — a self-hosted deployment whose operator also
+// curates is the obvious case. Replacing prior feed signatures by kid alone deleted that curator's
+// attestation and left only a `feed` entry, so the stored document no longer carried the owner signature
+// it was authorized with. The replacement is keyed on kid AND role, so the two coexist.
+func TestService_SignPlaylist_keepsOwnerSignatureSharingTheFeedKey(t *testing.T) {
+	t.Parallel()
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := Ed25519PrivateKeyFromHex(testSeedHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "Operator is also the curator",
+		Items:     []playlist.PlaylistItem{{Source: "https://example.com/a"}},
+	}
+	raw, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Curator signs with the feed's own key, so both entries carry an identical kid.
+	curatorSig, err := sign.SignMultiEd25519(raw, priv, playlist.RoleCurator, "2025-06-01T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl.Signatures = []playlist.Signature{curatorSig}
+	withCurator, err := json.Marshal(pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signed, err := s.SignPlaylist(withCurator, time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out playlist.Playlist
+	if err := json.Unmarshal(signed, &out); err != nil {
+		t.Fatal(err)
+	}
+	var roles []string
+	for _, sig := range out.Signatures {
+		if sig.Kid != curatorSig.Kid {
+			t.Fatalf("expected every signature to carry the shared kid, got %q", sig.Kid)
+		}
+		roles = append(roles, string(sig.Role))
+	}
+	if len(roles) != 2 || roles[0] != string(playlist.RoleCurator) || roles[1] != string(playlist.RoleFeed) {
+		t.Fatalf("want the curator attestation preserved alongside the feed entry, got roles %v", roles)
+	}
+
+	ok, failed, err := s.VerifyPlaylistSignatures(signed)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !ok {
+		t.Fatalf("both signatures must still verify, failed=%v", failed)
+	}
+
+	// Re-signing must still collapse the feed's own prior entry rather than accumulating them.
+	again, err := s.SignPlaylist(signed, time.Date(2025, 3, 1, 13, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(again, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Signatures) != 2 {
+		t.Fatalf("re-signing must replace the prior feed entry, got %d signatures", len(out.Signatures))
 	}
 }
 

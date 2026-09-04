@@ -26,7 +26,7 @@ import (
 const inlineManifestFixture = `{"refVersion":"1.0.0","id":"manifest-1","created":"2026-08-01T00:00:00Z","locale":"en","metadata":{"title":"Work","artists":[{"id":"","name":"Artist"}],"thumbnails":{"small":{"uri":"https://cdn.example.com/thumb.png"}}},"controls":{"display":{"scaling":"fit"}}}`
 
 // TestIntegration_InlineManifestHTTPRoundTrip walks an inlineManifest through every surface that
-// re-encodes a playlist — create, read, list, item index, and a PATCH that re-signs the stored
+// re-encodes a playlist — create, read, list, item index, and a signed PUT that re-signs the whole
 // document — and checks the signature still verifies at each stop.
 func TestIntegration_InlineManifestHTTPRoundTrip(t *testing.T) {
 	srv := newIntegrationServer(t)
@@ -34,21 +34,23 @@ func TestIntegration_InlineManifestHTTPRoundTrip(t *testing.T) {
 	playlistID := uuid.MustParse("bbbbbbbb-2222-4333-8444-555555555555")
 	itemID := uuid.MustParse("44444444-2222-4333-8444-555555555555")
 	slug := "inline-manifest-round-trip"
+	created := "2020-01-02T03:04:05Z"
 
-	postBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"id":        playlistID.String(),
-		"created":   "2020-01-02T03:04:05Z",
-		"slug":      slug,
-		"title":     "Inline manifest round trip",
-		"items": []map[string]any{
-			{
-				"id":             itemID.String(),
-				"source":         "https://cdn.example.com/day-1.html",
-				"inlineManifest": json.RawMessage(inlineManifestFixture),
-			},
-		},
+	priv, kid := newCuratorKeypair(t)
+	doc := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        playlistID.String(),
+		Slug:      slug,
+		Title:     "Inline manifest round trip",
+		Created:   created,
+		Curators:  curatorEntities(kid),
+		Items: []playlist.PlaylistItem{{
+			ID:             itemID.String(),
+			Source:         "https://cdn.example.com/day-1.html",
+			InlineManifest: json.RawMessage(inlineManifestFixture),
+		}},
 	}
+	postBody := signedPlaylistBody(t, priv, doc)
 
 	createdRaw := mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", postBody, http.StatusCreated)
 	assertPlaylistInlineManifest(t, "POST response", createdRaw, itemID)
@@ -72,9 +74,12 @@ func TestIntegration_InlineManifestHTTPRoundTrip(t *testing.T) {
 	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlist-items/"+itemID.String(), nil, http.StatusOK, &one)
 	assertItemInlineManifest(t, "GET playlist item", []playlist.PlaylistItem{one}, itemID)
 
-	// PATCH rebuilds and re-signs the document from the stored one without resending items[].
-	patchedRaw := mustDoRaw(t, srv, http.MethodPatch, "/api/v1/playlists/"+slug, map[string]any{"title": "Inline manifest patched"}, http.StatusOK)
-	assertPlaylistInlineManifest(t, "PATCH response", patchedRaw, itemID)
+	// A signed PUT re-signs the whole document (owner-immutable: same curators, id, slug, created). The
+	// curator re-signs every field, including the unchanged inlineManifest, and the feed co-signs.
+	doc.Title = "Inline manifest replaced"
+	putBody := signedPlaylistBody(t, priv, doc)
+	replacedRaw := mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug, signedReplaceEnvelope(t, priv, "playlist", doc.ID, doc.Slug, putBody), http.StatusOK)
+	assertPlaylistInlineManifest(t, "PUT response", replacedRaw, itemID)
 }
 
 // TestIntegration_InlineManifestRejectedWhenMalformed covers the validation the extension overlay
@@ -83,18 +88,23 @@ func TestIntegration_InlineManifestHTTPRoundTrip(t *testing.T) {
 func TestIntegration_InlineManifestRejectedWhenMalformed(t *testing.T) {
 	srv := newIntegrationServer(t)
 
-	postBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"slug":      "inline-manifest-malformed",
-		"title":     "Inline manifest malformed",
-		"items": []map[string]any{
-			{
-				"source": "https://cdn.example.com/day-1.html",
-				// refVersion is required by the ref-manifest schema.
-				"inlineManifest": json.RawMessage(`{"id":"m","created":"2026-08-01T00:00:00Z","locale":"en"}`),
-			},
-		},
+	priv, kid := newCuratorKeypair(t)
+	doc := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        uuid.MustParse("dddddddd-2222-4333-8444-555555555555").String(),
+		Slug:      "inline-manifest-malformed",
+		Title:     "Inline manifest malformed",
+		Created:   "2020-01-02T03:04:05Z",
+		Curators:  curatorEntities(kid),
+		Items: []playlist.PlaylistItem{{
+			ID:     uuid.MustParse("eeeeeeee-2222-4333-8444-555555555555").String(),
+			Source: "https://cdn.example.com/day-1.html",
+			// refVersion is required by the ref-manifest schema; the curator signs it anyway, so the
+			// request passes signature verification and is rejected only at post-sign schema validation.
+			InlineManifest: json.RawMessage(`{"id":"m","created":"2026-08-01T00:00:00Z","locale":"en"}`),
+		}},
 	}
+	postBody := signedPlaylistBody(t, priv, doc)
 	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", postBody, http.StatusBadRequest)
 }
 
@@ -193,29 +203,34 @@ func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
 
 	itemID := uuid.MustParse("66666666-2222-4333-8444-555555555555")
 	slug := "inline-manifest-ingested"
+	created := "2020-01-02T03:04:05Z"
 
-	postBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"slug":      slug,
-		"title":     "Inline manifest ingested",
-		"items": []map[string]any{
-			{
-				"id":             itemID.String(),
-				"source":         "https://cdn.example.com/day-1.html",
-				"inlineManifest": json.RawMessage(inlineManifestFixture),
-			},
-		},
+	priv, kid := newCuratorKeypair(t)
+	doc := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        uuid.MustParse("6a000000-2222-4333-8444-555555555555").String(),
+		Slug:      slug,
+		Title:     "Inline manifest ingested",
+		Created:   created,
+		Curators:  curatorEntities(kid),
+		Items: []playlist.PlaylistItem{{
+			ID:             itemID.String(),
+			Source:         "https://cdn.example.com/day-1.html",
+			InlineManifest: json.RawMessage(inlineManifestFixture),
+		}},
 	}
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", postBody, http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", signedPlaylistBody(t, priv, doc), http.StatusCreated)
 
 	// publicBaseURL of the integration server, so the executor resolves this from the DB rather
 	// than over HTTP — the local-ingest branch of resolveOnePlaylistRef.
-	groupBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"title":     "Group over an inline-manifest playlist",
-		"curator":   "Curator",
-		"playlists": []string{"http://example.com/api/v1/playlists/" + slug},
-	}
+	gpriv, gkid := newCuratorKeypair(t)
+	groupBody := signedGroupBody(t, gpriv, gkid,
+		uuid.MustParse("6b000000-2222-4333-8444-555555555555").String(),
+		"inline-manifest-ingested-group",
+		"Group over an inline-manifest playlist",
+		created,
+		[]string{"http://example.com/api/v1/playlists/" + slug},
+	)
 	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusCreated)
 
 	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
@@ -235,13 +250,17 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	remoteID := uuid.MustParse("77777777-2222-4333-8444-555555555555")
 	itemID := uuid.MustParse("88888888-2222-4333-8444-555555555555")
 
-	signer := newIntegrationSigner(t)
+	// A remote playlist this feed does not hold is *created* by the ingest, so it must clear the same bar
+	// as POST: self-signed by a key it declares as a curator. Signing it with the feed's own key would not
+	// do — the feed is not this document's author.
+	rpriv, rkid := newCuratorKeypair(t)
 	remote := playlist.Playlist{
 		DPVersion: "1.1.0",
 		ID:        remoteID.String(),
 		Slug:      "remote-inline-manifest",
 		Title:     "Remote inline manifest",
 		Created:   "2020-01-02T03:04:05Z",
+		Curators:  curatorEntities(rkid),
 		Items: []playlist.PlaylistItem{{
 			ID:             itemID.String(),
 			Source:         "https://cdn.example.com/remote.html",
@@ -252,7 +271,12 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedRemote, err := signer.SignPlaylist(unsigned, time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC))
+	remoteSig, err := dp1sign.SignMultiEd25519(unsigned, rpriv, playlist.RoleCurator, remote.Created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.Signatures = []playlist.Signature{remoteSig}
+	signedRemote, err := json.Marshal(remote)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,14 +287,16 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20))
+	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20, fetcher.AllowPrivateDestinations(true)))
 
-	groupBody := map[string]any{
-		"dpVersion": "1.1.0",
-		"title":     "Group over a remote inline-manifest playlist",
-		"curator":   "Curator",
-		"playlists": []string{origin.URL + "/remote.json"},
-	}
+	gpriv, gkid := newCuratorKeypair(t)
+	groupBody := signedGroupBody(t, gpriv, gkid,
+		uuid.MustParse("79000000-2222-4333-8444-555555555555").String(),
+		"remote-inline-manifest-group",
+		"Group over a remote inline-manifest playlist",
+		"2020-01-02T03:04:05Z",
+		[]string{origin.URL + "/remote.json"},
+	)
 	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusCreated)
 
 	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+remote.Slug, nil, http.StatusOK)

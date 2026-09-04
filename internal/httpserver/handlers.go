@@ -3,9 +3,8 @@ package httpserver
 // HTTP handlers: parse query/body, call executor, map errors to OpenAPI-style JSON (see ErrorResponse).
 
 import (
+	"encoding/json"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +17,19 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
 
+// Document projections for list envelopes (stored bytes, verbatim).
+func playlistDocuments(recs []store.PlaylistRecord) []json.RawMessage {
+	return documents(recs, func(r *store.PlaylistRecord) json.RawMessage { return r.Raw })
+}
+
+func playlistGroupDocuments(recs []store.PlaylistGroupRecord) []json.RawMessage {
+	return documents(recs, func(r *store.PlaylistGroupRecord) json.RawMessage { return r.Raw })
+}
+
+func channelDocuments(recs []store.ChannelRecord) []json.RawMessage {
+	return documents(recs, func(r *store.ChannelRecord) json.RawMessage { return r.Raw })
+}
+
 // Handler carries the executor, logger, and build version for health/metadata responses.
 type Handler struct {
 	Exec    executor.Executor
@@ -25,12 +37,25 @@ type Handler struct {
 	Version string
 }
 
-// channelURLPattern matches /api/v1/channels/{uuid} at the end of a URL.
-var channelURLPattern = regexp.MustCompile(`^https?://.*\/api\/v1\/channels\/[0-9a-f-]{36}$`)
-
-// isValidChannelURL checks if a URL matches the channel URL pattern.
-func isValidChannelURL(url string) bool {
-	return channelURLPattern.MatchString(url)
+// bindDeleteRequest decodes a signed delete-intent body and captures the exact bytes in Raw. The
+// executor verifies the signatures over Raw (§7.1 digest, signatures stripped), so the raw form — not
+// the re-encoded struct — is what must be preserved. RequireSignatures has already restored the body.
+//
+// Decoding is strict, like every other write: encoding/json matches member names case-insensitively and
+// ignores unknown ones, so a plain Unmarshal would accept {"Action":"delete"} or extra members and then
+// execute the delete anyway. Deletion is the least forgiving thing this API does; it should be the last
+// place to guess at what the client meant.
+func bindDeleteRequest(c *gin.Context) (*models.SignedDeleteRequest, error) {
+	raw, err := c.GetRawData()
+	if err != nil {
+		return nil, err
+	}
+	var req models.SignedDeleteRequest
+	if err := decodeDocument(raw, &req); err != nil {
+		return nil, err
+	}
+	req.Raw = raw
+	return &req, nil
 }
 
 // Health is a liveness endpoint (no version prefix in plan; we expose both /health and /api/v1/health).
@@ -78,16 +103,18 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 		writeError(c.Writer, st, code, msg)
 		return
 	}
-	c.JSON(http.StatusOK, NewListResponse(pl, next))
+	writeDocumentList(c, playlistDocuments(pl), next)
 }
 
 // CreatePlaylist POST /api/v1/playlists.
 func (h *Handler) CreatePlaylist(c *gin.Context) {
 	var req models.PlaylistCreateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	raw, err := bindDocument(c, &req)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	req.Raw = raw
 	body, err := h.Exec.CreatePlaylist(c.Request.Context(), &req)
 	if err != nil {
 		h.Log.Debug("create playlist", zap.Error(err))
@@ -100,7 +127,7 @@ func (h *Handler) CreatePlaylist(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusCreated, body)
+	created(c, body.Raw)
 }
 
 // GetPlaylist GET /api/v1/playlists/:id.
@@ -117,11 +144,7 @@ func (h *Handler) GetPlaylist(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	if err := writeJSONIndividualGET(c, body); err != nil {
-		h.Log.Error("get playlist: marshal response", zap.Error(err))
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
-		return
-	}
+	writeBytesIndividualGET(c, body.Raw)
 }
 
 // ListPlaylistItems GET /api/v1/playlist-items.
@@ -183,11 +206,13 @@ func (h *Handler) GetPlaylistItem(c *gin.Context) {
 func (h *Handler) ReplacePlaylist(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistReplaceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	raw, intent, err := bindSignedReplace(c, &req)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	body, err := h.Exec.ReplacePlaylist(c.Request.Context(), id, &req)
+	req.Raw = raw
+	body, err := h.Exec.ReplacePlaylist(c.Request.Context(), id, &req, intent)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -198,35 +223,18 @@ func (h *Handler) ReplacePlaylist(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	writeDocument(c, http.StatusOK, body.Raw)
 }
 
-// UpdatePlaylist PATCH /api/v1/playlists/:id.
-func (h *Handler) UpdatePlaylist(c *gin.Context) {
+// DeletePlaylist DELETE /api/v1/playlists/:id. Body is a signed delete-intent (see bindDeleteRequest).
+func (h *Handler) DeletePlaylist(c *gin.Context) {
 	id := c.Param("id")
-	var req models.PlaylistUpdateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	req, err := bindDeleteRequest(c)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	body, err := h.Exec.UpdatePlaylist(c.Request.Context(), id, &req)
-	if err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	if body == nil {
-		h.Log.Error("update playlist: nil body")
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
-		return
-	}
-	c.JSON(http.StatusOK, body)
-}
-
-// DeletePlaylist DELETE /api/v1/playlists/:id.
-func (h *Handler) DeletePlaylist(c *gin.Context) {
-	id := c.Param("id")
-	if err := h.Exec.DeletePlaylist(c.Request.Context(), id); err != nil {
+	if err := h.Exec.DeletePlaylist(c.Request.Context(), id, req); err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
 		return
@@ -253,16 +261,18 @@ func (h *Handler) ListPlaylistGroups(c *gin.Context) {
 		writeError(c.Writer, st, code, msg)
 		return
 	}
-	c.JSON(http.StatusOK, NewListResponse(bodies, next))
+	writeDocumentList(c, playlistGroupDocuments(bodies), next)
 }
 
 // CreatePlaylistGroup POST /api/v1/playlist-groups.
 func (h *Handler) CreatePlaylistGroup(c *gin.Context) {
 	var req models.PlaylistGroupCreateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	raw, err := bindDocument(c, &req)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	req.Raw = raw
 	body, err := h.Exec.CreatePlaylistGroup(c.Request.Context(), &req)
 	if err != nil {
 		h.Log.Debug("create playlist group", zap.Error(err))
@@ -275,7 +285,7 @@ func (h *Handler) CreatePlaylistGroup(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusCreated, body)
+	created(c, body.Raw)
 }
 
 // GetPlaylistGroup GET /api/v1/playlist-groups/:id.
@@ -292,22 +302,20 @@ func (h *Handler) GetPlaylistGroup(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	if err := writeJSONIndividualGET(c, body); err != nil {
-		h.Log.Error("get playlist group: marshal response", zap.Error(err))
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
-		return
-	}
+	writeBytesIndividualGET(c, body.Raw)
 }
 
 // ReplacePlaylistGroup PUT /api/v1/playlist-groups/:id.
 func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
 	id := c.Param("id")
 	var req models.PlaylistGroupReplaceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	raw, intent, err := bindSignedReplace(c, &req)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	body, err := h.Exec.ReplacePlaylistGroup(c.Request.Context(), id, &req)
+	req.Raw = raw
+	body, err := h.Exec.ReplacePlaylistGroup(c.Request.Context(), id, &req, intent)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -318,35 +326,18 @@ func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	writeDocument(c, http.StatusOK, body.Raw)
 }
 
-// UpdatePlaylistGroup PATCH /api/v1/playlist-groups/:id.
-func (h *Handler) UpdatePlaylistGroup(c *gin.Context) {
+// DeletePlaylistGroup DELETE /api/v1/playlist-groups/:id. Body is a signed delete-intent.
+func (h *Handler) DeletePlaylistGroup(c *gin.Context) {
 	id := c.Param("id")
-	var req models.PlaylistGroupUpdateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	req, err := bindDeleteRequest(c)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	body, err := h.Exec.UpdatePlaylistGroup(c.Request.Context(), id, &req)
-	if err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	if body == nil {
-		h.Log.Error("update playlist group: nil body")
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
-		return
-	}
-	c.JSON(http.StatusOK, body)
-}
-
-// DeletePlaylistGroup DELETE /api/v1/playlist-groups/:id.
-func (h *Handler) DeletePlaylistGroup(c *gin.Context) {
-	id := c.Param("id")
-	if err := h.Exec.DeletePlaylistGroup(c.Request.Context(), id); err != nil {
+	if err := h.Exec.DeletePlaylistGroup(c.Request.Context(), id, req); err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
 		return
@@ -373,16 +364,18 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		writeError(c.Writer, st, code, msg)
 		return
 	}
-	c.JSON(http.StatusOK, NewListResponse(bodies, next))
+	writeDocumentList(c, channelDocuments(bodies), next)
 }
 
 // CreateChannel POST /api/v1/channels.
 func (h *Handler) CreateChannel(c *gin.Context) {
 	var req models.ChannelCreateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	raw, err := bindDocument(c, &req)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	req.Raw = raw
 	body, err := h.Exec.CreateChannel(c.Request.Context(), &req)
 	if err != nil {
 		if executor.IsExtensionsDisabled(err) {
@@ -399,7 +392,7 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusCreated, body)
+	created(c, body.Raw)
 }
 
 // GetChannel GET /api/v1/channels/:id.
@@ -420,22 +413,20 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	if err := writeJSONIndividualGET(c, body); err != nil {
-		h.Log.Error("get channel: marshal response", zap.Error(err))
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "response encoding failed")
-		return
-	}
+	writeBytesIndividualGET(c, body.Raw)
 }
 
 // ReplaceChannel PUT /api/v1/channels/:id.
 func (h *Handler) ReplaceChannel(c *gin.Context) {
 	id := c.Param("id")
 	var req models.ChannelReplaceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	raw, intent, err := bindSignedReplace(c, &req)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	body, err := h.Exec.ReplaceChannel(c.Request.Context(), id, &req)
+	req.Raw = raw
+	body, err := h.Exec.ReplaceChannel(c.Request.Context(), id, &req, intent)
 	if err != nil {
 		if executor.IsExtensionsDisabled(err) {
 			writeError(c.Writer, http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment")
@@ -450,39 +441,18 @@ func (h *Handler) ReplaceChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	c.JSON(http.StatusOK, body)
+	writeDocument(c, http.StatusOK, body.Raw)
 }
 
-// UpdateChannel PATCH /api/v1/channels/:id.
-func (h *Handler) UpdateChannel(c *gin.Context) {
+// DeleteChannel DELETE /api/v1/channels/:id. Body is a signed delete-intent.
+func (h *Handler) DeleteChannel(c *gin.Context) {
 	id := c.Param("id")
-	var req models.ChannelUpdateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	req, err := bindDeleteRequest(c)
+	if err != nil {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	body, err := h.Exec.UpdateChannel(c.Request.Context(), id, &req)
-	if err != nil {
-		if executor.IsExtensionsDisabled(err) {
-			writeError(c.Writer, http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment")
-			return
-		}
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	if body == nil {
-		h.Log.Error("update channel: nil body")
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
-		return
-	}
-	c.JSON(http.StatusOK, body)
-}
-
-// DeleteChannel DELETE /api/v1/channels/:id.
-func (h *Handler) DeleteChannel(c *gin.Context) {
-	id := c.Param("id")
-	if err := h.Exec.DeleteChannel(c.Request.Context(), id); err != nil {
+	if err := h.Exec.DeleteChannel(c.Request.Context(), id, req); err != nil {
 		if executor.IsExtensionsDisabled(err) {
 			writeError(c.Writer, http.StatusNotFound, "extensions_disabled", "DP-1 extensions are disabled on this deployment")
 			return
@@ -529,45 +499,4 @@ func (h *Handler) GetChannelRegistry(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, models.ChannelRegistry{Publishers: items})
-}
-
-// ReplaceChannelRegistry PUT /api/v1/registry/channels.
-func (h *Handler) ReplaceChannelRegistry(c *gin.Context) {
-	var req models.ChannelRegistry
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-
-	if len(req.Publishers) == 0 {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", "registry must contain at least one publisher")
-		return
-	}
-
-	for i, p := range req.Publishers {
-		if len(p.ChannelURLs) == 0 {
-			writeError(c.Writer, http.StatusBadRequest, "bad_request", "each publisher must have at least one channel URL at index "+strconv.Itoa(i))
-			return
-		}
-		for _, url := range p.ChannelURLs {
-			if !isValidChannelURL(url) {
-				writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel URL must end with /api/v1/channels/{uuid} (publisher "+strconv.Itoa(i)+")")
-				return
-			}
-		}
-	}
-
-	totalChannels, err := h.Exec.ReplaceChannelRegistry(c.Request.Context(), req)
-	if err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":        true,
-		"message":        "Curated registry updated successfully",
-		"items_count":    len(req.Publishers),
-		"total_channels": totalChannels,
-	})
 }

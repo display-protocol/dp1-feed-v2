@@ -2,6 +2,7 @@
 package dp1svc
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -26,17 +27,19 @@ type ValidatorSigner interface {
 	ValidatePlaylist(raw []byte) (*playlist.Playlist, error)
 	// ValidatePlaylistWithExtension validates core plus the playlists registry extension overlay and returns the parsed document.
 	ValidatePlaylistWithExtension(raw []byte) (*playlist.Playlist, error)
-	// SignPlaylist appends a v1.1+ feed signature (Ed25519): any existing entry with the same Kid as the feed key is replaced; other signatures are preserved. Strips legacy top-level "signature".
+	// SignPlaylist appends a v1.1+ feed signature (Ed25519) and returns the document with only "signatures"
+	// changed: an existing entry with the feed Kid is replaced, every other entry and every other field —
+	// including a legacy top-level "signature" — is preserved byte-for-byte (see appendFeedSignature).
 	SignPlaylist(raw []byte, ts time.Time) ([]byte, error)
 
 	// ValidatePlaylistGroup validates a signed playlist-group document and returns the parsed document (dp1-go ParseAndValidatePlaylistGroup).
 	ValidatePlaylistGroup(raw []byte) (*playlistgroup.Group, error)
-	// SignPlaylistGroup appends or replaces-by-Kid the feed signature; preserves other signatures; strips legacy "signature".
+	// SignPlaylistGroup is SignPlaylist for playlist-group documents.
 	SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error)
 
 	// ValidateChannel validates a signed channels extension document and returns the parsed document (dp1-go ParseAndValidateChannel).
 	ValidateChannel(raw []byte) (*channels.Channel, error)
-	// SignChannel appends or replaces-by-Kid the feed signature; preserves other signatures; strips legacy "signature".
+	// SignChannel is SignPlaylist for channel documents.
 	SignChannel(raw []byte, ts time.Time) ([]byte, error)
 
 	// VerifyPlaylistSignatures verifies all signatures in a signed playlist document.
@@ -46,6 +49,18 @@ type ValidatorSigner interface {
 	VerifyPlaylistGroupSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
 	// VerifyChannelSignatures verifies all signatures in a signed channel document.
 	VerifyChannelSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
+	// VerifySignatures verifies the top-level "signatures" array of an arbitrary signed JSON payload,
+	// applying the same DP-1 §7.1 digest and payload_hash rules as the document verifiers but without any
+	// schema validation. It exists for payloads that are not playlists/groups/channels — for example the
+	// signed delete-intent used to authorize DELETE — so callers can check authorship over a small
+	// hand-built object. Returns ok=true when every entry verifies; on failure ok=false and failed lists
+	// the entries that did not verify.
+	VerifySignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
+
+	// PayloadHash returns the DP-1 §7.1 signing digest of raw ("sha256:<hex>" over the JCS form with
+	// signature/signatures stripped) — the same value a signature carries in payload_hash. A signed
+	// mutation intent uses it to name the exact document it authorizes.
+	PayloadHash(raw []byte) (string, error)
 }
 
 // Service holds the operator Ed25519 key and did:key kid used in v1.1+ multi-signature entries.
@@ -85,10 +100,17 @@ func New(signingKeyHex, kid string) (*Service, error) {
 	return &Service{priv: priv, kid: kid}, nil
 }
 
-// mergeSignaturesReplacingSameKid builds the post-sign "signatures" array: drop every entry in raw
-// whose Kid matches newSig (typically prior feed signatures), keep all others in order, then append newSig.
-// Raw JSON's legacy top-level "signature" is ignored here; callers delete it from the document map.
-func mergeSignaturesReplacingSameKid(raw []byte, newSig playlist.Signature) ([]playlist.Signature, error) {
+// mergeSignaturesReplacingPriorFeedSig builds the post-sign "signatures" array: drop the feed's own prior
+// signature, keep every other entry in order, then append newSig. A legacy top-level "signature" is not
+// part of this array and is preserved by appendFeedSignature.
+//
+// The match is on kid AND role, not kid alone. Nothing stops a curator or publisher from being the same
+// key as the feed — a self-hosted deployment whose operator also curates is the obvious case — and
+// matching on kid alone silently deleted that owner's `curator`/`publisher` attestation, leaving only a
+// `feed` entry for the key. The document then no longer carried the owner signature it was authorized
+// with, and a role-aware consumer would be right to reject it. Only the feed's own previous entry is
+// replaced; every attestation the feed did not make is preserved.
+func mergeSignaturesReplacingPriorFeedSig(raw []byte, newSig playlist.Signature) ([]playlist.Signature, error) {
 	var doc struct {
 		Signatures []playlist.Signature `json:"signatures"`
 	}
@@ -97,7 +119,7 @@ func mergeSignaturesReplacingSameKid(raw []byte, newSig playlist.Signature) ([]p
 	}
 	out := make([]playlist.Signature, 0, len(doc.Signatures)+1)
 	for _, s := range doc.Signatures {
-		if s.Kid == newSig.Kid {
+		if s.Kid == newSig.Kid && s.Role == newSig.Role {
 			continue
 		}
 		out = append(out, s)
@@ -130,24 +152,49 @@ func (s *Service) ValidatePlaylistWithExtension(raw []byte) (*playlist.Playlist,
 	return p, nil
 }
 
-// SignPlaylist signs the document with a v1.1+ multi-signature entry (feed role). Preserves non-feed
-// signatures on raw; replaces any prior signature whose Kid matches the feed key.
-func (s *Service) SignPlaylist(raw []byte, ts time.Time) ([]byte, error) {
+// appendFeedSignature is the single signing path for every document kind: sign raw with the feed key
+// and return raw with only the top-level "signatures" array changed.
+//
+// Invariant: the returned bytes must be JCS-equivalent to raw once "signature"/"signatures" are
+// stripped, so every signature already on the document — a curator's, a publisher's, or a legacy
+// "signature" — still verifies against what is stored and served. That is why the document is decoded
+// as map[string]json.RawMessage rather than map[string]any: RawMessage keeps every other member's bytes
+// verbatim, whereas `any` would re-type numbers through float64 and silently corrupt integers above
+// 2^53. The encoder disables HTML escaping for the same reason (an escape is JCS-neutral, but verbatim
+// is verbatim). A legacy "signature" is deliberately kept: DP-1 §7.1.3 has players prefer "signatures"
+// when both are present, and dropping it would be an edit to a document the feed does not own.
+func (s *Service) appendFeedSignature(raw []byte, ts time.Time) ([]byte, error) {
 	sig, err := sign.SignMultiEd25519(raw, s.priv, playlist.RoleFeed, ts.UTC().Format(time.RFC3339))
 	if err != nil {
 		return nil, err
 	}
-	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
+	merged, err := mergeSignaturesReplacingPriorFeedSig(raw, sig)
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("sign: decode document: %w", err)
 	}
-	m["signatures"] = merged
-	delete(m, "signature")
-	return json.Marshal(m)
+	sigs, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("sign: encode signatures: %w", err)
+	}
+	doc["signatures"] = sigs
+
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
+		return nil, fmt.Errorf("sign: encode document: %w", err)
+	}
+	return bytes.TrimRight(out.Bytes(), "\n"), nil
+}
+
+// SignPlaylist signs the document with a v1.1+ multi-signature entry (feed role). Preserves non-feed
+// signatures on raw; replaces any prior signature whose Kid matches the feed key.
+func (s *Service) SignPlaylist(raw []byte, ts time.Time) ([]byte, error) {
+	return s.appendFeedSignature(raw, ts)
 }
 
 // ValidatePlaylistGroup implements ValidatorSigner.
@@ -164,21 +211,7 @@ func (s *Service) ValidatePlaylistGroup(raw []byte) (*playlistgroup.Group, error
 
 // SignPlaylistGroup implements ValidatorSigner (feed role per playlist-group examples).
 func (s *Service) SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error) {
-	sig, err := sign.SignMultiEd25519(raw, s.priv, playlist.RoleFeed, ts.UTC().Format(time.RFC3339))
-	if err != nil {
-		return nil, err
-	}
-	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
-	m["signatures"] = merged
-	delete(m, "signature")
-	return json.Marshal(m)
+	return s.appendFeedSignature(raw, ts)
 }
 
 // ValidateChannel implements ValidatorSigner.
@@ -195,21 +228,7 @@ func (s *Service) ValidateChannel(raw []byte) (*channels.Channel, error) {
 
 // SignChannel implements ValidatorSigner (feed role per channels extension examples).
 func (s *Service) SignChannel(raw []byte, ts time.Time) ([]byte, error) {
-	sig, err := sign.SignMultiEd25519(raw, s.priv, playlist.RoleFeed, ts.UTC().Format(time.RFC3339))
-	if err != nil {
-		return nil, err
-	}
-	merged, err := mergeSignaturesReplacingSameKid(raw, sig)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
-	m["signatures"] = merged
-	delete(m, "signature")
-	return json.Marshal(m)
+	return s.appendFeedSignature(raw, ts)
 }
 
 // VerifyPlaylistSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyPlaylistSignatures.
@@ -226,4 +245,15 @@ func (s *Service) VerifyPlaylistGroupSignatures(raw []byte) (bool, []playlist.Si
 // VerifyChannelSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyChannelSignatures.
 func (s *Service) VerifyChannelSignatures(raw []byte) (bool, []playlist.Signature, error) {
 	return sign.VerifyChannelSignatures(raw)
+}
+
+// VerifySignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyMultiSignaturesJSON, the
+// schema-agnostic verifier the document-specific helpers are themselves built on.
+func (s *Service) VerifySignatures(raw []byte) (bool, []playlist.Signature, error) {
+	return sign.VerifyMultiSignaturesJSON(raw)
+}
+
+// PayloadHash implements ValidatorSigner; delegates to dp1-go sign.PayloadHashString.
+func (s *Service) PayloadHash(raw []byte) (string, error) {
+	return sign.PayloadHashString(raw)
 }

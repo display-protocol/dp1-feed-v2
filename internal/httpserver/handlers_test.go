@@ -2,12 +2,12 @@ package httpserver
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -27,6 +27,18 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/models"
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
+
+// deleteIntentBody builds a parseable signed delete-intent body for DELETE handler tests. The executor
+// is mocked in these tests, so the signature need not verify — only the JSON must decode.
+func deleteIntentBody(targetType, id, slug string) *bytes.Reader {
+	b, _ := json.Marshal(models.SignedDeleteRequest{
+		Action:     models.IntentActionDelete,
+		Target:     models.IntentTarget{Type: targetType, ID: id, Slug: slug},
+		Created:    "2026-01-01T00:00:00Z",
+		Signatures: []playlist.Signature{{Kid: "did:key:test", Alg: "ed25519", Sig: "s"}},
+	})
+	return bytes.NewReader(b)
+}
 
 func TestHealth(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -123,7 +135,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
-					Return([]playlist.Playlist{{DPVersion: "1.1.0"}}, "cursor1", nil)
+					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "cursor1", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -140,7 +152,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "").
-					Return([]playlist.Playlist{}, "", nil)
+					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -156,7 +168,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "").
-					Return([]playlist.Playlist{{DPVersion: "1.1.0"}}, "", nil)
+					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -193,7 +205,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "").
-					Return([]playlist.Playlist{}, "", nil)
+					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -208,7 +220,7 @@ func TestListPlaylists(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "my-group").
-					Return([]playlist.Playlist{}, "", nil)
+					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -306,7 +318,7 @@ func TestCreatePlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					CreatePlaylist(gomock.Any(), gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Test Playlist"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Test Playlist"}), nil)
 			},
 			expectedStatus: http.StatusCreated,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -416,7 +428,7 @@ func TestGetPlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetPlaylist(gomock.Any(), gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Test"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Test"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -431,7 +443,7 @@ func TestGetPlaylist(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetPlaylist(gomock.Any(), "my-playlist").
-					Return(&playlist.Playlist{DPVersion: "1.1.0"}, nil)
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -505,7 +517,7 @@ func TestGetPlaylist_IfNoneMatchNotModified(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	pl := &playlist.Playlist{DPVersion: "1.1.0", Title: "Cached"}
+	pl := playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Cached"})
 	mockExec := mocks.NewMockExecutor(ctrl)
 	mockExec.EXPECT().
 		GetPlaylist(gomock.Any(), "slug-or-id").
@@ -736,6 +748,31 @@ func TestGetPlaylistItem(t *testing.T) {
 	}
 }
 
+// putEnvelope builds a PUT body: the document plus the signed intent that authorizes replacing this
+// resource with it. These handler tests mock the executor, so the intent only has to parse — the
+// executor is what verifies it.
+func putEnvelope(doc any, targetType, id, slug string) []byte {
+	d, err := json.Marshal(doc)
+	if err != nil {
+		panic(err)
+	}
+	a, err := json.Marshal(models.SignedIntent{
+		Action:      models.IntentActionReplace,
+		Target:      models.IntentTarget{Type: targetType, ID: id, Slug: slug},
+		PayloadHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		Created:     time.Now().UTC().Format(time.RFC3339),
+		Signatures:  []playlist.Signature{{Alg: "ed25519", Kid: "did:key:test", Sig: "sig"}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	b, err := json.Marshal(map[string]json.RawMessage{"document": d, "authorization": a})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 func TestReplacePlaylist(t *testing.T) {
 	playlistID := uuid.New().String()
 	validBody := models.PlaylistReplaceRequest{
@@ -756,8 +793,8 @@ func TestReplacePlaylist(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}, nil)
+					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any(), gomock.Any()).
+					Return(playlistRecPtr(playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -782,7 +819,7 @@ func TestReplacePlaylist(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
+					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any(), gomock.Any()).
 					Return(nil, store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -797,7 +834,7 @@ func TestReplacePlaylist(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any()).
+					ReplacePlaylist(gomock.Any(), playlistID, gomock.Any(), gomock.Any()).
 					Return(nil, nil)
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -822,7 +859,7 @@ func TestReplacePlaylist(t *testing.T) {
 				Log:  zaptest.NewLogger(t),
 			}
 
-			bodyBytes, _ := json.Marshal(tt.body)
+			bodyBytes := putEnvelope(tt.body, models.IntentTargetPlaylist, playlistID, "slug")
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/playlists/"+playlistID, bytes.NewReader(bodyBytes))
@@ -830,106 +867,6 @@ func TestReplacePlaylist(t *testing.T) {
 			c.Params = gin.Params{{Key: "id", Value: playlistID}}
 
 			h.ReplacePlaylist(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestUpdatePlaylist(t *testing.T) {
-	playlistID := uuid.New().String()
-	title := "Updated Playlist"
-	validBody := models.PlaylistUpdateRequest{
-		Title: &title,
-	}
-
-	tests := []struct {
-		name           string
-		body           any
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdatePlaylist(gomock.Any(), playlistID, gomock.Any()).
-					Return(&playlist.Playlist{DPVersion: "1.1.0", Title: "Updated Playlist"}, nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp playlist.Playlist
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "Updated Playlist", resp.Title)
-			},
-		},
-		{
-			name:           "invalid JSON",
-			body:           "invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-		{
-			name: "not found",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdatePlaylist(gomock.Any(), playlistID, gomock.Any()).
-					Return(nil, store.ErrNotFound)
-			},
-			expectedStatus: http.StatusNotFound,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "not_found", resp.Error)
-			},
-		},
-		{
-			name: "nil body from executor",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdatePlaylist(gomock.Any(), playlistID, gomock.Any()).
-					Return(nil, nil)
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			bodyBytes, _ := json.Marshal(tt.body)
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPatch, "/api/v1/playlists/"+playlistID, bytes.NewReader(bodyBytes))
-			c.Request.Header.Set("Content-Type", "application/json")
-			c.Params = gin.Params{{Key: "id", Value: playlistID}}
-
-			h.UpdatePlaylist(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			tt.checkResponse(t, w.Body.Bytes())
@@ -949,7 +886,7 @@ func TestDeletePlaylist(t *testing.T) {
 			name: "success",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeletePlaylist(gomock.Any(), playlistID).
+					DeletePlaylist(gomock.Any(), playlistID, gomock.Any()).
 					Return(nil)
 			},
 			expectedStatus: http.StatusNoContent,
@@ -958,7 +895,7 @@ func TestDeletePlaylist(t *testing.T) {
 			name: "not found",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeletePlaylist(gomock.Any(), playlistID).
+					DeletePlaylist(gomock.Any(), playlistID, gomock.Any()).
 					Return(store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -967,7 +904,7 @@ func TestDeletePlaylist(t *testing.T) {
 			name: "internal error",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeletePlaylist(gomock.Any(), playlistID).
+					DeletePlaylist(gomock.Any(), playlistID, gomock.Any()).
 					Return(errors.New("db error"))
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -989,7 +926,7 @@ func TestDeletePlaylist(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, nil)
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.IntentTargetPlaylist, playlistID, "slug"))
 			c.Params = gin.Params{{Key: "id", Value: playlistID}}
 
 			h.DeletePlaylist(c)
@@ -1001,6 +938,97 @@ func TestDeletePlaylist(t *testing.T) {
 			} else {
 				assert.Equal(t, tt.expectedStatus, w.Code)
 			}
+		})
+	}
+}
+
+// TestDeletePlaylist_forbidden covers the delete handler mapping an ownership failure to 403.
+func TestDeletePlaylist_forbidden(t *testing.T) {
+	playlistID := uuid.New().String()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	mockExec.EXPECT().
+		DeletePlaylist(gomock.Any(), playlistID, gomock.Any()).
+		Return(executor.ErrNotResourceOwner)
+
+	h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, deleteIntentBody(models.IntentTargetPlaylist, playlistID, "slug"))
+	c.Params = gin.Params{{Key: "id", Value: playlistID}}
+
+	h.DeletePlaylist(c)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "forbidden", resp.Error)
+}
+
+// TestDeletePlaylist_malformedBody covers the delete handler rejecting an unparseable body with 400,
+// before the executor is called.
+func TestDeletePlaylist_malformedBody(t *testing.T) {
+	playlistID := uuid.New().String()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl) // no DeletePlaylist call expected
+
+	h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, bytes.NewReader([]byte(`{invalid`)))
+	c.Params = gin.Params{{Key: "id", Value: playlistID}}
+
+	h.DeletePlaylist(c)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "bad_request", resp.Error)
+}
+
+// TestDeletePlaylist_strictDecoding covers the delete handler applying the same strict decoding as every
+// other write. encoding/json matches member names case-insensitively and ignores unknown ones, so without
+// the strict pass {"Action":"delete"} or a stray member would bind and the delete would proceed — on the
+// least forgiving route in the API.
+func TestDeletePlaylist_strictDecoding(t *testing.T) {
+	playlistID := uuid.New().String()
+	sig := `[{"alg":"ed25519","kid":"did:key:z6Mk","ts":"2026-01-01T00:00:00Z","payload_hash":"sha256:x","role":"curator","sig":"s"}]`
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "case variant member",
+			body: `{"Action":"delete","target":{"type":"playlist","id":"` + playlistID + `","slug":"s"},"created":"2026-01-01T00:00:00Z","signatures":` + sig + `}`,
+		},
+		{
+			name: "unknown member",
+			body: `{"action":"delete","target":{"type":"playlist","id":"` + playlistID + `","slug":"s"},"created":"2026-01-01T00:00:00Z","signatures":` + sig + `,"extra":1}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockExec := mocks.NewMockExecutor(ctrl) // no DeletePlaylist call expected
+
+			h := &Handler{Exec: mockExec, Log: zaptest.NewLogger(t)}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlists/"+playlistID, bytes.NewReader([]byte(tc.body)))
+			c.Params = gin.Params{{Key: "id", Value: playlistID}}
+
+			h.DeletePlaylist(c)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, "bad_request", resp.Error)
 		})
 	}
 }
@@ -1019,7 +1047,7 @@ func TestListPlaylistGroups(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc).
-					Return([]playlistgroup.Group{{Title: "Test Group"}}, "", nil)
+					Return([]store.PlaylistGroupRecord{groupRec(playlistgroup.Group{Title: "Test Group"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1085,7 +1113,7 @@ func TestCreatePlaylistGroup(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					CreatePlaylistGroup(gomock.Any(), gomock.Any()).
-					Return(&playlistgroup.Group{Title: "Test Group"}, nil)
+					Return(groupRecPtr(playlistgroup.Group{Title: "Test Group"}), nil)
 			},
 			expectedStatus: http.StatusCreated,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1163,7 +1191,7 @@ func TestGetPlaylistGroup(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetPlaylistGroup(gomock.Any(), groupID).
-					Return(&playlistgroup.Group{Title: "Test Group"}, nil)
+					Return(groupRecPtr(playlistgroup.Group{Title: "Test Group"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1250,8 +1278,8 @@ func TestReplacePlaylistGroup(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(&playlistgroup.Group{Title: "Updated Group"}, nil)
+					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any(), gomock.Any()).
+					Return(groupRecPtr(playlistgroup.Group{Title: "Updated Group"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1276,7 +1304,7 @@ func TestReplacePlaylistGroup(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
+					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any(), gomock.Any()).
 					Return(nil, nil)
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -1301,7 +1329,7 @@ func TestReplacePlaylistGroup(t *testing.T) {
 				Log:  zaptest.NewLogger(t),
 			}
 
-			bodyBytes, _ := json.Marshal(tt.body)
+			bodyBytes := putEnvelope(tt.body, models.IntentTargetPlaylistGroup, groupID, "slug")
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/playlist-groups/"+groupID, bytes.NewReader(bodyBytes))
@@ -1309,106 +1337,6 @@ func TestReplacePlaylistGroup(t *testing.T) {
 			c.Params = gin.Params{{Key: "id", Value: groupID}}
 
 			h.ReplacePlaylistGroup(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestUpdatePlaylistGroup(t *testing.T) {
-	groupID := uuid.New().String()
-	title := "Updated Group"
-	validBody := models.PlaylistGroupUpdateRequest{
-		Title: &title,
-	}
-
-	tests := []struct {
-		name           string
-		body           any
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdatePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(&playlistgroup.Group{Title: "Updated Group"}, nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp playlistgroup.Group
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "Updated Group", resp.Title)
-			},
-		},
-		{
-			name:           "invalid JSON",
-			body:           "invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-		{
-			name: "not found",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdatePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(nil, store.ErrNotFound)
-			},
-			expectedStatus: http.StatusNotFound,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "not_found", resp.Error)
-			},
-		},
-		{
-			name: "nil body from executor",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdatePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(nil, nil)
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			bodyBytes, _ := json.Marshal(tt.body)
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPatch, "/api/v1/playlist-groups/"+groupID, bytes.NewReader(bodyBytes))
-			c.Request.Header.Set("Content-Type", "application/json")
-			c.Params = gin.Params{{Key: "id", Value: groupID}}
-
-			h.UpdatePlaylistGroup(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			tt.checkResponse(t, w.Body.Bytes())
@@ -1428,7 +1356,7 @@ func TestDeletePlaylistGroup(t *testing.T) {
 			name: "success",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeletePlaylistGroup(gomock.Any(), groupID).
+					DeletePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
 					Return(nil)
 			},
 			expectedStatus: http.StatusNoContent,
@@ -1437,7 +1365,7 @@ func TestDeletePlaylistGroup(t *testing.T) {
 			name: "not found",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeletePlaylistGroup(gomock.Any(), groupID).
+					DeletePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
 					Return(store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -1459,7 +1387,7 @@ func TestDeletePlaylistGroup(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlist-groups/"+groupID, nil)
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlist-groups/"+groupID, deleteIntentBody(models.IntentTargetPlaylistGroup, groupID, "slug"))
 			c.Params = gin.Params{{Key: "id", Value: groupID}}
 
 			h.DeletePlaylistGroup(c)
@@ -1488,7 +1416,7 @@ func TestListChannels(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					ListChannels(gomock.Any(), 100, "", store.SortAsc).
-					Return([]channels.Channel{{Title: "Test Channel"}}, "", nil)
+					Return([]store.ChannelRecord{channelRec(channels.Channel{Title: "Test Channel"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1554,7 +1482,7 @@ func TestCreateChannel(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					CreateChannel(gomock.Any(), gomock.Any()).
-					Return(&channels.Channel{Title: "Test Channel"}, nil)
+					Return(channelRecPtr(channels.Channel{Title: "Test Channel"}), nil)
 			},
 			expectedStatus: http.StatusCreated,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1647,7 +1575,7 @@ func TestGetChannel(t *testing.T) {
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
 					GetChannel(gomock.Any(), channelID).
-					Return(&channels.Channel{Title: "Test Channel"}, nil)
+					Return(channelRecPtr(channels.Channel{Title: "Test Channel"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1749,8 +1677,8 @@ func TestReplaceChannel(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(&channels.Channel{Title: "Updated Channel"}, nil)
+					ReplaceChannel(gomock.Any(), channelID, gomock.Any(), gomock.Any()).
+					Return(channelRecPtr(channels.Channel{Title: "Updated Channel"}), nil)
 			},
 			expectedStatus: http.StatusOK,
 			checkResponse: func(t *testing.T, body []byte) {
@@ -1764,7 +1692,7 @@ func TestReplaceChannel(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
+					ReplaceChannel(gomock.Any(), channelID, gomock.Any(), gomock.Any()).
 					Return(nil, executor.ErrExtensionsDisabled)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -1790,7 +1718,7 @@ func TestReplaceChannel(t *testing.T) {
 			body: validBody,
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ReplaceChannel(gomock.Any(), channelID, gomock.Any()).
+					ReplaceChannel(gomock.Any(), channelID, gomock.Any(), gomock.Any()).
 					Return(nil, nil)
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -1815,7 +1743,7 @@ func TestReplaceChannel(t *testing.T) {
 				Log:  zaptest.NewLogger(t),
 			}
 
-			bodyBytes, _ := json.Marshal(tt.body)
+			bodyBytes := putEnvelope(tt.body, models.IntentTargetChannel, channelID, "slug")
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/channels/"+channelID, bytes.NewReader(bodyBytes))
@@ -1823,121 +1751,6 @@ func TestReplaceChannel(t *testing.T) {
 			c.Params = gin.Params{{Key: "id", Value: channelID}}
 
 			h.ReplaceChannel(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestUpdateChannel(t *testing.T) {
-	channelID := uuid.New().String()
-	title := "Updated Channel"
-	validBody := models.ChannelUpdateRequest{
-		Title: &title,
-	}
-
-	tests := []struct {
-		name           string
-		body           any
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdateChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(&channels.Channel{Title: "Updated Channel"}, nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp channels.Channel
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "Updated Channel", resp.Title)
-			},
-		},
-		{
-			name: "extensions disabled",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdateChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(nil, executor.ErrExtensionsDisabled)
-			},
-			expectedStatus: http.StatusNotFound,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "extensions_disabled", resp.Error)
-			},
-		},
-		{
-			name:           "invalid JSON",
-			body:           "invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-		{
-			name: "not found",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdateChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(nil, store.ErrNotFound)
-			},
-			expectedStatus: http.StatusNotFound,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "not_found", resp.Error)
-			},
-		},
-		{
-			name: "nil body from executor",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					UpdateChannel(gomock.Any(), channelID, gomock.Any()).
-					Return(nil, nil)
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			bodyBytes, _ := json.Marshal(tt.body)
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPatch, "/api/v1/channels/"+channelID, bytes.NewReader(bodyBytes))
-			c.Request.Header.Set("Content-Type", "application/json")
-			c.Params = gin.Params{{Key: "id", Value: channelID}}
-
-			h.UpdateChannel(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			tt.checkResponse(t, w.Body.Bytes())
@@ -1958,7 +1771,7 @@ func TestDeleteChannel(t *testing.T) {
 			name: "success",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeleteChannel(gomock.Any(), channelID).
+					DeleteChannel(gomock.Any(), channelID, gomock.Any()).
 					Return(nil)
 			},
 			expectedStatus: http.StatusNoContent,
@@ -1968,7 +1781,7 @@ func TestDeleteChannel(t *testing.T) {
 			name: "extensions disabled",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeleteChannel(gomock.Any(), channelID).
+					DeleteChannel(gomock.Any(), channelID, gomock.Any()).
 					Return(executor.ErrExtensionsDisabled)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -1982,7 +1795,7 @@ func TestDeleteChannel(t *testing.T) {
 			name: "not found",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					DeleteChannel(gomock.Any(), channelID).
+					DeleteChannel(gomock.Any(), channelID, gomock.Any()).
 					Return(store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -2009,7 +1822,7 @@ func TestDeleteChannel(t *testing.T) {
 
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channelID, nil)
+			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channelID, deleteIntentBody(models.IntentTargetChannel, channelID, "slug"))
 			c.Params = gin.Params{{Key: "id", Value: channelID}}
 
 			h.DeleteChannel(c)
@@ -2118,216 +1931,6 @@ func TestGetChannelRegistry(t *testing.T) {
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestReplaceChannelRegistry(t *testing.T) {
-	validURL := "http://example.com/api/v1/channels/" + uuid.New().String()
-	validBody := models.ChannelRegistry{
-		Publishers: []models.ChannelRegistryPublisher{
-			{Name: "Publisher 1", ChannelURLs: []string{validURL}},
-		},
-	}
-
-	tests := []struct {
-		name           string
-		body           any
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
-					Return(1, nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp map[string]any
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, true, resp["success"])
-				assert.Equal(t, float64(1), resp["items_count"])
-				assert.Equal(t, float64(1), resp["total_channels"])
-			},
-		},
-		{
-			// The wire body carries the optional did and a single channel_urls list;
-			// this pins both onto what the executor actually receives.
-			name: "success with did and raw JSON body",
-			body: map[string]any{
-				"publishers": []map[string]any{
-					{"name": "Publisher 1", "did": "did:key:z6Mk", "channel_urls": []string{validURL}},
-				},
-			},
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(_ context.Context, req models.ChannelRegistry) (int, error) {
-						require.Len(t, req.Publishers, 1)
-						assert.Equal(t, "did:key:z6Mk", req.Publishers[0].DID)
-						require.Len(t, req.Publishers[0].ChannelURLs, 1)
-						assert.Equal(t, validURL, req.Publishers[0].ChannelURLs[0])
-						return 1, nil
-					})
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp map[string]any
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, float64(1), resp["total_channels"])
-			},
-		},
-		{
-			name: "empty registry",
-			body: models.ChannelRegistry{Publishers: []models.ChannelRegistryPublisher{}},
-			setupMock: func(m *mocks.MockExecutor) {
-			},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-				assert.Contains(t, resp.Message, "at least one publisher")
-			},
-		},
-		{
-			name: "publisher with no channels",
-			body: models.ChannelRegistry{
-				Publishers: []models.ChannelRegistryPublisher{
-					{Name: "Publisher 1", ChannelURLs: []string{}},
-				},
-			},
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-				assert.Contains(t, resp.Message, "at least one channel URL")
-			},
-		},
-		{
-			name: "invalid channel URL format",
-			body: models.ChannelRegistry{
-				Publishers: []models.ChannelRegistryPublisher{
-					{Name: "Publisher 1", ChannelURLs: []string{"http://example.com/invalid"}},
-				},
-			},
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-				assert.Contains(t, resp.Message, "channel URL must end with")
-			},
-		},
-		{
-			name:           "invalid JSON",
-			body:           "invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-		{
-			name: "executor error",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ReplaceChannelRegistry(gomock.Any(), gomock.Any()).
-					Return(0, errors.New("db error"))
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			bodyBytes, _ := json.Marshal(tt.body)
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/registry/channels", bytes.NewReader(bodyBytes))
-			c.Request.Header.Set("Content-Type", "application/json")
-
-			h.ReplaceChannelRegistry(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestIsValidChannelURL(t *testing.T) {
-	tests := []struct {
-		name     string
-		url      string
-		expected bool
-	}{
-		{
-			name:     "valid HTTP URL",
-			url:      "http://example.com/api/v1/channels/" + uuid.New().String(),
-			expected: true,
-		},
-		{
-			name:     "valid HTTPS URL",
-			url:      "https://example.com/api/v1/channels/" + uuid.New().String(),
-			expected: true,
-		},
-		{
-			name:     "valid with subdomain",
-			url:      "https://sub.example.com/api/v1/channels/" + uuid.New().String(),
-			expected: true,
-		},
-		{
-			name:     "invalid - missing UUID",
-			url:      "https://example.com/api/v1/channels/",
-			expected: false,
-		},
-		{
-			name:     "invalid - wrong path",
-			url:      "https://example.com/api/v2/channels/" + uuid.New().String(),
-			expected: false,
-		},
-		{
-			name:     "invalid - extra path after UUID",
-			url:      "https://example.com/api/v1/channels/" + uuid.New().String() + "/extra",
-			expected: false,
-		},
-		{
-			name:     "invalid - not a UUID",
-			url:      "https://example.com/api/v1/channels/not-a-uuid",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := isValidChannelURL(tt.url)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

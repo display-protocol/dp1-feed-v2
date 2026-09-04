@@ -29,6 +29,31 @@ func migrateDatabaseURL(databaseURL string) (string, error) {
 
 // RunMigrations applies SQL files from migrationsDir (e.g. ./db/migrations) using golang-migrate.
 // databaseURL must be a libpq-style DSN (postgres://...).
+// migrateTo applies migrations up to (and including) a specific version.
+//
+// Exists for the seed tests: the data-backfill statement in 000006 can only be exercised against rows that
+// already existed, which means stopping before it, inserting that history, and then stepping forward. Kept
+// unexported because production always migrates to head.
+func migrateTo(databaseURL, migrationsDir string, version uint) error {
+	dbURL, err := migrateDatabaseURL(databaseURL)
+	if err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(migrationsDir)
+	if err != nil {
+		return fmt.Errorf("migrations path: %w", err)
+	}
+	m, err := migrate.New("file://"+filepath.ToSlash(abs), dbURL)
+	if err != nil {
+		return fmt.Errorf("migrate new: %w", err)
+	}
+	defer func() { _, _ = m.Close() }()
+	if err := m.Migrate(version); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("migrate to %d: %w", version, err)
+	}
+	return nil
+}
+
 func RunMigrations(databaseURL string, migrationsDir string) error {
 	// golang-migrate's pgx5 driver expects scheme pgx5:// even though the underlying DSN is postgres-compatible.
 	dbURL, err := migrateDatabaseURL(databaseURL)

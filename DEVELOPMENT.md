@@ -157,10 +157,13 @@ database:
   max_idle_conns: 5
 
 auth:
-  api_key: your-secret-api-key-here
+  # No API key — mutating routes are authorized by request signatures.
+  intent_max_clock_skew: 5m   # freshness window for signed PUT and DELETE intents
 
 playlist:
   fetch_timeout: 30s
+  max_playlist_references: 1000   # fan-out cap: playlist refs per group/channel
+  max_resolved_bytes: 67108864    # memory cap: total resolved playlist bytes per write
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
   public_base_url: https://feed.example
 
@@ -178,7 +181,7 @@ Prefix config keys with `DP1_FEED_` and use underscores for nesting:
 
 ```bash
 export DP1_FEED_SERVER_PORT=9000
-export DP1_FEED_API_KEY=my-secret-key
+export DP1_FEED_INTENT_MAX_CLOCK_SKEW=5m
 ```
 
 The feed uses one P-256 private key for every configured notification client.
@@ -267,7 +270,10 @@ cp config/.env.example config/.env
 The `.env` file contains all necessary environment variables for Docker deployment:
 
 - `DP1_FEED_DATABASE_URL` — PostgreSQL connection string (use `postgres` as hostname)
-- `DP1_FEED_API_KEY` — API authentication key
+- `DP1_FEED_INTENT_MAX_CLOCK_SKEW` — Freshness window for signed mutation intents, both PUT replace and DELETE (Go duration, default 5m)
+- `DP1_FEED_MAX_REQUEST_BYTES` — Inbound request body cap in bytes (default 5 MiB)
+- `DP1_FEED_MAX_PLAYLIST_REFERENCES` — Max playlist URIs one group/channel may reference (default 1000)
+- `DP1_FEED_MAX_RESOLVED_BYTES` — Total resolved-playlist bytes one group/channel write may hold (default 64 MiB)
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging
@@ -345,7 +351,9 @@ Make sure `dp1-go` is cloned next to this repo. The `go.mod` uses a `replace` di
 For Docker: `make up-infra` or `make up`. For local `go run`: ensure Postgres is running and `database.url` in `config/config.yaml` points at `localhost`.
 
 **"unauthorized" API responses**  
-Verify your `Authorization: Bearer <api-key>` header matches the `auth.api_key` in your config.
+Mutating requests are authorized by signatures, not an API key. A `401 unauthorized` means the request
+body carried no `signatures` array; a `403 forbidden` means the signer is not an owner of the resource (or
+a PUT changed the immutable owner set). See [docs/api_design.md](docs/api_design.md#authentication-and-authorization).
 
 ## Need Help?
 

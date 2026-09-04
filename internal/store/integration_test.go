@@ -16,13 +16,18 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/display-protocol/dp1-go/extension/channels"
+	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
@@ -41,8 +46,12 @@ func TestMain(m *testing.M) {
 	var err error
 	testProvider, err = pgtest.NewProvider(ctx)
 	if err != nil {
-		// If provider setup fails (e.g. no Docker), skip all tests
-		os.Exit(0)
+		// Fail loudly. This used to exit 0 "if provider setup fails (e.g. no Docker)", which reported a
+		// green package with ZERO tests run — a broken migration or an unavailable database was
+		// indistinguishable from a pass, locally and in CI. These tests only build under -tags=integration,
+		// so reaching here means integration tests were explicitly asked for and could not run.
+		fmt.Fprintf(os.Stderr, "integration provider setup failed: %v\n", err)
+		os.Exit(1)
 	}
 	defer testProvider.Close()
 	code := m.Run()
@@ -56,6 +65,23 @@ func newStore(t *testing.T) store.Store {
 		testProvider.Cleanup(t)
 	})
 	return testProvider.NewStore()
+}
+
+// jsonEqual compares two JSON documents by value, not bytes.
+//
+// Byte comparison would be wrong here: the jsonb column re-orders keys and normalizes numeric text on the
+// way in. That is JCS-neutral (signatures still verify), but it means stored bytes are not the submitted
+// bytes, so "unchanged document" has to be asserted semantically.
+func jsonEqual(t *testing.T, a, b []byte) bool {
+	t.Helper()
+	var av, bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		t.Fatalf("unmarshal a: %v", err)
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		t.Fatalf("unmarshal b: %v", err)
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // assertDeepEqual fails the test if want and got differ. It uses [reflect.DeepEqual],
@@ -96,7 +122,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 	}
 
 	// Insert row + build playlist_item_index from body.items.
-	if err := st.CreatePlaylist(ctx, id, slug, &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, id, slug, rawDoc(t, &pl)); err != nil {
 		t.Fatalf("CreatePlaylist: %v", err)
 	}
 
@@ -145,7 +171,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 			{ID: updatedItemID.String(), Source: "https://y"},
 		},
 	}
-	if err := st.UpdatePlaylist(ctx, slug, &plUpdated); err != nil {
+	if err := st.UpdatePlaylist(ctx, slug, rawDoc(t, &plUpdated), plUpdatedAt(t, ctx, st, slug)); err != nil {
 		t.Fatalf("UpdatePlaylist: %v", err)
 	}
 	after, _ := st.GetPlaylist(ctx, id.String())
@@ -179,7 +205,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 	}
 
 	// Delete removes row; subsequent get returns ErrNotFound.
-	if err := st.DeletePlaylist(ctx, id.String()); err != nil {
+	if err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String())); err != nil {
 		t.Fatal(err)
 	}
 	_, err = st.GetPlaylist(ctx, id.String())
@@ -228,12 +254,12 @@ func TestIntegration_ListPlaylists_paginationCursor(t *testing.T) {
 		Title:     "Second",
 		Items:     []playlist.PlaylistItem{{ID: item2.String(), Source: "https://b"}},
 	}
-	if err := st.CreatePlaylist(ctx, id1, "p-first", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, id1, "p-first", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
 	// Stagger created_at so asc sort order is deterministic (both rows distinct in time).
 	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylist(ctx, id2, "p-second", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, id2, "p-second", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,10 +315,10 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 		Title:     "Filter P2",
 		Items:     []playlist.PlaylistItem{{ID: item2.String(), Source: "https://fp2"}},
 	}
-	if err := st.CreatePlaylist(ctx, plID1, "filter-pl-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, plID1, "filter-pl-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, plID2, "filter-pl-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, plID2, "filter-pl-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -307,9 +333,9 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: groupSlug,
-		Body: groupBody,
+		Raw:  rawDoc(t, groupBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: plID1, Slug: "filter-pl-1", Body: pl1},
+			{ID: plID1, Slug: "filter-pl-1", Raw: rawDoc(t, pl1)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
@@ -354,10 +380,10 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 	chInput := &store.ChannelInput{
 		ID:   chID,
 		Slug: chSlug,
-		Body: chBody,
+		Raw:  rawDoc(t, chBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: plID1, Slug: "filter-pl-1", Body: pl1},
-			{ID: plID2, Slug: "filter-pl-2", Body: pl2},
+			{ID: plID1, Slug: "filter-pl-1", Raw: rawDoc(t, pl1)},
+			{ID: plID2, Slug: "filter-pl-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreateChannel(ctx, chInput); err != nil {
@@ -428,15 +454,15 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		},
 	}
 
-	if err := st.CreatePlaylist(ctx, pid1, "pl-items-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, pid1, "pl-items-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylist(ctx, pid2, "pl-items-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, pid2, "pl-items-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylist(ctx, pid3, "pl-items-3", &pl3); err != nil {
+	if err := st.CreatePlaylist(ctx, pid3, "pl-items-3", rawDoc(t, &pl3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -591,8 +617,8 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		in := &store.PlaylistGroupInput{
 			ID:        gid,
 			Slug:      "grp-for-items",
-			Body:      gbody,
-			Playlists: []store.IngestedPlaylist{{ID: pid1, Slug: "pl-items-1", Body: pl1}},
+			Raw:       rawDoc(t, gbody),
+			Playlists: []store.IngestedPlaylist{{ID: pid1, Slug: "pl-items-1", Raw: rawDoc(t, pl1)}},
 		}
 		if err := st.CreatePlaylistGroup(ctx, in); err != nil {
 			t.Fatal(err)
@@ -642,10 +668,10 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		chin := &store.ChannelInput{
 			ID:   chid,
 			Slug: "ch-for-items",
-			Body: chbody,
+			Raw:  rawDoc(t, chbody),
 			Playlists: []store.IngestedPlaylist{
-				{ID: pid2, Slug: "pl-items-2", Body: pl2},
-				{ID: pid3, Slug: "pl-items-3", Body: pl3},
+				{ID: pid2, Slug: "pl-items-2", Raw: rawDoc(t, pl2)},
+				{ID: pid3, Slug: "pl-items-3", Raw: rawDoc(t, pl3)},
 			},
 		}
 		if err := st.CreateChannel(ctx, chin); err != nil {
@@ -732,7 +758,7 @@ func TestIntegration_UpdatePlaylist_notFound(t *testing.T) {
 	st := newStore(t)
 	// Missing id/slug → ErrNotFound, no partial write.
 	empty := playlist.Playlist{}
-	err := st.UpdatePlaylist(context.Background(), uuid.New().String(), &empty)
+	err := st.UpdatePlaylist(context.Background(), uuid.New().String(), rawDoc(t, &empty), time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -741,7 +767,7 @@ func TestIntegration_UpdatePlaylist_notFound(t *testing.T) {
 func TestIntegration_DeletePlaylist_notFound(t *testing.T) {
 	st := newStore(t)
 	// Unknown slug → ErrNotFound (same contract as get/update).
-	err := st.DeletePlaylist(context.Background(), "missing-slug")
+	err := st.DeletePlaylist(context.Background(), "missing-slug", time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -760,10 +786,10 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 	playlistID2 := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "P1"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "P2"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "playlist-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "playlist-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "playlist-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "playlist-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -779,10 +805,10 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: groupSlug,
-		Body: groupBody,
+		Raw:  rawDoc(t, groupBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "playlist-1", Body: pl1},
-			{ID: playlistID2, Slug: "playlist-2", Body: pl2},
+			{ID: playlistID1, Slug: "playlist-1", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 
@@ -865,12 +891,12 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 		Playlists: []string{"playlist-2"},
 	}
 	updatedInput := &store.PlaylistGroupInput{
-		Body: updatedGroupBody,
+		Raw: rawDoc(t, updatedGroupBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID2, Slug: "playlist-2", Body: pl2},
+			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, groupSlug, updatedInput); err != nil {
+	if err := st.UpdatePlaylistGroup(ctx, groupSlug, updatedInput, grpUpdatedAt(t, ctx, st, groupSlug)); err != nil {
 		t.Fatalf("UpdatePlaylistGroup: %v", err)
 	}
 
@@ -914,7 +940,7 @@ func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
 	}
 
 	// Delete removes row
-	if err := st.DeletePlaylistGroup(ctx, groupID.String()); err != nil {
+	if err := st.DeletePlaylistGroup(ctx, groupID.String(), grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
 		t.Fatal(err)
 	}
 	_, err = st.GetPlaylistGroup(ctx, groupID.String())
@@ -940,10 +966,10 @@ func TestIntegration_GetPlaylistGroup_notFound(t *testing.T) {
 func TestIntegration_UpdatePlaylistGroup_notFound(t *testing.T) {
 	st := newStore(t)
 	input := &store.PlaylistGroupInput{
-		Body:      playlistgroup.Group{Title: "Missing"},
+		Raw:       rawDoc(t, playlistgroup.Group{Title: "Missing"}),
 		Playlists: []store.IngestedPlaylist{},
 	}
-	err := st.UpdatePlaylistGroup(context.Background(), uuid.New().String(), input)
+	err := st.UpdatePlaylistGroup(context.Background(), uuid.New().String(), input, time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -951,7 +977,7 @@ func TestIntegration_UpdatePlaylistGroup_notFound(t *testing.T) {
 
 func TestIntegration_DeletePlaylistGroup_notFound(t *testing.T) {
 	st := newStore(t)
-	err := st.DeletePlaylistGroup(context.Background(), "missing-slug")
+	err := st.DeletePlaylistGroup(context.Background(), "missing-slug", time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -966,10 +992,10 @@ func TestIntegration_ListPlaylistsInGroup(t *testing.T) {
 	playlistID2 := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "First"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Second"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "pl-first", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "pl-first", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "pl-second", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "pl-second", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -978,15 +1004,15 @@ func TestIntegration_ListPlaylistsInGroup(t *testing.T) {
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "membership-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "membership-group",
 			Title:     "Membership Test",
 			Playlists: []string{"pl-first", "pl-second"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "pl-first", Body: pl1},
-			{ID: playlistID2, Slug: "pl-second", Body: pl2},
+			{ID: playlistID1, Slug: "pl-first", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "pl-second", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
@@ -1029,23 +1055,23 @@ func TestIntegration_ListPlaylistGroups_pagination(t *testing.T) {
 	group1 := &store.PlaylistGroupInput{
 		ID:   groupID1,
 		Slug: "group-first",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID1.String(),
 			Slug:      "group-first",
 			Title:     "First Group",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	group2 := &store.PlaylistGroupInput{
 		ID:   groupID2,
 		Slug: "group-second",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID2.String(),
 			Slug:      "group-second",
 			Title:     "Second Group",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreatePlaylistGroup(ctx, group1); err != nil {
@@ -1102,12 +1128,12 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 	emptyGroupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "empty-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "empty-group",
 			Title:     "Empty Group",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreatePlaylistGroup(ctx, emptyGroupInput); err != nil {
@@ -1135,22 +1161,22 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 	// Update to add a playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Added Later"}
-	if err := st.CreatePlaylist(ctx, playlistID, "added-later", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "added-later", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
 	updateInput := &store.PlaylistGroupInput{
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "empty-group",
 			Title:     "No Longer Empty",
 			Playlists: []string{"added-later"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "added-later", Body: pl},
+			{ID: playlistID, Slug: "added-later", Raw: rawDoc(t, pl)},
 		},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), updateInput); err != nil {
+	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), updateInput, grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
 		t.Fatalf("UpdatePlaylistGroup to add playlists: %v", err)
 	}
 
@@ -1166,15 +1192,15 @@ func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
 
 	// Update back to empty
 	emptyAgain := &store.PlaylistGroupInput{
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "empty-group",
 			Title:     "Empty Again",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), emptyAgain); err != nil {
+	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), emptyAgain, grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
 		t.Fatalf("UpdatePlaylistGroup to remove all playlists: %v", err)
 	}
 
@@ -1211,16 +1237,16 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 	dupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
 		Slug: "dup-group",
-		Body: playlistgroup.Group{
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
 			Slug:      "dup-group",
 			Title:     "Duplicate Test",
 			Playlists: []string{"repeated", "repeated", "repeated"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "repeated", Body: pl},
-			{ID: playlistID, Slug: "repeated-later", Body: later},
-			{ID: playlistID, Slug: "repeated-later", Body: later},
+			{ID: playlistID, Slug: "repeated", Raw: rawDoc(t, pl)},
+			{ID: playlistID, Slug: "repeated-later", Raw: rawDoc(t, later)},
+			{ID: playlistID, Slug: "repeated-later", Raw: rawDoc(t, later)},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, dupInput); err != nil {
@@ -1259,7 +1285,11 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 	}
 }
 
-func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) {
+// Membership ingestion may link an existing playlist but must never modify one. Group and channel
+// creation is open, so if ingest upserted, anyone able to create a group could host a document carrying a
+// victim's playlist id and overwrite that playlist's body, slug, owner set and item index on this feed.
+// This is that attack: a second ingest reuses the stored id with different content and a different owner.
+func TestIntegration_PlaylistGroupIngestNeverModifiesExistingPlaylist(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
@@ -1267,7 +1297,10 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	originalItemID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
 	original := playlist.Playlist{
 		DPVersion: "1.1.0",
+		ID:        playlistID.String(),
+		Slug:      "remote-ingest",
 		Title:     "Remotely ingested",
+		Curators:  []identity.Entity{{Name: "Owner A", Key: "did:key:ownerA"}},
 		Items: []playlist.PlaylistItem{
 			{ID: originalItemID.String(), Source: "https://example.com/original.html"},
 		},
@@ -1283,12 +1316,13 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
 		ID:        groupID,
 		Slug:      group.Slug,
-		Body:      group,
-		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Body: original}},
+		Raw:       rawDoc(t, group),
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Raw: rawDoc(t, original)}},
 	}); err != nil {
 		t.Fatalf("CreatePlaylistGroup: %v", err)
 	}
 
+	// A playlist new to this feed is created by the ingest, index and all.
 	items, err := st.GetPlaylistItems(ctx, playlistID.String())
 	if err != nil {
 		t.Fatalf("GetPlaylistItems after create ingest: %v", err)
@@ -1296,86 +1330,270 @@ func TestIntegration_PlaylistGroupIngestRebuildsPlaylistItemIndex(t *testing.T) 
 	if len(items) != 1 || items[0].ItemID != originalItemID {
 		t.Fatalf("item index after create ingest: %+v", items)
 	}
+	before, err := st.GetPlaylist(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylist after create ingest: %v", err)
+	}
 
-	replacementItemID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
-	replacement := playlist.Playlist{
+	// The spoof: same id, different content, different owner, different slug.
+	spoofItemID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
+	spoof := playlist.Playlist{
 		DPVersion: "1.1.0",
-		Title:     "Remotely re-ingested",
+		ID:        playlistID.String(),
+		Slug:      "hijacked",
+		Title:     "Hijacked",
+		Curators:  []identity.Entity{{Name: "Attacker B", Key: "did:key:attackerB"}},
 		Items: []playlist.PlaylistItem{
-			{ID: replacementItemID.String(), Source: "https://example.com/replacement.html"},
+			{ID: spoofItemID.String(), Source: "https://attacker.example/spoof.html"},
 		},
 	}
 	if err := st.UpdatePlaylistGroup(ctx, group.Slug, &store.PlaylistGroupInput{
-		Body:      group,
-		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Body: replacement}},
-	}); err != nil {
+		Raw:       rawDoc(t, group),
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "hijacked", Raw: rawDoc(t, spoof)}},
+	}, grpUpdatedAt(t, ctx, st, group.Slug)); err != nil {
 		t.Fatalf("UpdatePlaylistGroup: %v", err)
 	}
 
+	after, err := st.GetPlaylist(ctx, playlistID.String())
+	if err != nil {
+		t.Fatalf("GetPlaylist after re-ingest: %v", err)
+	}
+	if string(after.Raw) != string(before.Raw) {
+		t.Fatalf("ingest overwrote the stored playlist body:\n before=%s\n after =%s", before.Raw, after.Raw)
+	}
+	if after.Slug != before.Slug {
+		t.Fatalf("ingest moved the stored playlist slug: got %q, want %q", after.Slug, before.Slug)
+	}
+	if len(after.Body.Curators) != 1 || after.Body.Curators[0].Key != "did:key:ownerA" {
+		t.Fatalf("ingest changed the owner set: %+v", after.Body.Curators)
+	}
+
+	// The victim's item index is untouched: the spoof's item was never indexed.
 	items, err = st.GetPlaylistItems(ctx, playlistID.String())
 	if err != nil {
 		t.Fatalf("GetPlaylistItems after re-ingest: %v", err)
 	}
-	if len(items) != 1 || items[0].ItemID != replacementItemID {
-		t.Fatalf("item index after re-ingest: %+v", items)
+	if len(items) != 1 || items[0].ItemID != originalItemID {
+		t.Fatalf("ingest rebuilt the item index: %+v", items)
 	}
-	if _, err := st.GetPlaylistItem(ctx, originalItemID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("stale item lookup: got %v, want ErrNotFound", err)
+	if _, err := st.GetPlaylistItem(ctx, spoofItemID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("spoof item was indexed: got %v, want ErrNotFound", err)
+	}
+
+	// The group still links the (unmodified) playlist.
+	linked, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, PlaylistGroupFilter: group.Slug})
+	if err != nil {
+		t.Fatalf("ListPlaylists in group: %v", err)
+	}
+	if len(linked) != 1 || linked[0].ID != playlistID {
+		t.Fatalf("group membership: %+v", linked)
 	}
 }
 
-func TestIntegration_PlaylistGroup_cannotDeleteReferencedPlaylist(t *testing.T) {
+// A referenced id this feed has deleted must not be re-created through ingestion — otherwise membership
+// would be a side door around the create-path tombstone guard.
+func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
-	// Create playlist
-	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000005")
-	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced"}
-	if err := st.CreatePlaylist(ctx, playlistID, "referenced-pl", &pl); err != nil {
-		t.Fatal(err)
+	playlistID := uuid.MustParse("10000000-0000-4000-8000-0000000000aa")
+	doc := playlist.Playlist{
+		DPVersion: "1.1.0",
+		ID:        playlistID.String(),
+		Slug:      "tombstoned-ingest",
+		Title:     "Doomed",
+	}
+	if err := st.CreatePlaylist(ctx, playlistID, doc.Slug, rawDoc(t, doc)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+		t.Fatalf("DeletePlaylist: %v", err)
 	}
 
-	// Create group that references it
-	groupID := uuid.MustParse("00000000-0000-0000-0000-000000000006")
+	groupID := uuid.MustParse("30000000-0000-4000-8000-0000000000aa")
+	group := playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "tombstoned-ingest-group",
+		Title:     "Group referencing a deleted playlist",
+		Playlists: []string{"https://origin.example/playlist.json"},
+	}
+	err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:        groupID,
+		Slug:      group.Slug,
+		Raw:       rawDoc(t, group),
+		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: doc.Slug, Raw: rawDoc(t, doc)}},
+	})
+	if !errors.Is(err, store.ErrDocumentDeleted) {
+		t.Fatalf("CreatePlaylistGroup with tombstoned member: got %v, want ErrDocumentDeleted", err)
+	}
+}
+
+// The remote-URI cache must resolve on its own, follow a re-point, tolerate a URI far past the btree
+// index limit, and never outlive the playlist it points at — a row naming a deleted (tombstoned) id would
+// send a later ingest back to a row that must not be resurrected.
+func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	const remoteURI = "https://elsewhere.test/remote-playlist.json"
+	playlistID := uuid.MustParse("00000000-0000-0000-0000-00000000000b")
+	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Ingested from a remote origin"}
+
+	groupID := uuid.MustParse("00000000-0000-0000-0000-00000000000c")
 	groupInput := &store.PlaylistGroupInput{
 		ID:   groupID,
-		Slug: "referencing-group",
-		Body: playlistgroup.Group{
+		Slug: "sources-group",
+		Raw: rawDoc(t, playlistgroup.Group{
 			ID:        groupID.String(),
-			Slug:      "referencing-group",
-			Title:     "Referencing Group",
-			Playlists: []string{"referenced-pl"},
-		},
+			Slug:      "sources-group",
+			Title:     "Sources Group",
+			Playlists: []string{remoteURI},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "referenced-pl", Body: pl},
+			{ID: playlistID, Slug: "remote-pl", Raw: rawDoc(t, pl), SourceURI: remoteURI},
 		},
 	}
 	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
 		t.Fatal(err)
 	}
 
-	// Try to delete the playlist - should fail due to FK constraint (ON DELETE RESTRICT)
-	err := st.DeletePlaylist(ctx, playlistID.String())
-	if err == nil {
-		t.Fatal("expected error when deleting playlist referenced by group, got nil")
-	}
-	// Note: specific error type depends on DB driver, but it should not be ErrNotFound
-	if errors.Is(err, store.ErrNotFound) {
-		t.Fatal("expected FK constraint error, got ErrNotFound")
-	}
-
-	// Verify playlist still exists
-	_, err = st.GetPlaylist(ctx, playlistID.String())
+	rec, err := st.GetPlaylistBySourceURI(ctx, remoteURI)
 	if err != nil {
-		t.Fatalf("playlist should still exist after failed delete: %v", err)
+		t.Fatalf("ingesting a remote reference must record its URI mapping: %v", err)
+	}
+	if rec.ID != playlistID {
+		t.Fatalf("mapping resolved to %s, want %s", rec.ID, playlistID)
 	}
 
-	// Delete group first, then playlist should be deletable
-	if err := st.DeletePlaylistGroup(ctx, groupID.String()); err != nil {
+	// An unmapped URI is a plain miss, not an error the caller has to special-case.
+	if _, err := st.GetPlaylistBySourceURI(ctx, "https://elsewhere.test/never-seen.json"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown URI should be ErrNotFound, got %v", err)
+	}
+
+	// The key is sha256(uri), so a URI far past the ~2704-byte btree limit must still record. Keyed on the
+	// text it raised "index row size exceeds maximum" and turned client input into a 500.
+	longURI := "https://elsewhere.test/" + strings.Repeat("abcdefgh", 500) + ".json"
+	longID := uuid.MustParse("00000000-0000-0000-0000-00000000000d")
+	longGroupID := uuid.MustParse("00000000-0000-0000-0000-00000000000e")
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:   longGroupID,
+		Slug: "long-uri-group",
+		Raw: rawDoc(t, playlistgroup.Group{
+			ID: longGroupID.String(), Slug: "long-uri-group", Title: "Long", Playlists: []string{longURI},
+		}),
+		Playlists: []store.IngestedPlaylist{
+			{ID: longID, Slug: "long-pl", Raw: rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "Long"}), SourceURI: longURI},
+		},
+	}); err != nil {
+		t.Fatalf("a long URI must not break the source mapping: %v", err)
+	}
+	if rec, err := st.GetPlaylistBySourceURI(ctx, longURI); err != nil || rec.ID != longID {
+		t.Fatalf("long URI should resolve to %s, got %v (%v)", longID, rec, err)
+	}
+
+	// Re-pointing: the cache is last-known-good, so a later resolution of the same URI replaces the old
+	// one. Under the previous first-wins rule this silently kept serving the abandoned playlist.
+	repointID := uuid.MustParse("00000000-0000-0000-0000-00000000000f")
+	repointGroupID := uuid.MustParse("00000000-0000-0000-0000-000000000010")
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:   repointGroupID,
+		Slug: "repoint-group",
+		Raw: rawDoc(t, playlistgroup.Group{
+			ID: repointGroupID.String(), Slug: "repoint-group", Title: "Repoint", Playlists: []string{remoteURI},
+		}),
+		Playlists: []store.IngestedPlaylist{
+			{ID: repointID, Slug: "repointed-pl", Raw: rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "Repointed"}), SourceURI: remoteURI},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.DeletePlaylist(ctx, playlistID.String()); err != nil {
-		t.Fatalf("should be able to delete playlist after removing references: %v", err)
+	if rec, err := st.GetPlaylistBySourceURI(ctx, remoteURI); err != nil || rec.ID != repointID {
+		t.Fatalf("cache should hold the latest resolution %s, got %v (%v)", repointID, rec, err)
+	}
+
+	// Deleting the playlist must take its cache row with it (ON DELETE CASCADE), so a later ingest of the
+	// same URI goes through the full create bar and meets the tombstone guard rather than silently
+	// relinking a retired id. Delete the playlist the row currently points at — after the re-point above
+	// that is repointID, not the original: asserting against the original would have passed only because
+	// the row it named no longer existed, which proves nothing about the cascade.
+	if err := st.DeletePlaylist(ctx, repointID.String(), plUpdatedAt(t, ctx, st, repointID.String())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetPlaylistBySourceURI(ctx, remoteURI); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cache row must not outlive the playlist it points at, got %v", err)
+	}
+}
+
+// A playlist owner's deletion must not be blockable by someone else's document.
+//
+// Creation is open, so any caller can self-sign a group referencing an already-stored playlist they do
+// not own. While the membership FK was ON DELETE RESTRICT that reference vetoed the playlist owner's own
+// signed DELETE, and the documented remedy — remove the references — was impossible for them, since only
+// the group's owner may edit or delete the group. Migration 000005 makes membership CASCADE instead.
+//
+// The rows are a derived index, not owned content: a group is served from its stored signed document, so
+// cascading leaves that document byte-for-byte intact (asserted below) and only drops the membership row
+// that backs the `?playlist-group=` filter.
+func TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000005")
+	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced"}
+	if err := st.CreatePlaylist(ctx, playlistID, "referenced-pl", rawDoc(t, &pl)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The group is a third party's: it references the playlist without its owner's involvement, which is
+	// exactly the situation that used to deadlock.
+	groupID := uuid.MustParse("00000000-0000-0000-0000-000000000006")
+	groupRaw := rawDoc(t, playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "referencing-group",
+		Title:     "Referencing Group",
+		Playlists: []string{"referenced-pl"},
+	})
+	groupInput := &store.PlaylistGroupInput{
+		ID:   groupID,
+		Slug: "referencing-group",
+		Raw:  groupRaw,
+		Playlists: []store.IngestedPlaylist{
+			{ID: playlistID, Slug: "referenced-pl", Raw: rawDoc(t, pl)},
+		},
+	}
+	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+		t.Fatalf("a playlist owner's delete must not be blocked by a third party's reference: %v", err)
+	}
+
+	if _, err := st.GetPlaylist(ctx, playlistID.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("playlist should be gone after delete, got %v", err)
+	}
+
+	// The referencing group survives untouched. Its document is signed, so the feed must not edit it: it
+	// still lists the deleted playlist's URI, and its bytes must be unchanged.
+	grp, err := st.GetPlaylistGroup(ctx, groupID.String())
+	if err != nil {
+		t.Fatalf("third party's group must survive the playlist delete: %v", err)
+	}
+	if !jsonEqual(t, grp.Raw, groupRaw) {
+		t.Fatalf("group document must be untouched by another resource's deletion:\n got %s\nwant %s", grp.Raw, groupRaw)
+	}
+
+	// The membership row is gone, so the group filter no longer offers a playlist that no longer exists.
+	items, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:               10,
+		Sort:                store.SortAsc,
+		PlaylistGroupFilter: groupID.String(),
+	})
+	if err != nil {
+		t.Fatalf("list by group filter: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("membership should have cascaded away, got %d rows", len(items))
 	}
 }
 
@@ -1392,10 +1610,10 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 	playlistID2 := uuid.MustParse("99999999-9999-9999-9999-999999999999")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch P1"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch P2"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "ch-playlist-1", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "ch-playlist-1", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "ch-playlist-2", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "ch-playlist-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1412,10 +1630,10 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: channelSlug,
-		Body: channelBody,
+		Raw:  rawDoc(t, channelBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "ch-playlist-1", Body: pl1},
-			{ID: playlistID2, Slug: "ch-playlist-2", Body: pl2},
+			{ID: playlistID1, Slug: "ch-playlist-1", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "ch-playlist-2", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreateChannel(ctx, channelInput); err != nil {
@@ -1492,12 +1710,12 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 		Playlists: []string{"ch-playlist-1"},
 	}
 	updatedInput := &store.ChannelInput{
-		Body: updatedChannelBody,
+		Raw: rawDoc(t, updatedChannelBody),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "ch-playlist-1", Body: pl1},
+			{ID: playlistID1, Slug: "ch-playlist-1", Raw: rawDoc(t, pl1)},
 		},
 	}
-	if err := st.UpdateChannel(ctx, channelSlug, updatedInput); err != nil {
+	if err := st.UpdateChannel(ctx, channelSlug, updatedInput, chUpdatedAt(t, ctx, st, channelSlug)); err != nil {
 		t.Fatalf("UpdateChannel: %v", err)
 	}
 
@@ -1535,7 +1753,7 @@ func TestIntegration_ChannelCRUD_and_List(t *testing.T) {
 	}
 
 	// Delete removes row
-	if err := st.DeleteChannel(ctx, channelID.String()); err != nil {
+	if err := st.DeleteChannel(ctx, channelID.String(), chUpdatedAt(t, ctx, st, channelID.String())); err != nil {
 		t.Fatal(err)
 	}
 	_, err = st.GetChannel(ctx, channelID.String())
@@ -1561,10 +1779,10 @@ func TestIntegration_GetChannel_notFound(t *testing.T) {
 func TestIntegration_UpdateChannel_notFound(t *testing.T) {
 	st := newStore(t)
 	input := &store.ChannelInput{
-		Body:      channels.Channel{Title: "Missing"},
+		Raw:       rawDoc(t, channels.Channel{Title: "Missing"}),
 		Playlists: []store.IngestedPlaylist{},
 	}
-	err := st.UpdateChannel(context.Background(), uuid.New().String(), input)
+	err := st.UpdateChannel(context.Background(), uuid.New().String(), input, time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1572,7 +1790,7 @@ func TestIntegration_UpdateChannel_notFound(t *testing.T) {
 
 func TestIntegration_DeleteChannel_notFound(t *testing.T) {
 	st := newStore(t)
-	err := st.DeleteChannel(context.Background(), "missing-channel")
+	err := st.DeleteChannel(context.Background(), "missing-channel", time.Time{})
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1587,10 +1805,10 @@ func TestIntegration_ListPlaylistsInChannel(t *testing.T) {
 	playlistID2 := uuid.MustParse("bbbbbbbb-2222-2222-2222-222222222222")
 	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch First"}
 	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Ch Second"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "ch-pl-first", &pl1); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID1, "ch-pl-first", rawDoc(t, &pl1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "ch-pl-second", &pl2); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID2, "ch-pl-second", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1599,16 +1817,16 @@ func TestIntegration_ListPlaylistsInChannel(t *testing.T) {
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "membership-channel",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "membership-channel",
 			Title:     "Membership Test",
 			Version:   "1.0.0",
 			Playlists: []string{"ch-pl-first", "ch-pl-second"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "ch-pl-first", Body: pl1},
-			{ID: playlistID2, Slug: "ch-pl-second", Body: pl2},
+			{ID: playlistID1, Slug: "ch-pl-first", Raw: rawDoc(t, pl1)},
+			{ID: playlistID2, Slug: "ch-pl-second", Raw: rawDoc(t, pl2)},
 		},
 	}
 	if err := st.CreateChannel(ctx, channelInput); err != nil {
@@ -1651,25 +1869,25 @@ func TestIntegration_ListChannels_pagination(t *testing.T) {
 	channel1 := &store.ChannelInput{
 		ID:   channelID1,
 		Slug: "channel-first",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID1.String(),
 			Slug:      "channel-first",
 			Title:     "First Channel",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	channel2 := &store.ChannelInput{
 		ID:   channelID2,
 		Slug: "channel-second",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID2.String(),
 			Slug:      "channel-second",
 			Title:     "Second Channel",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreateChannel(ctx, channel1); err != nil {
@@ -1726,13 +1944,13 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	emptyChannelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "empty-channel",
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "empty-channel",
 			Title:     "Empty Channel",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
 	if err := st.CreateChannel(ctx, emptyChannelInput); err != nil {
@@ -1760,24 +1978,24 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	// Update back to empty after adding (test removal)
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000008")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Temporary"}
-	if err := st.CreatePlaylist(ctx, playlistID, "temporary", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "temporary", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
 	// Add playlist
 	updateInput := &store.ChannelInput{
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "empty-channel",
 			Title:     "Not Empty",
 			Version:   "1.0.0",
 			Playlists: []string{"temporary"},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "temporary", Body: pl},
+			{ID: playlistID, Slug: "temporary", Raw: rawDoc(t, pl)},
 		},
 	}
-	if err := st.UpdateChannel(ctx, channelID.String(), updateInput); err != nil {
+	if err := st.UpdateChannel(ctx, channelID.String(), updateInput, chUpdatedAt(t, ctx, st, channelID.String())); err != nil {
 		t.Fatalf("UpdateChannel to add playlists: %v", err)
 	}
 
@@ -1789,16 +2007,16 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 
 	// Remove all
 	emptyAgain := &store.ChannelInput{
-		Body: channels.Channel{
+		Raw: rawDoc(t, channels.Channel{
 			ID:        channelID.String(),
 			Slug:      "empty-channel",
 			Title:     "Empty Again",
 			Version:   "1.0.0",
 			Playlists: []string{},
-		},
+		}),
 		Playlists: []store.IngestedPlaylist{},
 	}
-	if err := st.UpdateChannel(ctx, channelID.String(), emptyAgain); err != nil {
+	if err := st.UpdateChannel(ctx, channelID.String(), emptyAgain, chUpdatedAt(t, ctx, st, channelID.String())); err != nil {
 		t.Fatalf("UpdateChannel to remove all playlists: %v", err)
 	}
 
@@ -1812,58 +2030,64 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	}
 }
 
-func TestIntegration_Channel_cannotDeleteReferencedPlaylist(t *testing.T) {
+// Channel counterpart of TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership:
+// a channel owned by someone else must not be able to block the playlist owner's delete either.
+func TestIntegration_Channel_deletingReferencedPlaylistCascadesMembership(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
-	// Create playlist
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000009")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced by Channel"}
-	if err := st.CreatePlaylist(ctx, playlistID, "ref-by-channel", &pl); err != nil {
+	if err := st.CreatePlaylist(ctx, playlistID, "ref-by-channel", rawDoc(t, &pl)); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create channel that references it
 	channelID := uuid.MustParse("00000000-0000-0000-0000-00000000000a")
+	channelRaw := rawDoc(t, channels.Channel{
+		ID:        channelID.String(),
+		Slug:      "referencing-channel",
+		Title:     "Referencing Channel",
+		Version:   "1.0.0",
+		Playlists: []string{"ref-by-channel"},
+	})
 	channelInput := &store.ChannelInput{
 		ID:   channelID,
 		Slug: "referencing-channel",
-		Body: channels.Channel{
-			ID:        channelID.String(),
-			Slug:      "referencing-channel",
-			Title:     "Referencing Channel",
-			Version:   "1.0.0",
-			Playlists: []string{"ref-by-channel"},
-		},
+		Raw:  channelRaw,
 		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "ref-by-channel", Body: pl},
+			{ID: playlistID, Slug: "ref-by-channel", Raw: rawDoc(t, pl)},
 		},
 	}
 	if err := st.CreateChannel(ctx, channelInput); err != nil {
 		t.Fatal(err)
 	}
 
-	// Try to delete the playlist - should fail due to FK constraint
-	err := st.DeletePlaylist(ctx, playlistID.String())
-	if err == nil {
-		t.Fatal("expected error when deleting playlist referenced by channel, got nil")
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		t.Fatal("expected FK constraint error, got ErrNotFound")
+	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+		t.Fatalf("a playlist owner's delete must not be blocked by a third party's channel: %v", err)
 	}
 
-	// Verify playlist still exists
-	_, err = st.GetPlaylist(ctx, playlistID.String())
+	if _, err := st.GetPlaylist(ctx, playlistID.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("playlist should be gone after delete, got %v", err)
+	}
+
+	ch, err := st.GetChannel(ctx, channelID.String())
 	if err != nil {
-		t.Fatalf("playlist should still exist after failed delete: %v", err)
+		t.Fatalf("third party's channel must survive the playlist delete: %v", err)
+	}
+	if !jsonEqual(t, ch.Raw, channelRaw) {
+		t.Fatalf("channel document must be untouched by another resource's deletion:\n got %s\nwant %s", ch.Raw, channelRaw)
 	}
 
-	// Delete channel first, then playlist should be deletable
-	if err := st.DeleteChannel(ctx, channelID.String()); err != nil {
-		t.Fatal(err)
+	items, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
+		Limit:         10,
+		Sort:          store.SortAsc,
+		ChannelFilter: channelID.String(),
+	})
+	if err != nil {
+		t.Fatalf("list by channel filter: %v", err)
 	}
-	if err := st.DeletePlaylist(ctx, playlistID.String()); err != nil {
-		t.Fatalf("should be able to delete playlist after removing references: %v", err)
+	if len(items) != 0 {
+		t.Fatalf("membership should have cascaded away, got %d rows", len(items))
 	}
 }
 
@@ -2021,5 +2245,343 @@ func TestIntegration_Registry_ReplaceIsAtomic(t *testing.T) {
 	}
 	if gotChans[0].ChannelURL != "https://example.com/api/v1/channels/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" {
 		t.Errorf("unexpected channel URL: %s", gotChans[0].ChannelURL)
+	}
+}
+
+// rawDoc marshals a typed document into the raw JSON the store persists. Tests build documents as
+// typed structs for readability; the store contract takes bytes (see store.PlaylistRecord).
+func rawDoc(t testing.TB, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal document: %v", err)
+	}
+	return b
+}
+
+// Optimistic-concurrency helpers: every mutating store call is conditional on the updated_at the caller
+// last observed, so these read the row's current value immediately before the call. A test that wants to
+// exercise a *stale* expectation passes an explicit older timestamp instead (see the CAS tests).
+func plUpdatedAt(t testing.TB, ctx context.Context, st store.Store, idOrSlug string) time.Time {
+	t.Helper()
+	rec, err := st.GetPlaylist(ctx, idOrSlug)
+	if err != nil {
+		t.Fatalf("read playlist updated_at for %q: %v", idOrSlug, err)
+	}
+	return rec.UpdatedAt
+}
+
+func grpUpdatedAt(t testing.TB, ctx context.Context, st store.Store, idOrSlug string) time.Time {
+	t.Helper()
+	rec, err := st.GetPlaylistGroup(ctx, idOrSlug)
+	if err != nil {
+		t.Fatalf("read playlist_group updated_at for %q: %v", idOrSlug, err)
+	}
+	return rec.UpdatedAt
+}
+
+func chUpdatedAt(t testing.TB, ctx context.Context, st store.Store, idOrSlug string) time.Time {
+	t.Helper()
+	rec, err := st.GetChannel(ctx, idOrSlug)
+	if err != nil {
+		t.Fatalf("read channel updated_at for %q: %v", idOrSlug, err)
+	}
+	return rec.UpdatedAt
+}
+
+// TestIntegration_ConditionalWrite_staleUpdatedAt pins the optimistic-concurrency contract that makes
+// owner authorization atomic with the write: the executor authorizes a request against the record it
+// read, then writes. If anything commits in between, the stale expectation must lose.
+//
+// The delete cases are the security-relevant half: document ids are client-assigned and reusable, so an
+// unconditional delete-by-id could apply a decision made about the former owner's document to a
+// different one that now occupies the same id.
+func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	id := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+	slug := "cas-playlist"
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "v1",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+	if err := st.CreatePlaylist(ctx, id, slug, rawDoc(t, &pl)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+
+	// Capture the generation an authorization decision would have been made against.
+	stale := plUpdatedAt(t, ctx, st, id.String())
+
+	// A concurrent write lands, moving updated_at forward.
+	pl.Title = "v2"
+	if err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), stale); err != nil {
+		t.Fatalf("first UpdatePlaylist: %v", err)
+	}
+	fresh := plUpdatedAt(t, ctx, st, id.String())
+	if !fresh.After(stale) {
+		t.Fatalf("updated_at did not advance: stale=%v fresh=%v", stale, fresh)
+	}
+
+	// The stale-expectation update must be refused, and must not have modified the row.
+	pl.Title = "clobber"
+	err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), stale)
+	if !errors.Is(err, store.ErrConcurrentModification) {
+		t.Fatalf("stale UpdatePlaylist: want ErrConcurrentModification, got %v", err)
+	}
+	cur, err := st.GetPlaylist(ctx, id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Body.Title != "v2" {
+		t.Fatalf("stale update must not modify the row; title = %q", cur.Body.Title)
+	}
+
+	// A stale-expectation delete must be refused too, and must leave the row in place.
+	if err := st.DeletePlaylist(ctx, id.String(), stale); !errors.Is(err, store.ErrConcurrentModification) {
+		t.Fatalf("stale DeletePlaylist: want ErrConcurrentModification, got %v", err)
+	}
+	if _, err := st.GetPlaylist(ctx, id.String()); err != nil {
+		t.Fatalf("row must survive a refused delete: %v", err)
+	}
+
+	// The current generation still succeeds.
+	if err := st.DeletePlaylist(ctx, id.String(), fresh); err != nil {
+		t.Fatalf("fresh DeletePlaylist: %v", err)
+	}
+	if _, err := st.GetPlaylist(ctx, id.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("after delete: %v", err)
+	}
+
+	// A conditional write against a row that no longer exists is ErrNotFound, not a concurrency error.
+	if err := st.DeletePlaylist(ctx, id.String(), fresh); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("delete of missing row: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestIntegration_Tombstone_survivesConcurrentDelete pins the race the sequential test cannot reach.
+//
+// The tombstone guard used to be check-then-act: a replaying create read no tombstone, then blocked on the
+// unique-key conflict with the row a concurrent delete was removing. When that delete committed — writing
+// its tombstone — the blocked insert proceeded against a now-empty key and succeeded, never re-reading the
+// tombstone, resurrecting the document immediately after a successful owner delete. Both paths now take a
+// transaction-scoped advisory lock on (resource_type, id) before the check, so the two serialize.
+//
+// The interleaving is timing-dependent, so this runs the pair repeatedly and asserts the invariant that
+// actually matters: a delete and a re-create of the same id can never both succeed.
+func TestIntegration_Tombstone_survivesConcurrentDelete(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "racy",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+
+	const rounds = 25
+	for i := range rounds {
+		id := uuid.New()
+		slug := fmt.Sprintf("race-%d-%s", i, id.String()[:8])
+		if err := st.CreatePlaylist(ctx, id, slug, rawDoc(t, &pl)); err != nil {
+			t.Fatalf("seed CreatePlaylist: %v", err)
+		}
+		updatedAt := plUpdatedAt(t, ctx, st, id.String())
+
+		var wg sync.WaitGroup
+		var delErr, createErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			delErr = st.DeletePlaylist(ctx, id.String(), updatedAt)
+		}()
+		go func() {
+			defer wg.Done()
+			// The replay: the same id, the same still-valid public bytes, a different slug.
+			createErr = st.CreatePlaylist(ctx, id, slug+"-replay", rawDoc(t, &pl))
+		}()
+		wg.Wait()
+
+		if delErr == nil && createErr == nil {
+			t.Fatalf("round %d: delete and re-create both succeeded — the id was resurrected", i)
+		}
+		if delErr == nil {
+			// Whatever the interleaving, a committed delete must leave the resource gone.
+			if _, err := st.GetPlaylist(ctx, id.String()); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("round %d: resource survived a successful delete: %v", i, err)
+			}
+		}
+	}
+}
+
+// TestIntegration_Tombstone_blocksIDReuse pins the resurrect defense.
+//
+// Create is intentionally open, so nothing stops someone re-POSTing a document they saw earlier — its
+// owner signatures are public and still valid. Retiring the id on delete is what makes that replay fail,
+// and it works because `id` is inside the signed payload and so cannot be rewritten on a replayed body.
+func TestIntegration_Tombstone_blocksIDReuse(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	id := uuid.MustParse("cccccccc-cccc-cccc-cccc-ccccccccccc1")
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "tombstone me",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+	if err := st.CreatePlaylist(ctx, id, "tombstone-playlist", rawDoc(t, &pl)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String())); err != nil {
+		t.Fatalf("DeletePlaylist: %v", err)
+	}
+
+	// Replaying the same document (same id) must not resurrect the resource, even under a different slug.
+	err := st.CreatePlaylist(ctx, id, "tombstone-playlist-again", rawDoc(t, &pl))
+	if !errors.Is(err, store.ErrDocumentDeleted) {
+		t.Fatalf("re-create of a deleted id: want ErrDocumentDeleted, got %v", err)
+	}
+	if _, err := st.GetPlaylist(ctx, id.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("resource must stay deleted, got %v", err)
+	}
+
+	// A genuine re-publish under a fresh id is unaffected.
+	newID := uuid.MustParse("cccccccc-cccc-cccc-cccc-ccccccccccc2")
+	if err := st.CreatePlaylist(ctx, newID, "tombstone-playlist-new", rawDoc(t, &pl)); err != nil {
+		t.Fatalf("create under a new id must succeed: %v", err)
+	}
+}
+
+// TestIntegration_Create_liveCollisions pins live create collisions to ErrAlreadyExists.
+//
+// Create is open, so colliding with a resource that already exists is ordinary client behavior — a retried
+// POST, or two publishers reaching for the same slug — not a server fault. Without an explicit sentinel the
+// unique violation surfaces as a bare pgx error and the HTTP layer answers 500, which tells the client to
+// retry something that can never succeed. Each create path is covered because each has its own statement;
+// a missed one silently regresses to 500.
+func TestIntegration_Create_liveCollisions(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	pl := playlist.Playlist{
+		DPVersion: "1.1.0",
+		Title:     "collide",
+		Items:     []playlist.PlaylistItem{{ID: uuid.NewString(), Source: "https://x"}},
+	}
+	plID := uuid.MustParse("dddddddd-dddd-dddd-dddd-ddddddddddd1")
+	if err := st.CreatePlaylist(ctx, plID, "collide-playlist", rawDoc(t, &pl)); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+
+	t.Run("playlist id", func(t *testing.T) {
+		err := st.CreatePlaylist(ctx, plID, "some-other-slug", rawDoc(t, &pl))
+		assertAlreadyExists(t, err, "id")
+	})
+
+	t.Run("playlist slug", func(t *testing.T) {
+		other := uuid.MustParse("dddddddd-dddd-dddd-dddd-ddddddddddd2")
+		err := st.CreatePlaylist(ctx, other, "collide-playlist", rawDoc(t, &pl))
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	groupID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddde1")
+	group := playlistgroup.Group{
+		ID:        groupID.String(),
+		Slug:      "collide-group",
+		Title:     "Collide group",
+		Playlists: []string{"collide-playlist"},
+	}
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:        groupID,
+		Slug:      "collide-group",
+		Raw:       rawDoc(t, &group),
+		Playlists: []store.IngestedPlaylist{},
+	}); err != nil {
+		t.Fatalf("CreatePlaylistGroup: %v", err)
+	}
+
+	t.Run("playlist-group slug", func(t *testing.T) {
+		err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+			ID:        uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddde2"),
+			Slug:      "collide-group",
+			Raw:       rawDoc(t, &group),
+			Playlists: []store.IngestedPlaylist{},
+		})
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	chID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf01")
+	ch := channels.Channel{
+		ID:        chID.String(),
+		Slug:      "collide-channel",
+		Title:     "Collide Channel",
+		Version:   "1.0.0",
+		Playlists: []string{"collide-playlist"},
+	}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{
+		ID:        chID,
+		Slug:      "collide-channel",
+		Raw:       rawDoc(t, ch),
+		Playlists: []store.IngestedPlaylist{{ID: plID, Slug: "collide-playlist", Raw: rawDoc(t, &pl)}},
+	}); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	t.Run("channel slug", func(t *testing.T) {
+		err := st.CreateChannel(ctx, &store.ChannelInput{
+			ID:        uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf02"),
+			Slug:      "collide-channel",
+			Raw:       rawDoc(t, ch),
+			Playlists: []store.IngestedPlaylist{},
+		})
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	// The ingestion batch is the subtle one: ON CONFLICT (id) DO NOTHING absorbs an id that is already
+	// stored, but a playlist that is new to this feed can still carry a slug a different live playlist
+	// holds, and that unique violation escapes the DO NOTHING.
+	t.Run("ingested playlist slug", func(t *testing.T) {
+		err := st.CreateChannel(ctx, &store.ChannelInput{
+			ID:   uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf03"),
+			Slug: "ingest-collision-channel",
+			Raw:  rawDoc(t, ch),
+			Playlists: []store.IngestedPlaylist{
+				{ID: uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf04"), Slug: "collide-playlist", Raw: rawDoc(t, &pl)},
+			},
+		})
+		assertAlreadyExists(t, err, "slug")
+	})
+
+	// A tombstoned id must keep its own sentinel: both are 409 at the HTTP layer, but only this one means
+	// the id can never be used again, so conflating them would tell a client to give up on a retryable
+	// create or to retry one that is permanently refused.
+	t.Run("tombstone stays distinct", func(t *testing.T) {
+		deadID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddf05")
+		if err := st.CreatePlaylist(ctx, deadID, "doomed-playlist", rawDoc(t, &pl)); err != nil {
+			t.Fatalf("CreatePlaylist: %v", err)
+		}
+		if err := st.DeletePlaylist(ctx, deadID.String(), plUpdatedAt(t, ctx, st, deadID.String())); err != nil {
+			t.Fatalf("DeletePlaylist: %v", err)
+		}
+		err := st.CreatePlaylist(ctx, deadID, "doomed-playlist-again", rawDoc(t, &pl))
+		if !errors.Is(err, store.ErrDocumentDeleted) {
+			t.Fatalf("re-create of a deleted id: want ErrDocumentDeleted, got %v", err)
+		}
+		if errors.Is(err, store.ErrAlreadyExists) {
+			t.Fatalf("tombstone must not also report ErrAlreadyExists, got %v", err)
+		}
+	})
+}
+
+// assertAlreadyExists checks the sentinel and that the message names which uniqueness rule was hit, so an
+// operator reading a 409 can tell an id retry from a slug someone else already took.
+func assertAlreadyExists(t *testing.T, err error, wantMention string) {
+	t.Helper()
+	if !errors.Is(err, store.ErrAlreadyExists) {
+		t.Fatalf("want ErrAlreadyExists, got %v", err)
+	}
+	if !strings.Contains(err.Error(), wantMention) {
+		t.Fatalf("error should mention %q, got %q", wantMention, err)
 	}
 }

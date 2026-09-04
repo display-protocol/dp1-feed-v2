@@ -1,6 +1,8 @@
 package httpserver
 
-// Route registration: /health, /api/v1/* ; POST and document PUT/PATCH use SignatureOrAPIKeyAuth (API key or body signatures); DELETE and registry PUT use APIKeyAuth only. Channel routes register only when extensions are enabled.
+// Route registration: /health, /api/v1/* . All mutating routes (POST/PUT/DELETE) are gated by
+// RequireSignatures — there is no API key and no PATCH. The registry is read-only over the API.
+// Channel routes register only when extensions are enabled.
 
 import (
 	"github.com/gin-gonic/gin"
@@ -9,8 +11,9 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/config"
 )
 
-// RegisterRoutes attaches all HTTP routes to the Gin engine.
-// POST and document PUT/PATCH use SignatureOrAPIKeyAuth (API key or signatures in body); DELETE and registry PUT use APIKeyAuth only.
+// RegisterRoutes attaches all HTTP routes to the Gin engine. Reads are public; every mutating route
+// requires a signed body (RequireSignatures). PUT is owner-bound and owner-immutable, DELETE takes a
+// signed delete-intent; both are enforced in the executor. See docs/api_design.md.
 func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logger) {
 	r.GET("/health", h.Health)
 
@@ -21,32 +24,35 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 
 		v1.GET("/playlists", h.ListPlaylists)
 		v1.GET("/playlists/:id", h.GetPlaylist)
-		v1.POST("/playlists", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.CreatePlaylist)
-		v1.PUT("/playlists/:id", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.ReplacePlaylist)
-		v1.PATCH("/playlists/:id", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.UpdatePlaylist)
-		v1.DELETE("/playlists/:id", APIKeyAuth(cfg.Auth.APIKey, log), h.DeletePlaylist)
+		v1.POST("/playlists", RequireSignatures(log), h.CreatePlaylist)
+		v1.PUT("/playlists/:id", RequireSignatures(log), h.ReplacePlaylist)
+		v1.DELETE("/playlists/:id", RequireSignatures(log), h.DeletePlaylist)
+
+		// Reference-resolving mutations carry an aggregate deadline. Group and channel writes resolve every
+		// playlist URI the document names, so their work is bounded by that budget as well as by the
+		// per-fetch timeout and the reference cap: without it, a document naming many slow-but-reachable
+		// hosts holds the handler for the sum of every fetch. Channel routes needed this already because
+		// notification delivery requires a deadline; groups fan out the same way and were missing it.
+		referenceMutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
 
 		v1.GET("/playlist-groups", h.ListPlaylistGroups)
 		v1.GET("/playlist-groups/:id", h.GetPlaylistGroup)
-		v1.POST("/playlist-groups", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.CreatePlaylistGroup)
-		v1.PUT("/playlist-groups/:id", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.ReplacePlaylistGroup)
-		v1.PATCH("/playlist-groups/:id", SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.UpdatePlaylistGroup)
-		v1.DELETE("/playlist-groups/:id", APIKeyAuth(cfg.Auth.APIKey, log), h.DeletePlaylistGroup)
+		v1.POST("/playlist-groups", referenceMutationDeadline, RequireSignatures(log), h.CreatePlaylistGroup)
+		v1.PUT("/playlist-groups/:id", referenceMutationDeadline, RequireSignatures(log), h.ReplacePlaylistGroup)
+		v1.DELETE("/playlist-groups/:id", RequireSignatures(log), h.DeletePlaylistGroup)
 
 		if cfg.Extensions.Enabled {
-			channelMutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
+			channelMutationDeadline := referenceMutationDeadline
 			v1.GET("/channels", h.ListChannels)
 			v1.GET("/channels/:id", h.GetChannel)
-			v1.POST("/channels", channelMutationDeadline, SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.CreateChannel)
-			v1.PUT("/channels/:id", channelMutationDeadline, SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.ReplaceChannel)
-			v1.PATCH("/channels/:id", channelMutationDeadline, SignatureOrAPIKeyAuth(cfg.Auth.APIKey, log), h.UpdateChannel)
-			v1.DELETE("/channels/:id", channelMutationDeadline, APIKeyAuth(cfg.Auth.APIKey, log), h.DeleteChannel)
+			v1.POST("/channels", channelMutationDeadline, RequireSignatures(log), h.CreateChannel)
+			v1.PUT("/channels/:id", channelMutationDeadline, RequireSignatures(log), h.ReplaceChannel)
+			v1.DELETE("/channels/:id", channelMutationDeadline, RequireSignatures(log), h.DeleteChannel)
 		} else {
 			v1.GET("/channels", extensionsDisabled)
 			v1.GET("/channels/:id", extensionsDisabled)
 			v1.POST("/channels", extensionsDisabled)
 			v1.PUT("/channels/:id", extensionsDisabled)
-			v1.PATCH("/channels/:id", extensionsDisabled)
 			v1.DELETE("/channels/:id", extensionsDisabled)
 		}
 
@@ -54,7 +60,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 		v1.GET("/playlist-items/:id", h.GetPlaylistItem)
 
 		v1.GET("/registry/channels", h.GetChannelRegistry)
-		v1.PUT("/registry/channels", APIKeyAuth(cfg.Auth.APIKey, log), h.ReplaceChannelRegistry)
 	}
 }
 

@@ -73,14 +73,14 @@ Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_grou
 
 ## Request flow (illustrative)
 
-- **Create playlist:** POST → API key → parse models → executor: sign (`dp1svc`) → validate → store → JSON response.
+- **Create playlist:** POST → RequireSignatures (body has signatures[]) → parse models → executor: verify curator/publisher signatures → feed co-sign (`dp1svc`) → validate → store → JSON response.
 - **Read playlist:** GET → store by id/slug → JSONB body (signatures included).
 
 ## Authentication
 
-- **Writes:** `Authorization: Bearer <api-key>`.
+- **Writes:** signatures only — no API key. `RequireSignatures` rejects any POST/PUT/DELETE without a `signatures[]` body; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; owner immutable). DELETE carries a signed delete-intent body.
 - **Reads:** public unless deployment restricts.
-- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (feed operator), not end-user OAuth.
+- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (curator/publisher + feed operator), not end-user OAuth. Ownership is document-declared; there is no global key allowlist.
 
 ## Technology stack
 
@@ -88,7 +88,7 @@ Go, Gin, PostgreSQL, pgx, dp1-go, Zap; optional Sentry via httpserver.
 
 ## Intentionally out of scope
 
-OAuth/JWT as built-in (use API keys or proxy); built-in rate limiting (use edge proxy); async pipelines and message queues; multi-service split as the default model.
+OAuth/JWT as built-in and any global signer allowlist (front with a proxy to restrict who may create); built-in rate limiting (use edge proxy); async pipelines and message queues; multi-service split as the default model.
 
 ## Further reading
 

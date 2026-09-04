@@ -2,12 +2,15 @@
 package pg
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +45,170 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// Tombstones. A deleted document's id is retired on this feed so a replay of its (public, still validly
+// signed) bytes cannot resurrect it through the open create path. resource_type is the document's table
+// name — an internal constant, never client input.
+const (
+	tombstoneInsert = `INSERT INTO deleted_documents (resource_type, id) VALUES ($1, $2) ON CONFLICT DO NOTHING`
+	tombstoneExists = `SELECT EXISTS (SELECT 1 FROM deleted_documents WHERE resource_type = $1 AND id = $2)`
+)
+
+// lockDocumentID serializes every path that creates, deletes or ingests one (resource_type, id) against
+// the others, for the remainder of the caller's transaction.
+//
+// Without it the tombstone guard is check-then-act and can be stepped over: a replaying create reads no
+// tombstone, then blocks on the unique-key conflict with the row a concurrent delete is removing; when
+// that delete commits — writing its tombstone — the blocked insert proceeds against a now-empty key and
+// succeeds, never re-reading the tombstone. That resurrects a document immediately after a successful
+// owner delete, which is precisely the guarantee tombstones exist to provide. Taking the lock *before*
+// the check makes check and write atomic with respect to each other.
+//
+// Deadlock safety: a transaction takes at most one container lock (its own new group/channel id, unique
+// to it) and then playlist locks in sorted order, so no two transactions can hold each other's next lock.
+// The lock is advisory and transaction-scoped, so it is released on commit or rollback either way.
+const documentLockKey = `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2::text, 0))`
+
+func lockDocumentID(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, table string, id uuid.UUID) error {
+	if _, err := q.Exec(ctx, documentLockKey, table, id); err != nil {
+		return fmt.Errorf("lock %s %s: %w", table, id, err)
+	}
+	return nil
+}
+
+// lockDocumentIDs takes lockDocumentID for a batch, in ascending id order so concurrent batches that
+// overlap cannot deadlock by acquiring the same pair in opposite orders.
+func lockDocumentIDs(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, table string, ids []uuid.UUID) error {
+	sorted := append([]uuid.UUID(nil), ids...)
+	slices.SortFunc(sorted, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	var prev uuid.UUID
+	for i, id := range sorted {
+		if i > 0 && id == prev {
+			continue // membership may repeat an id; one lock is enough
+		}
+		if err := lockDocumentID(ctx, q, table, id); err != nil {
+			return err
+		}
+		prev = id
+	}
+	return nil
+}
+
+// createConflict translates a Postgres unique violation on a create into store.ErrAlreadyExists, or
+// returns nil when err is something else.
+//
+// The tombstone check cannot cover this: it answers "was this id deleted", while these are collisions
+// with a resource that is still live. The common case is not an attack but a retry — a POST whose
+// response was lost, re-sent — so it must read as 409, not as a server fault. The constraint name tells
+// which column collided: Postgres names the implicit ones <table>_pkey and <table>_slug_key.
+func createConflict(err error, resource string) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != uniqueViolationCode {
+		return nil
+	}
+	// Detail is what the client sees, so it names the rule that was violated rather than the constraint.
+	// The default arm keeps the constraint name because an unrecognized unique index is an operator
+	// problem: the message is the only clue about which one fired.
+	switch {
+	case strings.HasSuffix(pgErr.ConstraintName, "_pkey"):
+		return &store.ConflictError{Kind: store.ErrAlreadyExists, Detail: fmt.Sprintf("a %s with this id already exists", resource)}
+	case strings.HasSuffix(pgErr.ConstraintName, "_slug_key"):
+		return &store.ConflictError{Kind: store.ErrAlreadyExists, Detail: fmt.Sprintf("a %s with this slug already exists", resource)}
+	default:
+		return &store.ConflictError{Kind: store.ErrAlreadyExists, Detail: fmt.Sprintf("this %s violates %s", resource, pgErr.ConstraintName)}
+	}
+}
+
+// uniqueViolationCode is the SQLSTATE Postgres raises for a unique or primary-key violation.
+const uniqueViolationCode = "23505"
+
+// requireNotTombstoned fails a create whose id this feed has already deleted. It runs on the caller's
+// transaction so the check and the insert commit together, and callers must hold lockDocumentID first.
+func requireNotTombstoned(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, id uuid.UUID) error {
+	var deleted bool
+	if err := q.QueryRow(ctx, tombstoneExists, table, id).Scan(&deleted); err != nil {
+		return fmt.Errorf("check %s tombstone: %w", table, err)
+	}
+	if deleted {
+		return fmt.Errorf("%w: %s %s", store.ErrDocumentDeleted, table, id)
+	}
+	return nil
+}
+
+// requireNoneTombstoned is requireNotTombstoned for a batch of ids (membership ingestion). It runs on the
+// caller's transaction so the check and the inserts commit together.
+//
+// Checking every referenced id, rather than only the ones that turn out to be missing, is safe and
+// simpler: a row that exists cannot be tombstoned (a delete removes the row and writes the tombstone in
+// one transaction, and the create guard blocks re-creating it), so a tombstoned id in the batch always
+// denotes a row that would otherwise be inserted here.
+func requireNoneTombstoned(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, ids []uuid.UUID) error {
+	const anyTombstoned = `SELECT id FROM deleted_documents WHERE resource_type = $1 AND id = ANY($2::uuid[]) LIMIT 1`
+	var deleted uuid.UUID
+	switch err := q.QueryRow(ctx, anyTombstoned, table, ids).Scan(&deleted); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("check %s tombstones: %w", table, err)
+	default:
+		return fmt.Errorf("%w: %s %s", store.ErrDocumentDeleted, table, deleted)
+	}
+}
+
+// classifyConditionalWrite explains a conditional UPDATE/DELETE that matched no row: if the row still
+// exists, the caller's expected updated_at was stale (a concurrent write, or a delete and re-create,
+// landed) → ErrConcurrentModification; if the row is gone → ErrNotFound.
+//
+// The row-is-gone case is deliberately ErrNotFound (404) rather than ErrConcurrentModification (409),
+// even though it is reached after the executor authorized against a row it had loaded. 409 carries
+// "re-read and retry", and that advice would be wrong here: deleting an id tombstones it, so the resource
+// cannot come back and no number of retries will succeed. 404 is both accurate and terminal. The
+// deleted-and-re-created case is genuinely different — the row exists, the caller's generation is simply
+// stale — and does return 409, where retrying can succeed.
+//
+// table is a fixed internal constant, never client input, so interpolating it into the existence probe
+// carries no injection risk. The probe runs on the same tx/conn as the failed write, so it observes the
+// same snapshot.
+func classifyConditionalWrite(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, rowID uuid.UUID) error {
+	var exists bool
+	if err := q.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM "+table+" WHERE id = $1)", rowID).Scan(&exists); err != nil {
+		return fmt.Errorf("classify conditional write: %w", err)
+	}
+	if exists {
+		return store.ErrConcurrentModification
+	}
+	return store.ErrNotFound
+}
+
+// requireDocument guards the write path: a document is persisted as the raw bytes the executor signed,
+// so an empty payload here is a programming error, not a client error.
+func requireDocument(raw json.RawMessage, label string) error {
+	if len(raw) == 0 {
+		return fmt.Errorf("nil %s", label)
+	}
+	return nil
+}
+
+// scanDocument turns a jsonb column into the record pair (Raw, Body). Raw is copied out of the scan
+// buffer because the record outlives the row iteration; Body is the decoded view (see store.PlaylistRecord).
+func scanDocument[T any](raw []byte, label string) (json.RawMessage, T, error) {
+	body, err := utils.DecodeJSONB[T](raw, label)
+	if err != nil {
+		var zero T
+		return nil, zero, err
+	}
+	return append(json.RawMessage(nil), raw...), body, nil
+}
+
 // NewStore wraps a pgx pool as a store.Store (created_at/updated_at use column defaults; updated_at is refreshed by triggers).
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
@@ -60,19 +227,16 @@ func (s *Store) Ping(ctx context.Context) error {
 //
 // Process: insert the playlist row, then derive playlist_item_index rows from body.items
 // (array index → position). Missing or non-array "items" yields no index rows; each item needs a UUID "id".
-func (s *Store) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, body *playlist.Playlist) error {
+func (s *Store) CreatePlaylist(ctx context.Context, id uuid.UUID, slug string, raw json.RawMessage) error {
 	const insertPlaylist = `
 INSERT INTO playlists (id, slug, body)
 VALUES ($1, $2, $3::jsonb)
 RETURNING created_at`
 
-	if body == nil {
-		return fmt.Errorf("nil playlist body")
-	}
-	bodyJSON, err := utils.EncodeJSONB(body)
-	if err != nil {
+	if err := requireDocument(raw, "playlist body"); err != nil {
 		return err
 	}
+	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -81,8 +245,18 @@ RETURNING created_at`
 	// Commit succeeds → Rollback becomes no-op. On failure, Rollback aborts the tx.
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockDocumentID(ctx, tx, "playlists", id); err != nil {
+		return err
+	}
+	if err := requireNotTombstoned(ctx, tx, "playlists", id); err != nil {
+		return err
+	}
+
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx, insertPlaylist, id, slug, bodyJSON).Scan(&createdAt); err != nil {
+		if conflict := createConflict(err, "playlist"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert playlist: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, id, bodyJSON, createdAt); err != nil {
@@ -124,15 +298,100 @@ WHERE slug = $1`
 		}
 		return nil, fmt.Errorf("select playlist: %w", err)
 	}
-	pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-	if err != nil {
+	if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 		return nil, err
 	}
-	rec.Body = pl
 	return &rec, nil
 }
 
 // GetPlaylistItems implements store.Store.
+// GetPlaylistBySourceURI implements store.Store. It answers with the playlist a URI last resolved to.
+//
+// This is the fallback consulted when fetching the origin fails, not the primary resolution path, so a
+// row here can be stale by design: it is only ever read when the authoritative answer is unavailable, and
+// the next successful fetch refreshes it. Matching is on the generated uri_hash, since uri itself can
+// exceed the btree index limit.
+func (s *Store) GetPlaylistBySourceURI(ctx context.Context, uri string) (*store.PlaylistRecord, error) {
+	const q = `
+SELECT p.id, p.slug, p.body, p.created_at, p.updated_at
+FROM playlist_sources src
+JOIN playlists p ON p.id = src.playlist_id
+WHERE src.uri_hash = $1`
+
+	var rec store.PlaylistRecord
+	var raw []byte
+	if err := s.pool.QueryRow(ctx, q, sourceURIHash(uri)).Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w", store.ErrNotFound)
+		}
+		return nil, fmt.Errorf("select playlist by source uri: %w", err)
+	}
+	var err error
+	if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// sourceURIHash is the playlist_sources key: sha256 of the URI's UTF-8 bytes.
+//
+// Computed here rather than by the database because convert_to() is STABLE, not IMMUTABLE, so Postgres
+// refuses sha256(convert_to(uri,'UTF8')) in a generated column or index expression. Hashing also sidesteps
+// the ~2704-byte btree limit that keying on the URI text itself would hit, and URIs are client input with
+// no length bound of their own.
+func sourceURIHash(uri string) []byte {
+	sum := sha256.Sum256([]byte(uri))
+	return sum[:]
+}
+
+// recordPlaylistSources records what each remote URI resolved to on this request.
+//
+// UPSERT, not first-wins. The table is a last-known-good cache consulted only when a fetch fails, so it
+// has to track the most recent successful resolution: if a publisher re-points a URL to a different
+// playlist, the fallback must follow rather than serve an answer the origin abandoned. (An earlier
+// revision kept the first value forever, which was required only because resolution consulted the cache
+// *before* fetching — a design that pinned a URI globally to whatever the first caller saw.)
+//
+// Runs on the caller's transaction, so the cache and the membership it backs commit together. Local
+// (same-origin) references carry no SourceURI and are skipped — their id or slug is already in the path.
+func recordPlaylistSources(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
+	// One entry per distinct URI, for the same reason as uniquePlaylistParams: a repeated reference would
+	// otherwise send its URI once per position.
+	uris := make([]string, 0, len(playlists))
+	ids := make([]uuid.UUID, 0, len(playlists))
+	seen := make(map[string]struct{}, len(playlists))
+	for _, p := range playlists {
+		if p.SourceURI == "" {
+			continue
+		}
+		if _, dup := seen[p.SourceURI]; dup {
+			continue
+		}
+		seen[p.SourceURI] = struct{}{}
+		uris = append(uris, p.SourceURI)
+		ids = append(ids, p.ID)
+	}
+	if len(uris) == 0 {
+		return nil
+	}
+	hashes := make([][]byte, len(uris))
+	for i, u := range uris {
+		hashes[i] = sourceURIHash(u)
+	}
+	const q = `
+INSERT INTO playlist_sources (uri, uri_hash, playlist_id)
+SELECT DISTINCT ON (x.uri_hash) x.uri, x.uri_hash, x.playlist_id
+FROM unnest($1::text[], $2::bytea[], $3::uuid[]) WITH ORDINALITY AS x(uri, uri_hash, playlist_id, ord)
+ORDER BY x.uri_hash, x.ord
+ON CONFLICT (uri_hash) DO UPDATE
+SET playlist_id = EXCLUDED.playlist_id,
+    updated_at  = now()`
+	if _, err := tx.Exec(ctx, q, uris, hashes, ids); err != nil {
+		return fmt.Errorf("record playlist sources: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetPlaylistItems(ctx context.Context, idOrSlug string) ([]store.PlaylistItemRecord, error) {
 	const (
 		byID = `
@@ -399,11 +658,9 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan: %w", err)
 		}
-		pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 			return nil, "", err
 		}
-		rec.Body = pl
 		out = append(out, rec)
 	}
 
@@ -417,20 +674,19 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 }
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, body *playlist.Playlist) error {
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE playlists SET body = $2::jsonb WHERE id = $1 RETURNING created_at`
+		updateByID = `UPDATE playlists
+SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
+WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
 
-	if body == nil {
-		return fmt.Errorf("nil playlist body")
-	}
-	bodyJSON, err := utils.EncodeJSONB(body)
-	if err != nil {
+	if err := requireDocument(raw, "playlist body"); err != nil {
 		return err
 	}
+	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -451,10 +707,10 @@ func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, body *playl
 	}
 
 	var playlistCreatedAt time.Time
-	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON).Scan(&playlistCreatedAt)
+	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w", store.ErrNotFound)
+			return classifyConditionalWrite(ctx, tx, "playlists", rowID)
 		}
 		return fmt.Errorf("update playlist: %w", err)
 	}
@@ -470,25 +726,56 @@ func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, body *playl
 	return nil
 }
 
-// DeletePlaylist implements store.Store.
-func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string) error {
-	const (
-		byID   = `DELETE FROM playlists WHERE id = $1`
-		bySlug = `DELETE FROM playlists WHERE slug = $1`
-	)
+// DeletePlaylist implements store.Store. The delete is conditional on expectedUpdatedAt so a decision
+// made on an earlier read cannot remove a row that has since changed or been re-created (see
+// store.ErrConcurrentModification).
+func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+	return s.deleteDocumentRow(ctx, "playlists", idOrSlug, expectedUpdatedAt)
+}
 
-	id, err := uuid.Parse(idOrSlug)
-	var ct pgconn.CommandTag
-	if err == nil {
-		ct, err = s.pool.Exec(ctx, byID, id)
-	} else {
-		ct, err = s.pool.Exec(ctx, bySlug, idOrSlug)
-	}
+// deleteDocumentRow is the shared conditional delete for the three document tables. It resolves the row
+// id (accepting a UUID or a slug), deletes only when updated_at still matches what the caller authorized
+// against, and classifies a zero-row delete as ErrConcurrentModification or ErrNotFound.
+//
+// table is a fixed internal constant, never client input (see classifyConditionalWrite).
+func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, expectedUpdatedAt time.Time) error {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("delete playlist: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var rowID uuid.UUID
+	if id, perr := uuid.Parse(idOrSlug); perr == nil {
+		rowID = id
+	} else {
+		if err := tx.QueryRow(ctx, "SELECT id FROM "+table+" WHERE slug = $1", idOrSlug).Scan(&rowID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w", store.ErrNotFound)
+			}
+			return fmt.Errorf("lookup %s slug: %w", table, err)
+		}
+	}
+
+	// Lock before deleting so a concurrent replaying create waits here rather than on the row key, and
+	// therefore re-reads the tombstone this transaction is about to write.
+	if err := lockDocumentID(ctx, tx, table, rowID); err != nil {
+		return err
+	}
+
+	ct, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE id = $1 AND updated_at = $2", rowID, expectedUpdatedAt)
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", table, err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyConditionalWrite(ctx, tx, table, rowID)
+	}
+	// Same transaction as the delete: a tombstone that could be lost would leave the id resurrectable.
+	if _, err := tx.Exec(ctx, tombstoneInsert, table, rowID); err != nil {
+		return fmt.Errorf("record %s tombstone: %w", table, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -497,66 +784,105 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string) error {
 // Playlist groups (same row shape as playlists; membership in playlist_group_members)
 // =============================================================================
 
-// upsertPlaylistsBatch bulk-upserts playlists and rebuilds their item indexes in the same transaction.
-// Input may repeat the same id (group/channel membership order); both writes keep the first
-// occurrence per id so playlists.body and playlist_item_index are always derived from the same body.
-func upsertPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
-	const (
-		upsertPlaylists = `
-INSERT INTO playlists (id, slug, body)
-SELECT DISTINCT ON (x.id) x.id, x.slug, x.body::jsonb
-FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY AS x(id, slug, body, ord)
-ORDER BY x.id, x.ord
-ON CONFLICT (id) DO UPDATE SET
-	slug = EXCLUDED.slug,
-	body = EXCLUDED.body`
+// insertMissingPlaylistsBatch inserts the referenced playlists this feed does not have yet and builds the
+// item index for exactly those rows. Membership ingestion may *link* a playlist but must never *modify*
+// one: group/channel creation is open, so an ON CONFLICT DO UPDATE here would let anyone who can create a
+// channel host a document carrying a victim's playlist id and overwrite that playlist's body, slug, owner
+// set and item index on this feed. A referenced id that already exists is therefore left exactly as
+// stored, and the remote document's contents are ignored (cross-feed divergence is reconciled elsewhere).
+//
+// Input may repeat the same id (membership order); DISTINCT ON keeps the first occurrence so the row and
+// its item index are always derived from the same body. Only newly inserted rows get an index, which is
+// why nothing is cleared first — an existing playlist's index must survive untouched.
+// uniquePlaylistParams builds the insert parameters from the FIRST occurrence of each playlist id.
+//
+// This is a memory bound, not a tidiness pass. A document may repeat a reference, and resolution
+// deliberately resolves each distinct URI once and shares the resulting value across every position it
+// occupies — those positions alias one Raw slice, so the resolved set stays within max_resolved_bytes.
+// Building parameters per position undid that: string(p.Raw) ALLOCATES, so 1000 copies of one 4 MiB
+// playlist produced ~4 GiB of distinct strings here, plus the same again as pgx serialized them, from a
+// request that passed the resolution budget. The CTE's DISTINCT ON (id) discarded the duplicates only
+// after all of that had been built and sent.
+//
+// The full ordered slice is still what membership and source mappings are written from; only the
+// playlist-row insert is deduplicated, because that is the one that carries bodies.
+func uniquePlaylistParams(playlists []store.IngestedPlaylist) (ids []uuid.UUID, slugs []string, bodies []string, err error) {
+	seen := make(map[uuid.UUID]struct{}, len(playlists))
+	ids = make([]uuid.UUID, 0, len(playlists))
+	slugs = make([]string, 0, len(playlists))
+	bodies = make([]string, 0, len(playlists))
+	for _, p := range playlists {
+		if err := requireDocument(p.Raw, "ingested playlist body"); err != nil {
+			return nil, nil, nil, err
+		}
+		if _, dup := seen[p.ID]; dup {
+			continue
+		}
+		seen[p.ID] = struct{}{}
+		ids = append(ids, p.ID)
+		slugs = append(slugs, p.Slug)
+		bodies = append(bodies, string(p.Raw))
+	}
+	return ids, slugs, bodies, nil
+}
 
-		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = ANY($1::uuid[])`
-
-		insertItemIndex = `
+// insertMissingPlaylistsBatch inserts referenced playlists this feed does not hold and records what each
+// remote URI resolved to.
+func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
+	// One statement: the data-modifying CTE reports which ids it actually inserted (ON CONFLICT DO NOTHING
+	// returns nothing for rows that already existed), and the outer INSERT indexes only those.
+	const insertMissing = `
 WITH input AS (
-	SELECT DISTINCT ON (x.id) x.id, x.body::jsonb AS body
-	FROM unnest($1::uuid[], $2::text[]) WITH ORDINALITY AS x(id, body, ord)
+	SELECT DISTINCT ON (x.id) x.id, x.slug, x.body::jsonb AS body
+	FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY AS x(id, slug, body, ord)
 	ORDER BY x.id, x.ord
+), inserted AS (
+	INSERT INTO playlists (id, slug, body)
+	SELECT id, slug, body FROM input
+	ON CONFLICT (id) DO NOTHING
+	RETURNING id, created_at
 ), playlist_items AS (
-	SELECT input.id, playlists.created_at, CASE
+	SELECT inserted.id, inserted.created_at, CASE
 		WHEN jsonb_typeof(input.body->'items') = 'array' THEN input.body->'items'
 		ELSE '[]'::jsonb
 	END AS items
-	FROM input
-	JOIN playlists ON playlists.id = input.id
+	FROM inserted
+	JOIN input ON input.id = inserted.id
 )
 INSERT INTO playlist_item_index (item_id, playlist_id, playlist_created_at, position, item)
 SELECT (elem->>'id')::uuid, playlist_items.id, playlist_items.created_at, (ord - 1)::int, elem
 FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY AS t(elem, ord)`
-	)
 
 	if len(playlists) == 0 {
 		return nil
 	}
 
-	ids := make([]uuid.UUID, len(playlists))
-	slugs := make([]string, len(playlists))
-	bodies := make([]string, len(playlists))
-	for i, p := range playlists {
-		ids[i] = p.ID
-		slugs[i] = p.Slug
-		b, err := utils.EncodeJSONB(p.Body)
-		if err != nil {
-			return err
+	ids, slugs, bodies, err := uniquePlaylistParams(playlists)
+	if err != nil {
+		return err
+	}
+	// A tombstoned id is one this feed deleted, so no row exists and the statement below would insert it.
+	// Ingestion must not become a side door around the create-path tombstone guard.
+	if err := lockDocumentIDs(ctx, tx, "playlists", ids); err != nil {
+		return err
+	}
+	if err := requireNoneTombstoned(ctx, tx, "playlists", ids); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, insertMissing, ids, slugs, bodies); err != nil {
+		// ON CONFLICT (id) DO NOTHING absorbs id collisions, but a referenced playlist that is new to this
+		// feed can still carry a slug some other live playlist already holds. That is a conflict with
+		// existing state, not a server fault.
+		if conflict := createConflict(err, "referenced playlist"); conflict != nil {
+			return conflict
 		}
-		bodies[i] = string(b)
+		return fmt.Errorf("insert referenced playlists: %w", err)
 	}
-	if _, err := tx.Exec(ctx, upsertPlaylists, ids, slugs, bodies); err != nil {
-		return fmt.Errorf("upsert playlist rows: %w", err)
-	}
-	if _, err := tx.Exec(ctx, clearItemIndex, ids); err != nil {
-		return fmt.Errorf("clear playlist item index: %w", err)
-	}
-	if _, err := tx.Exec(ctx, insertItemIndex, ids, bodies); err != nil {
-		return fmt.Errorf("insert playlist item index: %w", err)
-	}
-	return nil
+	// Record source mappings for every remote reference in this batch, not only the rows just inserted: a
+	// playlist can already be stored (created directly, or ingested from another URI) and still be the
+	// first thing a given URI resolves to. That case is precisely the one the mapping has to cover, since
+	// otherwise the next ingest of that URI would fetch again to learn an id already known here.
+	return recordPlaylistSources(ctx, tx, playlists)
 }
 
 // insertPlaylistGroupMembersBatch writes membership rows in playlist order.
@@ -596,16 +922,26 @@ VALUES ($1, $2, $3::jsonb)`
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
+	if err := lockDocumentID(ctx, tx, "playlist_groups", in.ID); err != nil {
+		return err
 	}
-
-	groupJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireNotTombstoned(ctx, tx, "playlist_groups", in.ID); err != nil {
 		return err
 	}
 
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+		return fmt.Errorf("upsert playlists: %w", err)
+	}
+
+	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
+		return err
+	}
+	groupJSON := []byte(in.Raw)
+
 	if _, err := tx.Exec(ctx, insertGroup, in.ID, in.Slug, groupJSON); err != nil {
+		if conflict := createConflict(err, "playlist-group"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert playlist_group: %w", err)
 	}
 
@@ -649,11 +985,9 @@ WHERE slug = $1`
 		}
 		return nil, fmt.Errorf("select playlist_group: %w", err)
 	}
-	g, err := utils.DecodeJSONB[playlistgroup.Group](raw, "playlist-group body")
-	if err != nil {
+	if rec.Raw, rec.Body, err = scanDocument[playlistgroup.Group](raw, "playlist-group body"); err != nil {
 		return nil, err
 	}
-	rec.Body = g
 	return &rec, nil
 }
 
@@ -708,11 +1042,9 @@ LIMIT $1`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan: %w", err)
 		}
-		g, err := utils.DecodeJSONB[playlistgroup.Group](raw, "playlist-group body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlistgroup.Group](raw, "playlist-group body"); err != nil {
 			return nil, "", err
 		}
-		rec.Body = g
 		out = append(out, rec)
 	}
 
@@ -728,9 +1060,9 @@ LIMIT $1`
 // UpdatePlaylistGroup implements store.Store (updated_at set by trigger; membership replaced).
 //
 // Process (single tx): batch-upsert all referenced playlists, update the group body, clear and rebuild membership.
-func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput) error {
+func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb WHERE id = $1`
+		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
 		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
 	)
@@ -759,22 +1091,22 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 
 	// Upsert playlists
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
 	// Update group body
-	groupJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
 		return err
 	}
+	groupJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON)
+	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("update playlist_group: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyConditionalWrite(ctx, tx, "playlist_groups", rowID)
 	}
 
 	// Replace membership
@@ -834,11 +1166,9 @@ ORDER BY m.position`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 			return nil, err
 		}
-		rec.Body = pl
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {
@@ -848,26 +1178,8 @@ ORDER BY m.position`
 }
 
 // DeletePlaylistGroup implements store.Store.
-func (s *Store) DeletePlaylistGroup(ctx context.Context, idOrSlug string) error {
-	const (
-		byID   = `DELETE FROM playlist_groups WHERE id = $1`
-		bySlug = `DELETE FROM playlist_groups WHERE slug = $1`
-	)
-
-	id, err := uuid.Parse(idOrSlug)
-	var ct pgconn.CommandTag
-	if err == nil {
-		ct, err = s.pool.Exec(ctx, byID, id)
-	} else {
-		ct, err = s.pool.Exec(ctx, bySlug, idOrSlug)
-	}
-	if err != nil {
-		return fmt.Errorf("delete playlist_group: %w", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
-	}
-	return nil
+func (s *Store) DeletePlaylistGroup(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+	return s.deleteDocumentRow(ctx, "playlist_groups", idOrSlug, expectedUpdatedAt)
 }
 
 // =============================================================================
@@ -910,16 +1222,26 @@ VALUES ($1, $2, $3::jsonb)`
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
+	if err := lockDocumentID(ctx, tx, "channels", in.ID); err != nil {
+		return err
 	}
-
-	chJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireNotTombstoned(ctx, tx, "channels", in.ID); err != nil {
 		return err
 	}
 
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+		return fmt.Errorf("upsert playlists: %w", err)
+	}
+
+	if err := requireDocument(in.Raw, "channel body"); err != nil {
+		return err
+	}
+	chJSON := []byte(in.Raw)
+
 	if _, err := tx.Exec(ctx, insertChannel, in.ID, in.Slug, chJSON); err != nil {
+		if conflict := createConflict(err, "channel"); conflict != nil {
+			return conflict
+		}
 		return fmt.Errorf("insert channel: %w", err)
 	}
 
@@ -963,11 +1285,9 @@ WHERE slug = $1`
 		}
 		return nil, fmt.Errorf("select channel: %w", err)
 	}
-	ch, err := utils.DecodeJSONB[channels.Channel](raw, "channel body")
-	if err != nil {
+	if rec.Raw, rec.Body, err = scanDocument[channels.Channel](raw, "channel body"); err != nil {
 		return nil, err
 	}
-	rec.Body = ch
 	return &rec, nil
 }
 
@@ -1022,11 +1342,9 @@ LIMIT $1`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan: %w", err)
 		}
-		ch, err := utils.DecodeJSONB[channels.Channel](raw, "channel body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[channels.Channel](raw, "channel body"); err != nil {
 			return nil, "", err
 		}
-		rec.Body = ch
 		out = append(out, rec)
 	}
 
@@ -1042,9 +1360,9 @@ LIMIT $1`
 // UpdateChannel implements store.Store (updated_at set by trigger; membership replaced).
 //
 // Process (single tx): batch-upsert all referenced playlists, update the channel body, clear and rebuild membership.
-func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput) error {
+func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.ChannelInput, expectedUpdatedAt time.Time) error {
 	const (
-		updateByID     = `UPDATE channels SET body = $2::jsonb WHERE id = $1`
+		updateByID     = `UPDATE channels SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
 		selectIDBySlug = `SELECT id FROM channels WHERE slug = $1`
 		clearMembers   = `DELETE FROM channel_members WHERE channel_id = $1`
 	)
@@ -1073,22 +1391,22 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 
 	// Upsert playlists
-	if err := upsertPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
 	// Update channel body
-	chJSON, err := utils.EncodeJSONB(in.Body)
-	if err != nil {
+	if err := requireDocument(in.Raw, "channel body"); err != nil {
 		return err
 	}
+	chJSON := []byte(in.Raw)
 
-	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON)
+	ct, err := tx.Exec(ctx, updateByID, rowID, chJSON, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("update channel: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
+		return classifyConditionalWrite(ctx, tx, "channels", rowID)
 	}
 
 	// Replace membership
@@ -1148,11 +1466,9 @@ ORDER BY m.position`
 		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		pl, err := utils.DecodeJSONB[playlist.Playlist](raw, "playlist body")
-		if err != nil {
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
 			return nil, err
 		}
-		rec.Body = pl
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {
@@ -1162,26 +1478,8 @@ ORDER BY m.position`
 }
 
 // DeleteChannel implements store.Store.
-func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string) error {
-	const (
-		byID   = `DELETE FROM channels WHERE id = $1`
-		bySlug = `DELETE FROM channels WHERE slug = $1`
-	)
-
-	id, err := uuid.Parse(idOrSlug)
-	var ct pgconn.CommandTag
-	if err == nil {
-		ct, err = s.pool.Exec(ctx, byID, id)
-	} else {
-		ct, err = s.pool.Exec(ctx, bySlug, idOrSlug)
-	}
-	if err != nil {
-		return fmt.Errorf("delete channel: %w", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("%w", store.ErrNotFound)
-	}
-	return nil
+func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+	return s.deleteDocumentRow(ctx, "channels", idOrSlug, expectedUpdatedAt)
 }
 
 // GetChannelRegistry implements store.Store.

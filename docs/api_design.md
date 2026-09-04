@@ -19,7 +19,7 @@
 - **Plural resource segments:** `/api/v1/playlists`, `/api/v1/playlist-groups`, `/api/v1/channels`, `/api/v1/playlist-items`.
 - **Multi-word segments** use **kebab-case** (e.g. `playlist-items`, `playlist-groups`).
 - **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for groups and channels).
-- **Curated registry:** **`GET`** and **`PUT`** `/api/v1/registry/channels` (read public; replace requires auth).
+- **Curated registry:** **`GET`** `/api/v1/registry/channels` (read public; **read-only** — there is no write endpoint).
 
 Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two separate path params.
 
@@ -58,32 +58,154 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
 - **`displayAt`** — optional ISO 8601 datetime on a playlist item (same level as `source`, not inside `display`). Under playlist extension validation, accepted wire forms per §3.5.2 are local datetime with seconds and no timezone (`2026-07-21T00:00:00`, display-locale local), or absolute RFC 3339 date-time with `Z`/colon offset. Date-only (`YYYY-MM-DD`) and compact offset without colon are **not** accepted by that extension validator. This feed stores and returns the item metadata; it does not compute playback eligibility.
 - **`inlineManifest`** — optional complete Ref Manifest carried on a playlist item (same level as `source`) instead of behind `ref`, per §3.6. Under playlist extension validation it is checked against the unmodified ref-manifest schema, so a malformed manifest fails the whole write with **`400`**. With extensions **off**, the core schema does not describe the field and core DP-1 tolerates unknown ones, so the manifest is stored and returned **unchecked** (same posture as `displayAt`). The manifest is **not** returned byte-identical to the one submitted — signing and JSONB storage re-encode it — so do not hash, diff, or cache the returned blob. The feed does not fetch `ref`, merge the two, or apply the §3.6 precedence (a fetched `ref` manifest wins, the inline copy is the offline fallback) — that resolution belongs to players. The manifest is part of the signed payload, with no `refHash` counterpart of its own.
-  - **No inbound body limit.** Nothing caps request size, so a playlist carrying large inline manifests can be published directly yet exceed `playlist.fetch_max_body_bytes` (default 4 MiB) when another deployment ingests it by URL into a group or channel. `playlist_item_index` also holds a second full copy of each manifest, which `GET /api/v1/playlist-items` returns up to 100 rows at a time. Size inline manifests with both limits in mind.
+  - **Two size limits apply.** Inbound bodies are capped by `server.max_request_bytes` (default 5 MiB, **`413`** beyond it), and a playlist fetched *by URL* during group/channel ingest is capped by `playlist.fetch_max_body_bytes` (default 4 MiB). A playlist carrying large inline manifests can therefore be publishable directly yet un-ingestable by another deployment. `playlist_item_index` also holds a second full copy of each manifest, which `GET /api/v1/playlist-items` returns up to 100 rows at a time. Size inline manifests with all three in mind.
 
 ---
 
 ## Authentication and authorization
 
-**Two authentication paths for document writes (create and update):**
+**Signatures only. There is no API key.** Every mutating request is authorized by the cryptographic
+signatures it carries; the middleware (`RequireSignatures`) rejects any POST/PUT/DELETE whose body has no
+`signatures` array, and the executor verifies authenticity and ownership. The feed **always adds** its own
+`feed` signature after verification (JCS canonicalization, SHA-256 payload hash, Ed25519). Each signature
+carries `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see the `Signature` schema in OpenAPI).
 
-1. **API key authentication (ops path):** Traditional Bearer token.
-   - **`Authorization: Bearer <api-key>`** (`ApiKeyAuth` in OpenAPI)
-   - On **create**, when **`id`** or **`created`** are omitted, the server assigns a new UUID and the current time respectively; when provided, values are validated (UUID shape; **`created`** RFC3339 and not in the future) and stored. **`slug`** continues to follow **`makeSlug`** rules (optional client slug, else derived from title + short id).
-   - Server adds feed signature to the document
+Three postures, by verb:
 
-2. **Signature-based authentication (user path):** Cryptographic signatures on the request body.
-   - **No API key required** when the body includes a **non-empty** `signatures` array and verification succeeds
-   - **POST (create):** request must include `id` (UUID), `created` (RFC3339, not in future), and `signatures`, as documented on `PlaylistInput` / group / channel inputs
-   - **PUT (replace):** same input shapes as create; `signatures` must match the document after replace (stored `id`, `slug`, and document `created` are preserved by the server)
-   - **PATCH (partial update):** optional `signatures` on `PlaylistUpdateInput` / group / channel update schemas; when non-empty, signatures must verify against the **merged** document (patch fields overlaid on the stored document)
-   - Each signature must contain: `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see DP-1 spec and `Signature` schema in OpenAPI)
-   - Signature `kid` must match a curator `key` (playlists/groups) or publisher `key` (channels) in the document used for verification
-   - Server verifies signatures cryptographically (JCS canonicalization, SHA-256 payload hash, Ed25519 signature verification)
-   - Server **always adds** its own feed signature regardless of authentication path
-   - **DELETE** and **registry PUT** still require an API key only (no signature-only path)
+1. **POST (create) — open.** Any client may create. The body must include `id` (UUID), `created`
+   (RFC3339, not in the future), `slug`, and a non-empty `signatures` array with a signature whose `kid`
+   matches a curator `key` (playlists/groups) or the publisher `key` (channels) declared in the document.
+   These are all part of the signed document and are stored **verbatim** — the feed does not derive a slug
+   or mint item ids after signing, so every playlist item must already carry a UUID `id` (missing slug or
+   item id → **`400` `bad_request`**). The signer becomes the resource's **owner**.
 
-- **Compare semantics (API key):** the server compares the full header value in constant time to the configured secret (see `internal/httpserver/middleware.go`).
+2. **PUT (replace) — owner-bound, owner-immutable, replay-bound.** The body is a route-specific replace envelope
+   (**`PlaylistReplaceRequest`**, **`PlaylistGroupReplaceRequest`**, **`ChannelReplaceRequest`**): `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
+   are verified independently — one without the other authorizes nothing.
+   - **Document:** **identity is immutable and validated, not substituted** — the submitted `id`, `slug`,
+     and document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as
+     an instant, since formatting may differ). The **owner set is immutable**: `curators` (playlists),
+     `curator` (groups), and `publisher` (channels) must equal the stored document's, else **`403`
+     `forbidden`** (channel `curators` may change). All signatures must cryptographically verify
+     (**`400`**) and at least one signer's `kid` must be an owner of the **stored** document (**`403`**).
+   - **Authorization intent:** `action` must be `"replace"`, `target` must name this resource,
+     `payloadHash` must equal the DP-1 signing digest of the submitted `document` (binding the intent to
+     that exact content), `created` must fall within `auth.intent_max_clock_skew`, and the intent's own
+     signatures must verify and include a **stored owner** (**`403`** otherwise).
+   - The write is persisted by stored UUID, conditional on the generation observed at authorization
+     (**`409`** if the resource changed in between). The feed then co-signs and stores the document with
+     no field added, dropped or rewritten (see the note on content vs. bytes below).
+
+   **Why the intent exists:** an owner's signatures live *inside* the document and are public via `GET`,
+   so a previously published document could be replayed to roll a resource back. The per-signature `ts`
+   cannot bound that — it is **not** covered by the signature (`sig` is over the JCS document with
+   `signatures` stripped), so it can be rewritten on a replayed body. The intent's `created` *is* inside a
+   signed payload, and because the bound is wall-clock rather than per-feed bookkeeping, a stale intent is
+   stale on **every** feed — which is what makes this hold for documents mirrored across feeds.
+
+3. **DELETE — owner-bound, signed delete-intent.** The body is a route-specific delete intent
+   (`PlaylistDeleteRequest`, `PlaylistGroupDeleteRequest`, `ChannelDeleteRequest`)
+   (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
+   exact stored resource (`id` and `slug`), its `created` must fall within the server's freshness window
+   (`auth.intent_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
+   must verify over the intent bytes (JCS, `signatures` stripped), and at least one signer must be an owner
+   of the stored resource. DP-1 defines no delete document; this envelope is feed-local. The delete is
+   conditional on the generation observed at authorization (**`409`** if the resource changed in between),
+   and it **tombstones the id** in the same transaction.
+   - **A third party cannot block it.** Creation is open, so anyone may publish a group or channel
+     referencing a playlist they do not own. Those references do **not** prevent the playlist owner's
+     delete: the membership links are removed with the playlist. Otherwise a stranger could veto an
+     owner's deletion indefinitely, since only that stranger may edit their own document.
+   - The referencing documents are **not** modified — they are signed, and the feed does not own them. They
+     keep listing the deleted playlist's URI (now a **`404`**), and a later `PUT` of one will fail to
+     resolve that reference until its owner publishes an updated document. Membership rows are a derived
+     index over those documents, not content in their own right: a group is served from its stored
+     document, and the rows only back the `?playlist-group=` / `?channel=` list filters.
+
+**Membership ingestion is reference-only.** When a group or channel names a playlist URL, the feed
+**links** that playlist but never modifies it. A referenced id already stored here is linked as-is —
+whatever the remote document says is ignored, and its stored bytes, slug, owner and item index are
+untouched. Identity is resolved **before** the fetched body is judged, so this holds even when the origin
+has since rotted, rotated keys, or started serving something malformed: the id is enough to link the
+stored playlist, and a member's origin can never retroactively block groups that reference it.
+
+If the origin is **unreachable**, a remote URI falls back to the playlist it last resolved to, recorded at
+ingest. Unreachable means no usable answer — DNS failure, refused connection, timeout, or a `5xx`/`429`.
+An origin that *answers* is authoritative even when the answer is a rejection: a `404`, `410` or `403`,
+and a `200` whose body exceeds `playlist.fetch_max_body_bytes`, fail the write rather than reusing the
+cache, because a publisher withdrawing a playlist must not leave
+the old reference alive indefinitely. A destination the SSRF guard refuses is likewise not a fallback: the
+URL now means somewhere this feed will not contact. That extends the guarantee above to an outage: since a stored member is never refreshed, the fetch
+that failed could only have rediscovered an id already held here, so failing the write would let someone
+else's downtime block a mutation whose content could not change. The fallback is consulted **only** on
+fetch failure — a reachable origin stays authoritative, so a publisher re-pointing their URL to a
+different playlist is picked up normally, and each successful resolution refreshes the record. It is
+dropped when the playlist is deleted, so a retired id cannot be relinked. Reference URIs are capped at
+2048 bytes (**`400`** beyond that). A
+referenced id that is *new* to this feed is being created, so it is held to the same bar as
+`POST`: the fetched document must be validly self-signed by a curator it declares, and must not name a
+tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
+re-ingesting a group does not refresh member bodies. (Without this, any client able to create a channel
+could host a document reusing another owner's playlist id and overwrite it; verifying signatures alone
+would not help, since an attacker self-signs the spoof with their own key.) Cross-feed propagation is the
+webhook path's job, not ingestion's.
+
+**Deleted ids are not reusable.** A successful DELETE records a tombstone, and a later `POST` naming that
+id is refused with **`409` `conflict`**. This is what stops a captured, still-valid document from being
+replayed to resurrect a deleted resource — while leaving `POST` itself open, so cross-feed mirroring of
+documents this feed has never seen keeps working. An owner who deletes and later wants the resource back
+must create it under a **new id**.
+
+**Documents are stored and served without content changes.** DP-1 §7.1 binds every signature to the JCS
+form of the whole document, so the feed verifies over the bytes it received and appends its `feed` entry
+to `signatures` over that same payload. It never derives a slug, mints item ids, re-formats `created`,
+injects defaults (the channel `version` is now required), drops or adds a field, or strips a legacy
+top-level `signature`. Every field the document needs must therefore be present and signed by the client.
+Row `id`/`slug`/`created` are read-only projections of the document.
+
+**What is preserved is the content, not the byte sequence.** Appending the feed signature re-encodes the
+document, and the `jsonb` column re-orders keys and normalises numeric text. All of that is JCS-neutral,
+so every signature — yours and the feed's — still verifies against what you get back, and the signing
+digest is unchanged. It does mean a `GET` is *not* guaranteed byte-identical to what you submitted:
+compare or re-verify via JCS canonicalisation (or the signing digest), never by hashing the raw response
+body or diffing it against your request.
+
+**Request bodies are decoded strictly.** An unknown or misspelled JSON member, or a body holding more
+than one JSON value, is a **`400`** naming the field — never silently dropped, because a dropped member
+changes the bytes the client signed. Every request schema in OpenAPI therefore declares
+`additionalProperties: false`, so a generated client cannot construct a body the server will reject.
+
+**Strict decoding is recursive, and that is deliberate.** An unknown or misspelled JSON member is a
+**`400`** naming the field — at the top level *and* inside nested DP-1 objects such as `defaults`,
+`dynamicQuery`, `display`, and each playlist item. The reason is signatures: a member the feed silently
+dropped would change the bytes the client signed, so a document that looked accepted would fail
+verification later, far from the cause (this is the ff-cli#107 failure, pinned by
+`TestIntegration_SignedPlaylist_UnknownFieldRejected`). Rejecting up front, naming the member, is the
+whole point.
+
+This makes the request models in `internal/models` the effective schema for signed submissions, which
+carries an obligation: they must describe every member the dp1-go document structs do, or a dp1-go upgrade
+that adds a member becomes a `400` for every client sending it. `internal/models/coverage_test.go` fails
+the build the moment that stops being true.
+
+Because the feed is deliberately stricter here than DP-1 itself (whose core schema leaves
+`additionalProperties` open), `api/openapi.yaml` does not restate dp1-go's nested member sets — it would
+drift from a schema this service does not own. Those sub-objects are published as `type: object` with the
+constraint stated in prose: **the member set is dp1-go's, and members outside it are rejected**. Treat the
+DP-1 schemas as the source of truth for what may appear inside them.
+
+Values carried as raw JSON — `inlineManifest`, and `display.margin` — are the one exception: nothing
+inspects them here at all. With extensions **enabled**, dp1-go validates `inlineManifest` against the
+ref-manifest schema, so a malformed manifest still fails the write; with extensions **disabled**, the core
+schema does not describe the field and DP-1 tolerates unknown members, so it is stored and returned
+unchecked. Either way the value is part of the signed payload and is preserved as sent.
+
+Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
+`payload_too_large`, enforced before the body is buffered for authentication.
+
 - **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
+- **Registry is read-only over the API** (`GET /api/v1/registry/channels`); there is no write endpoint. Seed it out-of-band.
+- **No global allowlist.** "Owner" is derived from the document's own declared curators/publisher, not a configured key list: anyone can create (and thereby own) new resources, but only the declared owner can replace or delete one. Front with a gateway if you need to restrict who may create.
 - **Per-user or OAuth** is out of scope for this service; front with a gateway if needed.
 
 ---
@@ -110,15 +232,15 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 
 ## Methods and semantics
 
-- **POST** — create; server assigns id/slug rules per executor/store.
+- **POST** — create (open); body must be validly self-signed by its declared curator/publisher.
 - **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel).
-- **PATCH** — partial update (only provided fields change); server re-signs and re-validates as applicable.
-- **DELETE** — remove resource (membership tables follow DB CASCADE rules).
+- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound and owner-immutable (see Authentication).
+- **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
+- **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 
-**Registry `GET`/`PUT` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). **PUT** requires at least one publisher, and at least one channel URL per publisher; it atomically **replaces the entire** registry (not a merge-by-item API).
+**Registry `GET` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). The registry is **read-only over the API** — there is no write endpoint; seed it out-of-band.
 
-The registry is the **curation gate**, and it is easy to mistake for a mirror of the catalog: downstream consumers that build offline snapshots (e.g. the mobile app's seed-database builder) ingest **only registry-listed channels**, not the feed's full `/channels` listing. Publishing a channel makes it fetchable by URL; it does **not** list it in the registry, so a published-but-unlisted channel is invisible to every registry-driven consumer until someone PUTs an updated registry.
+The registry is the **curation gate**, and it is easy to mistake for a mirror of the catalog: downstream consumers that build offline snapshots (e.g. the mobile app's seed-database builder) ingest **only registry-listed channels**, not the feed's full `/channels` listing. Publishing a channel makes it fetchable by URL; it does **not** list it in the registry, so a published-but-unlisted channel is invisible to every registry-driven consumer until the registry is updated out-of-band.
 
 **Channel and extension features:** when extensions are disabled in config, channel routes return **`404`** with error code **`extensions_disabled`** (see below).
 
@@ -140,25 +262,36 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | HTTP status | `error` (typical) | When |
 | ----------- | ----------------- | ---- |
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
+| **400** | `bad_request` | A group or channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
+| **400** | `bad_request` | The playlists a group or channel references exceed `playlist.max_resolved_bytes` in total (`ErrResolvedTooLarge`). The reference cap bounds the count, this bounds their combined size — the two multiply, so both are needed. |
+| **400** | `bad_request` | A reference URI longer than 2048 bytes (`ErrPlaylistURITooLong`). |
+| **400** | `bad_request` | A group or channel referencing no playlists at all (`ErrNoPlaylistReferences`); the schemas declare `minItems: 1`. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |
-| **400** | `invalid_timestamp` | User-provided `created` timestamp is in the future (`IsInvalidTimestampError`). |
+| **400** | `invalid_timestamp` | `created` is in the future, or a mutation-intent `created` — replace or delete — is outside the freshness window (`IsInvalidTimestampError`). |
 | **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
-| **401** | `unauthorized` | Missing or wrong API key on protected routes, or missing authentication (neither API key nor valid signatures). |
+| **400** | `bad_request` | Malformed delete-intent, or its `action`/`target` disagree with the stored resource (`IsDeleteRequestError`). |
+| **401** | `unauthorized` | Missing authentication — a mutating request whose body carries no signatures (`IsSignaturesRequiredError`; also enforced by `RequireSignatures`). |
+| **403** | `forbidden` | Signature is valid but the signer is not an owner of the resource, or a PUT tried to change the immutable owner set (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
+| **404** | `not_found` | The target was **deleted** between authorization and the write. Deliberately not a `409`: the id is tombstoned, so "re-read and retry" could never succeed, whereas `404` is both accurate and terminal. A resource deleted *and re-created* in that window is a `409` instead, because the row exists and a retry can succeed. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
+| **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
+| **409** | `conflict` | `POST` collided with a **live** resource: the `id` or `slug` is already taken. A lost-response retry — `GET` the resource; a slug collision needs a different `slug`. Do **not** republish under a new id. |
+| **409** | `conflict` | `POST` named an id this feed has already **deleted** (tombstoned); ids are not reusable — create under a new id. Distinct from the live collision above, and the only 409 where a new id is the right action. |
+| **413** | `payload_too_large` | Request body exceeds `server.max_request_bytes` (enforced before the body is buffered). |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
 
 Clients should branch on **`error`** (stable) and treat **`message`** as diagnostic text, not a long-term contract.
 
-**OpenAPI** documents shared responses (`BadRequest`, `Unauthorized`, `NotFound`, `ExtensionsDisabled`, `InternalError`). If implementation adds a new stable `error` code, update **OpenAPI examples** and this doc in the same change.
+**OpenAPI** documents shared responses (`BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `ExtensionsDisabled`, `InternalError`). If implementation adds a new stable `error` code, update **OpenAPI examples** and this doc in the same change.
 
 ---
 
 ## Success status codes
 
-- **200** — OK (GET, PUT, PATCH, DELETE with body where applicable).
+- **200** — OK (GET, PUT).
 - **304** — Not Modified (single-resource GET only, when `If-None-Match` matches the current `ETag`; empty body).
 - **201** — Created (POST for new playlists, groups, channels as specified per path in OpenAPI).
 
@@ -167,9 +300,9 @@ Clients should branch on **`error`** (stable) and treat **`message`** as diagnos
 ## Idempotency and retries
 
 - The API does **not** define **`Idempotency-Key`** or similar headers.
-- **GET** and **DELETE** are safe to retry with usual caveats (delete twice may 404).
+- **GET** and **DELETE** are safe to retry with usual caveats (delete twice may 404; a retried delete-intent must still fall within the freshness window).
 - **POST** creates a new resource; retries may create duplicates unless the client deduplicates.
-- **PUT/PATCH** are last-write-wins; retries should send the same body if the intent is to repeat the same mutation.
+- **PUT** is last-write-wins; retries should send the same body if the intent is to repeat the same mutation.
 
 Document any future idempotency strategy in OpenAPI and here before implementing.
 

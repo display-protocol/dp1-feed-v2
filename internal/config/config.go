@@ -66,7 +66,15 @@ type ServerConfig struct {
 	WriteTimeout         time.Duration `yaml:"write_timeout"`
 	ResponseWriteReserve time.Duration `yaml:"response_write_reserve"`
 	IdleTimeout          time.Duration `yaml:"idle_timeout"`
+	// MaxRequestBytes caps an inbound request body. It bounds memory a client can force the server to
+	// buffer before authentication (the signature middleware reads the whole body). Zero falls back to
+	// DefaultMaxRequestBytes.
+	MaxRequestBytes int64 `yaml:"max_request_bytes"`
 }
+
+// DefaultMaxRequestBytes is the inbound request-body cap used when config leaves it unset. It comfortably
+// holds a signed playlist/group/channel document while bounding pre-auth memory use.
+const DefaultMaxRequestBytes = 5 << 20 // 5 MiB
 
 // DatabaseConfig holds PostgreSQL connection settings.
 type DatabaseConfig struct {
@@ -76,10 +84,21 @@ type DatabaseConfig struct {
 	MaxConnLifetime time.Duration `yaml:"max_conn_lifetime"`
 }
 
-// AuthConfig protects mutating routes (Bearer API key).
+// AuthConfig tunes signature-based authorization for mutating routes. There is no API key: every
+// mutating request is authorized by the cryptographic signatures it carries — POST by the document's own
+// signatures, PUT and DELETE additionally by a signed mutation-intent.
 type AuthConfig struct {
-	APIKey string `yaml:"api_key"`
+	// IntentMaxClockSkew bounds how far a signed mutation-intent's "created" may sit from server time in
+	// either direction, for both replace and delete. Because that "created" is inside the intent's signed
+	// payload it cannot be forged, which is what makes it a usable replay bound (the per-signature "ts" is
+	// NOT covered by the signature). Keep it small — it is the window in which a captured intent could be
+	// replayed — while still tolerating honest client/server clock drift. Zero falls back to the package
+	// default (see defaultConfig).
+	IntentMaxClockSkew time.Duration `yaml:"intent_max_clock_skew"`
 }
+
+// DefaultIntentMaxClockSkew is the mutation-intent freshness window used when config leaves it unset.
+const DefaultIntentMaxClockSkew = 5 * time.Minute
 
 // SentryConfig is optional; empty DSN disables Sentry.
 type SentryConfig struct {
@@ -104,7 +123,46 @@ type PlaylistConfig struct {
 	// SigningKid is set at load time from the signing key (did:key:…).
 	SigningKid    string `yaml:"-"`
 	PublicBaseURL string `yaml:"public_base_url"` // Used to build playlist URIs referenced from groups
+	// AllowPrivateFetchDestinations lets playlist ingestion reach loopback and other private addresses.
+	//
+	// Off by default and intended for tests and local development only. Group and channel creation is open
+	// to any client, so whoever names a playlist URL decides where the feed sends a request; with this on,
+	// that becomes a probe of everything the feed can reach (loopback, cloud metadata, internal services).
+	AllowPrivateFetchDestinations bool `yaml:"allow_private_fetch_destinations"`
+	// MaxPlaylistReferences caps how many playlist URIs one group or channel may reference.
+	//
+	// This is a fan-out bound, not a modeling preference. Group and channel creation is open to any
+	// client, and every reference the document lists becomes an outbound fetch for URIs this feed does not
+	// already store. Without a cap the only limit is the request-body size, so a single valid,
+	// self-signed request near MaxRequestBytes can name six figures' worth of URIs and turn one inbound
+	// request into that many outbound ones. The SSRF guard constrains *where* those requests may go; it
+	// does nothing about how many there are. Zero falls back to DefaultMaxPlaylistReferences.
+	MaxPlaylistReferences int `yaml:"max_playlist_references"`
+	// MaxResolvedBytes caps the total size of resolved playlist documents held in memory for one
+	// group/channel mutation.
+	//
+	// The reference count and the per-fetch size cap do not bound memory between them, they multiply:
+	// resolution keeps every resolved body until the whole set is ready to persist, so the default 1000
+	// references at 4 MiB each is ~4 GiB from a single unauthenticated request (and persistence copies the
+	// bodies again). The eight-way concurrency limit paces downloads without bounding what is retained.
+	// This is the budget that actually bounds it. Zero falls back to DefaultMaxResolvedBytes.
+	//
+	// Peak is roughly twice this value, not exactly it: persistence copies each distinct body once more
+	// while building insert parameters. That copy is per DISTINCT playlist (see uniquePlaylistParams), so
+	// it scales with this budget rather than with the reference count — a document repeating one reference
+	// a thousand times costs one copy, not a thousand.
+	MaxResolvedBytes int64 `yaml:"max_resolved_bytes"`
 }
+
+// DefaultMaxResolvedBytes bounds retained resolved-playlist bytes per mutation when config leaves it
+// unset. Comfortably fits a large curated collection while keeping one request's peak far below what a
+// modest deployment can absorb, including the copy made at persistence time.
+const DefaultMaxResolvedBytes = 64 << 20 // 64 MiB
+
+// DefaultMaxPlaylistReferences bounds playlist references per group/channel when config leaves it unset.
+// Chosen to sit far above any realistic curated collection while keeping worst-case fan-out per request
+// to something a deployment can absorb.
+const DefaultMaxPlaylistReferences = 1000
 
 // Load reads YAML from path (if non-empty), merges DP1_FEED_* environment overrides, validates
 // required fields, and sets Playlist.SigningKid from the Ed25519 public key (did:key).
@@ -146,6 +204,7 @@ func defaultConfig() *Config {
 			WriteTimeout:         60 * time.Second,
 			ResponseWriteReserve: time.Second,
 			IdleTimeout:          120 * time.Second,
+			MaxRequestBytes:      DefaultMaxRequestBytes,
 		},
 		Database: DatabaseConfig{
 			URL:             "postgres://postgres:postgres@localhost:5432/dp1_feed?sslmode=disable", // #nosec G101 -- local development default; production config comes from YAML/env.
@@ -154,10 +213,13 @@ func defaultConfig() *Config {
 			MaxConnLifetime: time.Hour,
 		},
 		Logging:    LoggingConfig{Debug: false},
+		Auth:       AuthConfig{IntentMaxClockSkew: DefaultIntentMaxClockSkew},
 		Extensions: ExtensionsConfig{Enabled: true},
 		Playlist: PlaylistConfig{
-			FetchTimeout:      30 * time.Second,
-			FetchMaxBodyBytes: 4 << 20, // 4 MiB
+			FetchTimeout:          30 * time.Second,
+			FetchMaxBodyBytes:     4 << 20, // 4 MiB
+			MaxPlaylistReferences: DefaultMaxPlaylistReferences,
+			MaxResolvedBytes:      DefaultMaxResolvedBytes,
 		},
 		Notifications: NotificationConfig{Timeout: 15 * time.Second},
 	}
@@ -168,8 +230,33 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv(envPrefix + "DATABASE_URL"); v != "" {
 		cfg.Database.URL = v
 	}
-	if v := os.Getenv(envPrefix + "API_KEY"); v != "" {
-		cfg.Auth.APIKey = v
+	if v := os.Getenv(envPrefix + "INTENT_MAX_CLOCK_SKEW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("intent max clock skew env: %w", err)
+		}
+		cfg.Auth.IntentMaxClockSkew = d
+	}
+	if v := os.Getenv(envPrefix + "MAX_REQUEST_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("max request bytes env: %w", err)
+		}
+		cfg.Server.MaxRequestBytes = n
+	}
+	if v := os.Getenv(envPrefix + "MAX_PLAYLIST_REFERENCES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("max playlist references env: %w", err)
+		}
+		cfg.Playlist.MaxPlaylistReferences = n
+	}
+	if v := os.Getenv(envPrefix + "MAX_RESOLVED_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("max resolved bytes env: %w", err)
+		}
+		cfg.Playlist.MaxResolvedBytes = n
 	}
 	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
 		cfg.Sentry.DSN = v
@@ -193,6 +280,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv(envPrefix + "PUBLIC_BASE_URL"); v != "" {
 		cfg.Playlist.PublicBaseURL = strings.TrimRight(v, "/")
+	}
+	if v := os.Getenv(envPrefix + "ALLOW_PRIVATE_FETCH_DESTINATIONS"); v != "" {
+		cfg.Playlist.AllowPrivateFetchDestinations = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv(envPrefix + "CORS_ALLOW_ORIGINS"); v != "" {
 		var origins []string
@@ -220,12 +310,16 @@ func applyEnv(cfg *Config) error {
 }
 
 func (c *Config) validate() error {
-	// Minimum bar for boot: DB, mutating API key, and hex signing material (kid is filled in Load after this).
+	// Minimum bar for boot: DB and hex signing material (kid is filled in Load after this). There is no
+	// API key to require: mutating routes are authorized by request signatures, not a shared secret.
 	if c.Database.URL == "" {
 		return fmt.Errorf("database url is required (yaml database.url or DP1_FEED_DATABASE_URL)")
 	}
-	if c.Auth.APIKey == "" {
-		return fmt.Errorf("api key is required (yaml auth.api_key or DP1_FEED_API_KEY)")
+	if c.Auth.IntentMaxClockSkew < 0 {
+		return fmt.Errorf("auth intent max clock skew must not be negative")
+	}
+	if c.Server.MaxRequestBytes < 0 {
+		return fmt.Errorf("server max request bytes must not be negative")
 	}
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")
@@ -238,6 +332,29 @@ func (c *Config) validate() error {
 	}
 	if c.Server.WriteTimeout <= c.Server.ResponseWriteReserve {
 		return fmt.Errorf("server write timeout must exceed response write reserve")
+	}
+	// The request deadline handed to reference-resolving mutations is write_timeout - response_write_reserve,
+	// and a group or channel write may spend up to fetch_timeout resolving a single remote reference. If the
+	// budget is smaller than that, the deadline cancels a fetch the operator explicitly allowed time for and
+	// the write fails with a generic error — a configuration that looks valid but cannot serve the writes it
+	// accepts. Checked for every deployment, not only those with notification clients: groups fan out the
+	// same way channels do.
+	if c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Server.ResponseWriteReserve {
+		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus response write reserve")
+	}
+	if c.Playlist.MaxPlaylistReferences < 0 {
+		return fmt.Errorf("max playlist references must not be negative")
+	}
+	// A budget below one document's fetch cap could not resolve even a single reference, so the deployment
+	// would reject every group/channel write that fetches. Checked here rather than discovered in
+	// production. The budget is deliberately NOT required to cover references x fetch cap: that product is
+	// the unbounded figure this budget exists to replace, and requiring it would force an unusably small
+	// reference limit.
+	if c.Playlist.MaxResolvedBytes > 0 && c.Playlist.MaxResolvedBytes < c.Playlist.FetchMaxBodyBytes {
+		return fmt.Errorf("max resolved bytes must be at least the per-playlist fetch cap (%d)", c.Playlist.FetchMaxBodyBytes)
+	}
+	if c.Playlist.MaxResolvedBytes < 0 {
+		return fmt.Errorf("max resolved bytes must not be negative")
 	}
 	if len(c.Notifications.Clients) > 0 && c.Notifications.Timeout <= 0 {
 		return fmt.Errorf("notification timeout must be positive")

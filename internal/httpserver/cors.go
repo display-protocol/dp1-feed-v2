@@ -10,8 +10,8 @@ import (
 )
 
 // newCORSMiddleware returns gin-contrib/cors configured from cfg.CORS. When AllowOrigins is empty or exactly
-// "*", all origins are allowed. Otherwise only listed origins are permitted. Authorization is included in
-// allowed preflight headers so browsers may send Bearer API keys cross-origin.
+// "*", all origins are allowed. Otherwise only listed origins are permitted. Authentication travels in the
+// request body (signatures), not a header, so no auth header needs to be allowlisted for preflight.
 func newCORSMiddleware(cfg *config.Config) gin.HandlerFunc {
 	cc := cors.DefaultConfig()
 	origins := cfg.CORS.AllowOrigins
@@ -21,6 +21,5 @@ func newCORSMiddleware(cfg *config.Config) gin.HandlerFunc {
 	} else {
 		cc.AllowOrigins = origins
 	}
-	cc.AddAllowHeaders("Authorization")
 	return cors.New(cc)
 }
