@@ -9,9 +9,11 @@ package pgtest
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +29,23 @@ type Provider struct {
 	container *postgres.PostgresContainer
 }
 
+// defaultPostgresImage matches the image docker-compose runs, so local runs exercise what developers
+// actually deploy against.
+const defaultPostgresImage = "postgres:18-alpine"
+
+// postgresImage lets CI pin a different server version.
+//
+// README states a floor of PostgreSQL 16, and a claimed floor that nothing tests is a claim waiting to be
+// wrong: a migration using a function added in a later release would pass every check here and fail on a
+// supported deployment at startup, since migrations run before the server accepts traffic. CI runs this
+// suite against the documented minimum as well as the default.
+func postgresImage() string {
+	if img := strings.TrimSpace(os.Getenv("DP1_TEST_POSTGRES_IMAGE")); img != "" {
+		return img
+	}
+	return defaultPostgresImage
+}
+
 // NewProvider starts a PostgreSQL container, applies migrations, and returns a [store.TestProvider].
 // Docker must be available. Returns error if setup fails.
 func NewProvider(ctx context.Context) (*Provider, error) {
@@ -37,7 +56,7 @@ func NewProvider(ctx context.Context) (*Provider, error) {
 		return nil, fmt.Errorf("docker daemon not available: %w", err)
 	}
 
-	c, err := postgres.Run(ctx, "postgres:18-alpine", postgres.BasicWaitStrategies())
+	c, err := postgres.Run(ctx, postgresImage(), postgres.BasicWaitStrategies())
 	if err != nil {
 		return nil, fmt.Errorf("start postgres container: %w", err)
 	}
