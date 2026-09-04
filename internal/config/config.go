@@ -146,6 +146,11 @@ type PlaylistConfig struct {
 	// references at 4 MiB each is ~4 GiB from a single unauthenticated request (and persistence copies the
 	// bodies again). The eight-way concurrency limit paces downloads without bounding what is retained.
 	// This is the budget that actually bounds it. Zero falls back to DefaultMaxResolvedBytes.
+	//
+	// Peak is roughly twice this value, not exactly it: persistence copies each distinct body once more
+	// while building insert parameters. That copy is per DISTINCT playlist (see uniquePlaylistParams), so
+	// it scales with this budget rather than with the reference count — a document repeating one reference
+	// a thousand times costs one copy, not a thousand.
 	MaxResolvedBytes int64 `yaml:"max_resolved_bytes"`
 }
 

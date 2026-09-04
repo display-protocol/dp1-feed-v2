@@ -355,12 +355,19 @@ func sourceURIHash(uri string) []byte {
 // Runs on the caller's transaction, so the cache and the membership it backs commit together. Local
 // (same-origin) references carry no SourceURI and are skipped — their id or slug is already in the path.
 func recordPlaylistSources(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
+	// One entry per distinct URI, for the same reason as uniquePlaylistParams: a repeated reference would
+	// otherwise send its URI once per position.
 	uris := make([]string, 0, len(playlists))
 	ids := make([]uuid.UUID, 0, len(playlists))
+	seen := make(map[string]struct{}, len(playlists))
 	for _, p := range playlists {
 		if p.SourceURI == "" {
 			continue
 		}
+		if _, dup := seen[p.SourceURI]; dup {
+			continue
+		}
+		seen[p.SourceURI] = struct{}{}
 		uris = append(uris, p.SourceURI)
 		ids = append(ids, p.ID)
 	}
@@ -787,6 +794,38 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 // Input may repeat the same id (membership order); DISTINCT ON keeps the first occurrence so the row and
 // its item index are always derived from the same body. Only newly inserted rows get an index, which is
 // why nothing is cleared first — an existing playlist's index must survive untouched.
+// uniquePlaylistParams builds the insert parameters from the FIRST occurrence of each playlist id.
+//
+// This is a memory bound, not a tidiness pass. A document may repeat a reference, and resolution
+// deliberately resolves each distinct URI once and shares the resulting value across every position it
+// occupies — those positions alias one Raw slice, so the resolved set stays within max_resolved_bytes.
+// Building parameters per position undid that: string(p.Raw) ALLOCATES, so 1000 copies of one 4 MiB
+// playlist produced ~4 GiB of distinct strings here, plus the same again as pgx serialized them, from a
+// request that passed the resolution budget. The CTE's DISTINCT ON (id) discarded the duplicates only
+// after all of that had been built and sent.
+//
+// The full ordered slice is still what membership and source mappings are written from; only the
+// playlist-row insert is deduplicated, because that is the one that carries bodies.
+func uniquePlaylistParams(playlists []store.IngestedPlaylist) (ids []uuid.UUID, slugs []string, bodies []string, err error) {
+	seen := make(map[uuid.UUID]struct{}, len(playlists))
+	ids = make([]uuid.UUID, 0, len(playlists))
+	slugs = make([]string, 0, len(playlists))
+	bodies = make([]string, 0, len(playlists))
+	for _, p := range playlists {
+		if err := requireDocument(p.Raw, "ingested playlist body"); err != nil {
+			return nil, nil, nil, err
+		}
+		if _, dup := seen[p.ID]; dup {
+			continue
+		}
+		seen[p.ID] = struct{}{}
+		ids = append(ids, p.ID)
+		slugs = append(slugs, p.Slug)
+		bodies = append(bodies, string(p.Raw))
+	}
+	return ids, slugs, bodies, nil
+}
+
 // insertMissingPlaylistsBatch inserts referenced playlists this feed does not hold and records what each
 // remote URI resolved to.
 func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
@@ -818,16 +857,9 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 		return nil
 	}
 
-	ids := make([]uuid.UUID, len(playlists))
-	slugs := make([]string, len(playlists))
-	bodies := make([]string, len(playlists))
-	for i, p := range playlists {
-		if err := requireDocument(p.Raw, "ingested playlist body"); err != nil {
-			return err
-		}
-		ids[i] = p.ID
-		slugs[i] = p.Slug
-		bodies[i] = string(p.Raw)
+	ids, slugs, bodies, err := uniquePlaylistParams(playlists)
+	if err != nil {
+		return err
 	}
 	// A tombstoned id is one this feed deleted, so no row exists and the statement below would insert it.
 	// Ingestion must not become a side door around the create-path tombstone guard.
