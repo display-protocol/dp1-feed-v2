@@ -140,6 +140,15 @@ func TestBlockedIP_classification(t *testing.T) {
 		{"::ffff:127.0.0.1", "IPv4-mapped loopback must be unwrapped"},
 		{"::ffff:192.168.0.1", "IPv4-mapped RFC1918 must be unwrapped"},
 		{"::ffff:198.18.0.1", "IPv4-mapped benchmarking must be unwrapped"},
+
+		// Embedded-IPv4 IPv6 forms that netip.Addr.Unmap does NOT normalize. Each of these previously
+		// reached the dial: they stay IPv6 after Unmap and match no IPv4 prefix, so a reference to
+		// http://[::127.0.0.1]/ passed the guard and could hit loopback on a host that routes the form.
+		{"::127.0.0.1", "IPv4-compatible loopback (::/96); Unmap only handles the mapped form"},
+		{"::10.0.0.1", "IPv4-compatible RFC 1918"},
+		{"::169.254.169.254", "IPv4-compatible link-local metadata address"},
+		{"::ffff:0:127.0.0.1", "IPv4-translated loopback (::ffff:0:0:0/96), a distinct /96 from mapped"},
+		{"::ffff:0:169.254.169.254", "IPv4-translated link-local metadata address"},
 	}
 	for _, tc := range blocked {
 		addr, err := netip.ParseAddr(tc.addr)

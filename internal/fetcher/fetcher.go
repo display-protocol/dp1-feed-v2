@@ -151,8 +151,12 @@ func checkDialAddress(address string) error {
 // internally would happily let the feed reach them. Every prefix here is one IANA does not consider
 // globally reachable, so no legitimate playlist can be served from it.
 //
-// NAT64 (64:ff9b::/96) and 6to4 (2002::/16) matter for a subtler reason: both embed an IPv4 address, so
-// allowing them would reintroduce every blocked IPv4 range through an IPv6 literal.
+// Every IPv6 form that embeds an IPv4 address is listed, because allowing any of them would reintroduce
+// the entire IPv4 denylist through an IPv6 literal: NAT64 (64:ff9b::/96), 6to4 (2002::/16),
+// IPv4-compatible (::/96) and IPv4-translated (::ffff:0:0:0/96). Only the IPv4-MAPPED form
+// (::ffff:a.b.c.d) is absent, and deliberately so — blockedAddr unmaps it to a real IPv4 address and
+// judges it against the IPv4 prefixes, which is what lets ::ffff:1.1.1.1 through while ::ffff:127.0.0.1
+// is refused. The others have no such normalization in the standard library, so they are refused outright.
 var nonGlobalPrefixes = []netip.Prefix{
 	// IPv4
 	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 1122)
@@ -173,8 +177,15 @@ var nonGlobalPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("224.0.0.0/4"),     // multicast
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, incl. 255.255.255.255 broadcast
 	// IPv6
-	netip.MustParsePrefix("::/128"),         // unspecified
-	netip.MustParsePrefix("::1/128"),        // loopback
+	// ::/96 covers the unspecified address, loopback, and every deprecated IPv4-compatible address
+	// (::a.b.c.d). The last of those is the reason it is a /96 rather than two /128s: netip.Addr.Unmap
+	// only normalizes the IPv4-MAPPED form (::ffff:a.b.c.d), so ::127.0.0.1 stayed a plain IPv6 address,
+	// matched no IPv4 prefix, and reached the dial. RFC 4291 deprecated the form precisely because it is
+	// not globally routable, so refusing the whole /96 costs nothing legitimate.
+	netip.MustParsePrefix("::/96"),
+	// IPv4-translated (RFC 2765), written ::ffff:0:a.b.c.d. A distinct /96 from the mapped form above and
+	// likewise skipped by Unmap, so it needs its own entry.
+	netip.MustParsePrefix("::ffff:0:0:0/96"),
 	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known (embeds IPv4)
 	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use (embeds IPv4)
 	netip.MustParsePrefix("100::/64"),       // discard-only
