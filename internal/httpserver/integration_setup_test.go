@@ -90,14 +90,6 @@ func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Serve
 	return New(cfg, zap.NewNop(), exec, "test")
 }
 
-// newIntegrationSigner returns a signer holding the same key the integration server signs with,
-// so a test can produce a document that server will accept as validly signed.
-func newIntegrationSigner(t *testing.T) *dp1svc.Service {
-	t.Helper()
-	svc, _ := newIntegrationSignerAndKid(t)
-	return svc
-}
-
 func newIntegrationSignerAndKid(t *testing.T) (*dp1svc.Service, string) {
 	t.Helper()
 	priv, err := dp1svc.Ed25519PrivateKeyFromHex(integrationSeedHex)

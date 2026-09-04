@@ -95,7 +95,7 @@ jobs:
             -coverprofile=coverage-integration.out \
             -covermode=atomic \
             -coverpkg=github.com/display-protocol/dp1-feed-v2/internal/store,github.com/display-protocol/dp1-feed-v2/internal/store/pg,github.com/display-protocol/dp1-feed-v2/internal/httpserver,github.com/display-protocol/dp1-feed-v2/internal/executor \
-            ./internal/store/ ./internal/httpserver
+            ./internal/store/... ./internal/httpserver
 
       - name: Display integration coverage summary
         run: go tool cover -func=coverage-integration.out | tail -20
@@ -133,7 +133,7 @@ jobs:
       - name: Run integration tests against PostgreSQL 16
         env:
           DP1_TEST_POSTGRES_IMAGE: postgres:16-alpine
-        run: go test -count=1 -timeout=10m -tags=integration ./internal/store/ ./internal/httpserver
+        run: go test -count=1 -timeout=10m -tags=integration ./internal/store/... ./internal/httpserver
 
   merge-coverage:
     name: Merge and report coverage

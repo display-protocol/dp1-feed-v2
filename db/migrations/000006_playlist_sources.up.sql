@@ -62,6 +62,17 @@ CREATE INDEX IF NOT EXISTS playlist_sources_playlist_id_idx ON playlist_sources 
 -- reference is valid and must be seeded; a case-sensitive match silently skipped it and left exactly the
 -- kind of reference this seed exists to protect without a fallback.
 --
+-- References are trimmed FIRST, because runtime trims before it fetches and before it looks the URI up.
+-- Seeding the raw value therefore missed twice over: a leading space failed the scheme match outright, and
+-- a trailing space produced a hash that the trimmed runtime lookup could never find. Trimming here — before
+-- the scheme match, the length check, deduplication, ordering and the hash — is what makes a seeded row
+-- reachable. The trimmed value is also what gets stored, matching what runtime records.
+--
+-- btrim covers ASCII whitespace; Go's strings.TrimSpace additionally trims Unicode spaces such as U+00A0.
+-- A reference padded with those is not seeded, which costs one fetch on its next ingest and then records
+-- the row correctly. The cache is self-healing, so an approximate warm start is the right trade against
+-- reproducing Go's exact whitespace table in SQL.
+--
 -- Same-origin URLs are NOT filtered out. They are inert here: resolveOnePlaylistRef checks
 -- isLocalPlaylistURL before it ever consults this table, so such a row is never read. An earlier revision
 -- excluded anything shaped like '%/api/v1/playlists/%' to avoid recording them, which silently excluded
@@ -71,7 +82,7 @@ CREATE INDEX IF NOT EXISTS playlist_sources_playlist_id_idx ON playlist_sources 
 INSERT INTO playlist_sources (uri, uri_hash, playlist_id)
 SELECT DISTINCT ON (refs.uri) refs.uri, sha256(convert_to(refs.uri, 'UTF8')), refs.playlist_id
 FROM (
-    SELECT ref.uri, pgm.playlist_id, g.updated_at
+    SELECT btrim(ref.uri, E' \t\n\r\f\v') AS uri, pgm.playlist_id, g.updated_at
     FROM playlist_groups g
     CROSS JOIN LATERAL jsonb_array_elements_text(
         CASE WHEN jsonb_typeof(g.body -> 'playlists') = 'array'
@@ -84,7 +95,7 @@ FROM (
 
     UNION ALL
 
-    SELECT ref.uri, cm.playlist_id, c.updated_at
+    SELECT btrim(ref.uri, E' \t\n\r\f\v') AS uri, cm.playlist_id, c.updated_at
     FROM channels c
     CROSS JOIN LATERAL jsonb_array_elements_text(
         CASE WHEN jsonb_typeof(c.body -> 'playlists') = 'array'

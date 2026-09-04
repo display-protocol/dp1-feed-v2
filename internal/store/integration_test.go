@@ -2415,7 +2415,7 @@ func TestIntegration_Tombstone_survivesConcurrentDelete(t *testing.T) {
 	}
 }
 
-// TestIntegration_Tombstone_blocksIDReuse pins the resurrect defence.
+// TestIntegration_Tombstone_blocksIDReuse pins the resurrect defense.
 //
 // Create is intentionally open, so nothing stops someone re-POSTing a document they saw earlier — its
 // owner signatures are public and still valid. Retiring the id on delete is what makes that replay fail,

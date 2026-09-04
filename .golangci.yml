@@ -5,6 +5,10 @@ version: "2"
 # ================
 run:
   go: "1.22"          # minimum Go version your project supports
+  # Analyze integration-tagged files too. Without this the linter cannot see them, so a helper used only
+  # by an integration test reads as dead code, and those files get no linting of their own.
+  build-tags:
+    - integration
   timeout: 10m        # timeout for the linting process
   concurrency: 4      # parallelism (optional – default is auto‑detected)
 
