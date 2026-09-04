@@ -89,9 +89,6 @@ type Executor interface {
 	// DeleteChannel verifies the signed delete-intent against the stored publisher, then removes the channel row (membership CASCADE).
 	DeleteChannel(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
 
-	// GetChannelRegistry returns the curated channel registry as ordered publisher items.
-	GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error)
-
 	// APIInfo returns deployment metadata for GET /api/v1.
 	APIInfo(version string) map[string]any
 }
@@ -149,7 +146,8 @@ func WithMaxResolvedBytes(n int64) Option {
 	}
 }
 
-// New constructs an Executor. If extensionsEnabled is true, playlist validation and channel APIs use registry/extension rules.
+// New constructs an Executor. If extensionsEnabled is true, playlist validation uses the DP-1 playlists
+// extension overlay and the channel APIs are served.
 // fetch may be nil; external playlist URLs in groups/channels then fail unless they match publicBaseURL as local /api/v1/playlists/{idOrSlug}.
 func New(st store.Store, dp dp1svc.ValidatorSigner, extensionsEnabled bool, fetch fetcher.Fetcher, publicBaseURL string, options ...Option) Executor {
 	e := &impl{
@@ -783,13 +781,6 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string, req *models.S
 	return nil
 }
 
-// GetChannelRegistry returns the curated channel registry (publishers + channels in order).
-// The registry is read-only over the API: there is no signed document to authorize a full replace, so
-// the write endpoint was removed with the API key. Seed it out-of-band (migration/tooling).
-func (e *impl) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
-	return e.store.GetChannelRegistry(ctx)
-}
-
 // APIInfo returns static deployment metadata for GET /api/v1.
 func (e *impl) APIInfo(version string) map[string]any {
 	return map[string]any{
@@ -806,7 +797,6 @@ func (e *impl) APIInfo(version string) map[string]any {
 			"playlistGroups": "/api/v1/playlist-groups",
 			"channels":       "/api/v1/channels",
 			"playlistItems":  "/api/v1/playlist-items",
-			"registry":       "/api/v1/registry/channels",
 			"health":         "/api/v1/health",
 		},
 		"documentation": "https://github.com/display-protocol/dp1",

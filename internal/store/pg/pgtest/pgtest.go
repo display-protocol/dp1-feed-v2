@@ -102,8 +102,6 @@ func (p *Provider) Cleanup(t testing.TB) {
 	ctx := context.Background()
 	const truncateAll = `
 TRUNCATE TABLE
-	registry_publisher_channels,
-	registry_publishers,
 	playlist_item_index,
 	channel_members,
 	playlist_group_members,

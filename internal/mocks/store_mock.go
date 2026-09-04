@@ -144,22 +144,6 @@ func (mr *MockStoreMockRecorder) GetChannel(ctx, idOrSlug any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChannel", reflect.TypeOf((*MockStore)(nil).GetChannel), ctx, idOrSlug)
 }
 
-// GetChannelRegistry mocks base method.
-func (m *MockStore) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetChannelRegistry", ctx)
-	ret0, _ := ret[0].([]store.RegistryPublisher)
-	ret1, _ := ret[1].([]store.RegistryPublisherChannel)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// GetChannelRegistry indicates an expected call of GetChannelRegistry.
-func (mr *MockStoreMockRecorder) GetChannelRegistry(ctx any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChannelRegistry", reflect.TypeOf((*MockStore)(nil).GetChannelRegistry), ctx)
-}
-
 // GetPlaylist mocks base method.
 func (m *MockStore) GetPlaylist(ctx context.Context, idOrSlug string) (*store.PlaylistRecord, error) {
 	m.ctrl.T.Helper()
@@ -341,20 +325,6 @@ func (m *MockStore) Ping(ctx context.Context) error {
 func (mr *MockStoreMockRecorder) Ping(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ping", reflect.TypeOf((*MockStore)(nil).Ping), ctx)
-}
-
-// ReplaceChannelRegistry mocks base method.
-func (m *MockStore) ReplaceChannelRegistry(ctx context.Context, publishers []store.RegistryPublisher, channels []store.RegistryPublisherChannel) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReplaceChannelRegistry", ctx, publishers, channels)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// ReplaceChannelRegistry indicates an expected call of ReplaceChannelRegistry.
-func (mr *MockStoreMockRecorder) ReplaceChannelRegistry(ctx, publishers, channels any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplaceChannelRegistry", reflect.TypeOf((*MockStore)(nil).ReplaceChannelRegistry), ctx, publishers, channels)
 }
 
 // UpdateChannel mocks base method.

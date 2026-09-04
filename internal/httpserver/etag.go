@@ -11,7 +11,7 @@ import (
 )
 
 // writeJSONIndividualGET JSON-encodes body and serves it via writeBytesIndividualGET.
-// Intended for single-resource GET handlers only (not list or registry aggregate GETs).
+// Intended for single-resource GET handlers only (not list GETs).
 func writeJSONIndividualGET(c *gin.Context, body any) error {
 	b, err := json.Marshal(body)
 	if err != nil {

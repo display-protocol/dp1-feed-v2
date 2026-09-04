@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1480,117 +1479,6 @@ ORDER BY m.position`
 // DeleteChannel implements store.Store.
 func (s *Store) DeleteChannel(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
 	return s.deleteDocumentRow(ctx, "channels", idOrSlug, expectedUpdatedAt)
-}
-
-// GetChannelRegistry implements store.Store.
-// Returns ordered publishers and their channel URLs (ordered by publisher position, then URL position).
-func (s *Store) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
-	const (
-		pubQuery = `
-			SELECT id, name, position, did, created_at, updated_at
-			FROM registry_publishers
-			ORDER BY position ASC
-		`
-		chanQuery = `
-			SELECT c.id, c.publisher_id, c.channel_url, c.position, c.created_at
-			FROM registry_publisher_channels c
-			INNER JOIN registry_publishers p ON p.id = c.publisher_id
-			ORDER BY p.position ASC, c.position ASC
-		`
-	)
-
-	pubs := []store.RegistryPublisher{}
-	rows, err := s.pool.Query(ctx, pubQuery)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get registry publishers: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var p store.RegistryPublisher
-		var did sql.NullString
-		if err := rows.Scan(&p.ID, &p.Name, &p.Position, &did, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			return nil, nil, fmt.Errorf("scan registry publisher: %w", err)
-		}
-		if did.Valid {
-			s := did.String
-			p.DID = &s
-		}
-		pubs = append(pubs, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate registry publishers: %w", err)
-	}
-
-	chans := []store.RegistryPublisherChannel{}
-	rows2, err := s.pool.Query(ctx, chanQuery)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get registry channels: %w", err)
-	}
-	defer rows2.Close()
-
-	for rows2.Next() {
-		var c store.RegistryPublisherChannel
-		if err := rows2.Scan(&c.ID, &c.PublisherID, &c.ChannelURL, &c.Position, &c.CreatedAt); err != nil {
-			return nil, nil, fmt.Errorf("scan registry channel: %w", err)
-		}
-		chans = append(chans, c)
-	}
-	if err := rows2.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate registry channels: %w", err)
-	}
-
-	return pubs, chans, nil
-}
-
-// ReplaceChannelRegistry implements store.Store.
-// Atomically replaces the entire registry (DELETE + INSERT in one transaction).
-// Publishers and channels must have positions set (0-indexed).
-func (s *Store) ReplaceChannelRegistry(ctx context.Context, publishers []store.RegistryPublisher, channels []store.RegistryPublisherChannel) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("replace registry: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Delete existing registry data.
-	if _, err := tx.Exec(ctx, "DELETE FROM registry_publisher_channels"); err != nil {
-		return fmt.Errorf("replace registry: delete channels: %w", err)
-	}
-	if _, err := tx.Exec(ctx, "DELETE FROM registry_publishers"); err != nil {
-		return fmt.Errorf("replace registry: delete publishers: %w", err)
-	}
-
-	// Insert publishers.
-	const pubInsert = `
-		INSERT INTO registry_publishers (id, name, position, did, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, now(), now())
-	`
-	for _, p := range publishers {
-		var didArg any
-		if p.DID != nil && *p.DID != "" {
-			didArg = *p.DID
-		}
-		if _, err := tx.Exec(ctx, pubInsert, p.ID, p.Name, p.Position, didArg); err != nil {
-			return fmt.Errorf("replace registry: insert publisher %q: %w", p.Name, err)
-		}
-	}
-
-	// Insert channels.
-	const chanInsert = `
-		INSERT INTO registry_publisher_channels (id, publisher_id, channel_url, position, created_at)
-		VALUES ($1, $2, $3, $4, now())
-	`
-	for _, c := range channels {
-		if _, err := tx.Exec(ctx, chanInsert, c.ID, c.PublisherID, c.ChannelURL, c.Position); err != nil {
-			return fmt.Errorf("replace registry: insert channel %q: %w", c.ChannelURL, err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("replace registry: commit: %w", err)
-	}
-	return nil
 }
 
 // =============================================================================

@@ -23,7 +23,6 @@ alwaysApply: true
 
 - Plural segments: `playlists`, `playlist-groups`, `channels`, `playlist-items`.
 - Kebab-case multi-word paths; single resource **`{id}`** path param = UUID **or** slug.
-- Registry: **`GET`** `/api/v1/registry/channels` only (read-only over the API; no write endpoint).
 
 ## JSON
 
@@ -32,7 +31,7 @@ alwaysApply: true
 ## ETag (conditional GET)
 
 - **Single-resource GETs** (`GET` one playlist, playlist-group, channel, or playlist-item by id) return a strong **`ETag`** (SHA-256 of UTF-8 JSON body) and honor **`If-None-Match`** with **`304`** when unchanged. See `docs/api_design.md` and OpenAPI.
-- **List GETs, registry GET, health/metadata:** no **`ETag`** in API v1 unless a future spec revision adds it.
+- **List GETs, health/metadata:** no **`ETag`** in API v1 unless a future spec revision adds it.
 
 ## Authentication
 
@@ -46,7 +45,7 @@ alwaysApply: true
 - **Reference-only ingest:** a referenced playlist is linked, never modified. Remote references are fetched; if the origin is unreachable (transport failure, timeout, `5xx`/`429`) the URI falls back to the playlist it last resolved to (`playlist_sources`), so an outage cannot block a group write. An origin that answers is authoritative — `404`/`410`/`403`, and a guard-refused destination, fail the write instead of reusing the cache. An unknown reference is held to the full POST bar. Reference URIs are capped at 2048 bytes.
 - **Memory bound:** resolved playlist documents for one write are capped in aggregate by `playlist.max_resolved_bytes` (default 64 MiB); the reference cap bounds count, not size, and the two multiply. Over it is `400`.
 - **Fan-out bound:** a group/channel may reference at most `playlist.max_playlist_references` playlists (default 1000), checked before resolution; over it is `400`. Reference-resolving mutations carry a request deadline.
-- **No PATCH.** Registry is read-only over the API. Ownership is document-declared; no global key allowlist.
+- **No PATCH.** Ownership is document-declared; no global key allowlist.
 - Reads public unless network-restricted; no built-in OAuth.
 
 ## Pagination, sort, filter
@@ -58,12 +57,12 @@ alwaysApply: true
 
 - Body shape: `{"error":"<stable_code>","message":"<detail>"}` — see `internal/httpserver/errors.go`.
 - Typical codes: `bad_request`, `validation_error`, `signature_invalid`, `signature_verification_failed`, `invalid_timestamp` (400); `unauthorized` (401); `forbidden` (403); `not_found`, `extensions_disabled` (404); `conflict` (409 — concurrent change, a live id/slug collision on create, or a tombstoned id reused; these need different client actions). A target **deleted** between authorization and write is `404`, not `409`: the id is tombstoned so retrying cannot succeed; `payload_too_large` (413); `internal_error` (500).
+- Unmatched paths and unsupported methods return `404` `not_found` in the same envelope (gin `NoRoute`), not the framework's plain-text default.
 - Prefer branching on **`error`**; **`message`** may vary.
 
 ## HTTP semantics (summary)
 
 - POST create, GET read/list, PUT full replace, DELETE remove (per OpenAPI per resource). No PATCH.
-- Registry is read-only over the API (GET only).
 - Extensions off: channel-style routes → **404** + `extensions_disabled`.
 
 ## Idempotency
