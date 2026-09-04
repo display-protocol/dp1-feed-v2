@@ -175,21 +175,30 @@ than one JSON value, is a **`400`** naming the field — never silently dropped,
 changes the bytes the client signed. Every request schema in OpenAPI therefore declares
 `additionalProperties: false`, so a generated client cannot construct a body the server will reject.
 
-**Strict decoding covers the members this API declares, and stops there.** The request envelopes and the
-document's top-level members are defined by this service, so an unknown or misspelled member there is a
-**`400`** naming the field. Everything nested inside them — `defaults`, `dynamicQuery`, `display`, each
-playlist item, and the other DP-1 sub-objects — belongs to dp1-go's published schemas, which validate the
-document on the very next step. This API does not restate those schemas in `api/openapi.yaml` (it would
-drift from a contract it does not own), so it does not enforce them at the decoder either: the two now
-agree, and a body a generated client can construct is a body the server will accept as far as decoding is
-concerned.
+**Strict decoding is recursive, and that is deliberate.** An unknown or misspelled JSON member is a
+**`400`** naming the field — at the top level *and* inside nested DP-1 objects such as `defaults`,
+`dynamicQuery`, `display`, and each playlist item. The reason is signatures: a member the feed silently
+dropped would change the bytes the client signed, so a document that looked accepted would fail
+verification later, far from the cause (this is the ff-cli#107 failure, pinned by
+`TestIntegration_SignedPlaylist_UnknownFieldRejected`). Rejecting up front, naming the member, is the
+whole point.
 
-Values carried as raw JSON — `inlineManifest`, and `display.margin` — are opaque in the strongest sense:
-nothing inspects them here at all. With extensions **enabled**, dp1-go validates `inlineManifest` against
-the ref-manifest schema, so a malformed manifest still fails the write; with extensions **disabled**, the
-core schema does not describe the field and DP-1 tolerates unknown members, so it is stored and returned
-unchecked. Either way the value is part of the signed payload and is preserved as sent — the feed never
-edits it to make it fit.
+This makes the request models in `internal/models` the effective schema for signed submissions, which
+carries an obligation: they must describe every member the dp1-go document structs do, or a dp1-go upgrade
+that adds a member becomes a `400` for every client sending it. `internal/models/coverage_test.go` fails
+the build the moment that stops being true.
+
+Because the feed is deliberately stricter here than DP-1 itself (whose core schema leaves
+`additionalProperties` open), `api/openapi.yaml` does not restate dp1-go's nested member sets — it would
+drift from a schema this service does not own. Those sub-objects are published as `type: object` with the
+constraint stated in prose: **the member set is dp1-go's, and members outside it are rejected**. Treat the
+DP-1 schemas as the source of truth for what may appear inside them.
+
+Values carried as raw JSON — `inlineManifest`, and `display.margin` — are the one exception: nothing
+inspects them here at all. With extensions **enabled**, dp1-go validates `inlineManifest` against the
+ref-manifest schema, so a malformed manifest still fails the write; with extensions **disabled**, the core
+schema does not describe the field and DP-1 tolerates unknown members, so it is stored and returned
+unchecked. Either way the value is part of the signed payload and is preserved as sent.
 
 Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
 `payload_too_large`, enforced before the body is buffered for authentication.

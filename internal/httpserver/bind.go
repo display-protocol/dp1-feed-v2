@@ -104,10 +104,6 @@ func bindSignedReplace(c *gin.Context, doc any) (json.RawMessage, *models.Signed
 	return wrapper.Document, &intent, nil
 }
 
-// localModulePrefix identifies types declared in this repository, which are the ones strict decoding is
-// responsible for. Anything outside it is governed by its own published schema (see exactMembers).
-const localModulePrefix = "github.com/display-protocol/dp1-feed-v2/"
-
 // checkExactMembers walks the JSON in raw alongside the Go type it will decode into and rejects any
 // object member whose name is not, byte for byte, a JSON tag of the struct at that position. It
 // recurses through pointers, slices, and nested structs; maps, interfaces, and json.RawMessage fields
@@ -129,23 +125,6 @@ func exactMembers(v any, typ reflect.Type) error {
 	switch typ.Kind() {
 	case reflect.Struct:
 		if typ == rawMessageType {
-			return nil
-		}
-		// Strictness stops at the boundary this API owns.
-		//
-		// The request envelopes and their top-level members are declared here, so a misspelled or unknown
-		// member there is this API's to reject — that is what the documented 400 promises, and what stops a
-		// client thinking it sent a field the feed silently ignored. Everything nested inside is a dp1-go
-		// type whose member set belongs to the DP-1 schemas, which dp1-go itself validates on the very next
-		// step.
-		//
-		// Recursing past this line was incidental rather than designed: it happened because the request
-		// structs reuse dp1-go's types. It also made the published contract a lie in the other direction —
-		// OpenAPI declares these sub-objects permissively and deliberately does not restate schemas this
-		// repository does not own, so a generated client could construct a body the server rejected. And it
-		// bought nothing: documents are stored verbatim, so an unknown nested member is preserved either
-		// way; the only question is which layer judges it, and the answer is the schema that defines it.
-		if !strings.HasPrefix(typ.PkgPath(), localModulePrefix) {
 			return nil
 		}
 		obj, ok := v.(map[string]any)
