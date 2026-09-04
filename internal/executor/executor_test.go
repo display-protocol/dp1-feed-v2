@@ -1696,6 +1696,70 @@ func TestCreatePlaylistGroup_resolvedBytesBudget(t *testing.T) {
 	}
 }
 
+// A URI whose origin re-points it must resolve to the NEW playlist, not the one it first resolved to.
+//
+// The cache is consulted only when a fetch fails, so a healthy origin stays authoritative. An earlier
+// design read the cache first and skipped the fetch, which pinned a URI to whatever it first resolved to
+// — globally and permanently, set by whichever anonymous caller referenced it first, since creation is
+// open. A publisher re-pointing their own URL was then never picked up by anyone. This pins the fix: the
+// cache holds an old id, and it must not win.
+func TestCreatePlaylistGroup_repointedRemoteURIResolvesToCurrentPlaylist(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	const remoteURI = "https://elsewhere.test/p.json"
+	newID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	newBody := []byte(`{"id":"44444444-4444-4444-4444-444444444444","slug":"pl-new","title":"N"}`)
+	newDoc := mustDecodePlaylist(t, newBody)
+
+	// The origin now serves the new playlist, and this feed already holds it.
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), newID.String()).Return(&store.PlaylistRecord{
+		ID: newID, Slug: "pl-new", Raw: newBody, Body: newDoc,
+	}, nil)
+	// A stale cache entry exists and would win under the old ordering. Allowed but not required, so the
+	// test fails on the resolved id rather than on call counts.
+	oldID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), remoteURI).Return(&store.PlaylistRecord{
+		ID: oldID, Slug: "pl-old", Raw: []byte(`{"id":"55555555-5555-5555-5555-555555555555"}`),
+	}, nil).AnyTimes()
+
+	mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+		if len(in.Playlists) != 1 || in.Playlists[0].ID != newID {
+			t.Fatalf("re-pointed URI must resolve to the current playlist %s, got %+v", newID, in.Playlists)
+		}
+	}).Return(nil)
+
+	e := executor.New(mockStore, mockDP1, false, staticFetcher{body: newBody}, testPublicBase)
+	if _, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(remoteURI)); err != nil {
+		t.Fatalf("group create: %v", err)
+	}
+}
+
+// A reference URI is client input with no length bound of its own beyond the request cap, so it is
+// rejected as a client error rather than carried into storage.
+func TestCreatePlaylistGroup_overlongReferenceURIRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	long := "https://elsewhere.test/" + strings.Repeat("p", 4096) + ".json"
+	e := executor.New(mockStore, mockDP1, false, staticFetcher{body: []byte(`{}`)}, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(long))
+	if !errors.Is(err, executor.ErrPlaylistURITooLong) {
+		t.Fatalf("want ErrPlaylistURITooLong, got %v", err)
+	}
+	if !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want a 400-class submission error, got %v", err)
+	}
+}
+
 // countingFetcher records how many times each URI was fetched.
 type countingFetcher struct {
 	mu   sync.Mutex
@@ -1730,7 +1794,8 @@ func TestCreatePlaylistGroup_repeatedReferenceResolvesOnce(t *testing.T) {
 	plBody := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl-one","title":"P"}`)
 	plDoc := mustDecodePlaylist(t, plBody)
 
-	mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), remoteURI).Return(nil, store.ErrNotFound)
+	// No GetPlaylistBySourceURI expectation: the cache is a fallback for a failed fetch, so a healthy
+	// origin must not consult it at all.
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), plID.String()).Return(&store.PlaylistRecord{
 		ID: plID, Slug: "pl-one", Raw: plBody, Body: plDoc,
 	}, nil)

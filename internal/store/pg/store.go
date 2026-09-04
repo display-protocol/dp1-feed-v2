@@ -4,6 +4,7 @@ package pg
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -304,18 +305,22 @@ WHERE slug = $1`
 }
 
 // GetPlaylistItems implements store.Store.
-// GetPlaylistBySourceURI implements store.Store. It resolves a remote reference from the mapping recorded
-// at ingest time, so a reference this feed has already ingested needs no outbound request.
+// GetPlaylistBySourceURI implements store.Store. It answers with the playlist a URI last resolved to.
+//
+// This is the fallback consulted when fetching the origin fails, not the primary resolution path, so a
+// row here can be stale by design: it is only ever read when the authoritative answer is unavailable, and
+// the next successful fetch refreshes it. Matching is on the generated uri_hash, since uri itself can
+// exceed the btree index limit.
 func (s *Store) GetPlaylistBySourceURI(ctx context.Context, uri string) (*store.PlaylistRecord, error) {
 	const q = `
 SELECT p.id, p.slug, p.body, p.created_at, p.updated_at
 FROM playlist_sources src
 JOIN playlists p ON p.id = src.playlist_id
-WHERE src.uri = $1`
+WHERE src.uri_hash = $1`
 
 	var rec store.PlaylistRecord
 	var raw []byte
-	if err := s.pool.QueryRow(ctx, q, uri).Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+	if err := s.pool.QueryRow(ctx, q, sourceURIHash(uri)).Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w", store.ErrNotFound)
 		}
@@ -328,13 +333,27 @@ WHERE src.uri = $1`
 	return &rec, nil
 }
 
-// recordPlaylistSources remembers which remote URI each ingested playlist came from.
+// sourceURIHash is the playlist_sources key: sha256 of the URI's UTF-8 bytes.
 //
-// ON CONFLICT DO NOTHING so the first successful ingest of a URI wins: ingestion never refreshes a stored
-// member, so a URI that later serves a different document must not silently re-point an existing
-// reference. Runs on the caller's transaction, so the mapping and the membership it supports commit
-// together. Local (same-origin) references carry no SourceURI and are skipped — their id or slug is
-// already in the path.
+// Computed here rather than by the database because convert_to() is STABLE, not IMMUTABLE, so Postgres
+// refuses sha256(convert_to(uri,'UTF8')) in a generated column or index expression. Hashing also sidesteps
+// the ~2704-byte btree limit that keying on the URI text itself would hit, and URIs are client input with
+// no length bound of their own.
+func sourceURIHash(uri string) []byte {
+	sum := sha256.Sum256([]byte(uri))
+	return sum[:]
+}
+
+// recordPlaylistSources records what each remote URI resolved to on this request.
+//
+// UPSERT, not first-wins. The table is a last-known-good cache consulted only when a fetch fails, so it
+// has to track the most recent successful resolution: if a publisher re-points a URL to a different
+// playlist, the fallback must follow rather than serve an answer the origin abandoned. (An earlier
+// revision kept the first value forever, which was required only because resolution consulted the cache
+// *before* fetching — a design that pinned a URI globally to whatever the first caller saw.)
+//
+// Runs on the caller's transaction, so the cache and the membership it backs commit together. Local
+// (same-origin) references carry no SourceURI and are skipped — their id or slug is already in the path.
 func recordPlaylistSources(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
 	uris := make([]string, 0, len(playlists))
 	ids := make([]uuid.UUID, 0, len(playlists))
@@ -348,13 +367,19 @@ func recordPlaylistSources(ctx context.Context, tx pgx.Tx, playlists []store.Ing
 	if len(uris) == 0 {
 		return nil
 	}
+	hashes := make([][]byte, len(uris))
+	for i, u := range uris {
+		hashes[i] = sourceURIHash(u)
+	}
 	const q = `
-INSERT INTO playlist_sources (uri, playlist_id)
-SELECT DISTINCT ON (x.uri) x.uri, x.playlist_id
-FROM unnest($1::text[], $2::uuid[]) WITH ORDINALITY AS x(uri, playlist_id, ord)
-ORDER BY x.uri, x.ord
-ON CONFLICT (uri) DO NOTHING`
-	if _, err := tx.Exec(ctx, q, uris, ids); err != nil {
+INSERT INTO playlist_sources (uri, uri_hash, playlist_id)
+SELECT DISTINCT ON (x.uri_hash) x.uri, x.uri_hash, x.playlist_id
+FROM unnest($1::text[], $2::bytea[], $3::uuid[]) WITH ORDINALITY AS x(uri, uri_hash, playlist_id, ord)
+ORDER BY x.uri_hash, x.ord
+ON CONFLICT (uri_hash) DO UPDATE
+SET playlist_id = EXCLUDED.playlist_id,
+    updated_at  = now()`
+	if _, err := tx.Exec(ctx, q, uris, hashes, ids); err != nil {
 		return fmt.Errorf("record playlist sources: %w", err)
 	}
 	return nil
@@ -762,10 +787,9 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 // Input may repeat the same id (membership order); DISTINCT ON keeps the first occurrence so the row and
 // its item index are always derived from the same body. Only newly inserted rows get an index, which is
 // why nothing is cleared first — an existing playlist's index must survive untouched.
-// insertMissingPlaylistsBatch inserts referenced playlists this feed does not hold, records their source
-// mappings, and returns the slice membership rows must be written from — which is not necessarily the
-// input, see applySourceMappingWinners.
-func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) ([]store.IngestedPlaylist, error) {
+// insertMissingPlaylistsBatch inserts referenced playlists this feed does not hold and records what each
+// remote URI resolved to.
+func insertMissingPlaylistsBatch(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) error {
 	// One statement: the data-modifying CTE reports which ids it actually inserted (ON CONFLICT DO NOTHING
 	// returns nothing for rows that already existed), and the outer INSERT indexes only those.
 	const insertMissing = `
@@ -791,7 +815,7 @@ SELECT (elem->>'id')::uuid, playlist_items.id, playlist_items.created_at, (ord -
 FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY AS t(elem, ord)`
 
 	if len(playlists) == 0 {
-		return playlists, nil
+		return nil
 	}
 
 	ids := make([]uuid.UUID, len(playlists))
@@ -799,7 +823,7 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	bodies := make([]string, len(playlists))
 	for i, p := range playlists {
 		if err := requireDocument(p.Raw, "ingested playlist body"); err != nil {
-			return nil, err
+			return err
 		}
 		ids[i] = p.ID
 		slugs[i] = p.Slug
@@ -808,88 +832,25 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	// A tombstoned id is one this feed deleted, so no row exists and the statement below would insert it.
 	// Ingestion must not become a side door around the create-path tombstone guard.
 	if err := lockDocumentIDs(ctx, tx, "playlists", ids); err != nil {
-		return nil, err
+		return err
 	}
 	if err := requireNoneTombstoned(ctx, tx, "playlists", ids); err != nil {
-		return nil, err
+		return err
 	}
 	if _, err := tx.Exec(ctx, insertMissing, ids, slugs, bodies); err != nil {
 		// ON CONFLICT (id) DO NOTHING absorbs id collisions, but a referenced playlist that is new to this
 		// feed can still carry a slug some other live playlist already holds. That is a conflict with
 		// existing state, not a server fault.
 		if conflict := createConflict(err, "referenced playlist"); conflict != nil {
-			return nil, conflict
+			return conflict
 		}
-		return nil, fmt.Errorf("insert referenced playlists: %w", err)
+		return fmt.Errorf("insert referenced playlists: %w", err)
 	}
 	// Record source mappings for every remote reference in this batch, not only the rows just inserted: a
 	// playlist can already be stored (created directly, or ingested from another URI) and still be the
 	// first thing a given URI resolves to. That case is precisely the one the mapping has to cover, since
 	// otherwise the next ingest of that URI would fetch again to learn an id already known here.
-	if err := recordPlaylistSources(ctx, tx, playlists); err != nil {
-		return nil, err
-	}
-	return applySourceMappingWinners(ctx, tx, playlists)
-}
-
-// applySourceMappingWinners re-points every remote reference at the playlist its URI is mapped to.
-//
-// recordPlaylistSources keeps the FIRST mapping for a URI and ignores later ones, so without this the two
-// halves could disagree: a concurrent request that resolved the same previously-unmapped URI to a
-// different playlist would lose the mapping race yet still write ITS id into membership. The URI would
-// then mean one playlist in playlist_sources and another in the rows derived from it, and a later replace
-// of an unchanged document would silently move membership to the mapped winner.
-//
-// Reading the winners back inside the same transaction settles it: whatever won the insert is what every
-// membership row uses, so one URI means one playlist everywhere. A playlist inserted by the losing
-// resolution stays stored but unreferenced, which is harmless — it is a real, validly signed document that
-// simply nothing links to.
-//
-// Only ID is re-pointed. Slug and Raw are not used to write membership, and rewriting them here would
-// imply this function had fetched the winner's document, which it has not.
-func applySourceMappingWinners(ctx context.Context, tx pgx.Tx, playlists []store.IngestedPlaylist) ([]store.IngestedPlaylist, error) {
-	uris := make([]string, 0, len(playlists))
-	seen := make(map[string]struct{}, len(playlists))
-	for _, p := range playlists {
-		if p.SourceURI == "" {
-			continue
-		}
-		if _, dup := seen[p.SourceURI]; dup {
-			continue
-		}
-		seen[p.SourceURI] = struct{}{}
-		uris = append(uris, p.SourceURI)
-	}
-	if len(uris) == 0 {
-		return playlists, nil
-	}
-
-	rows, err := tx.Query(ctx, `SELECT uri, playlist_id FROM playlist_sources WHERE uri = ANY($1::text[])`, uris)
-	if err != nil {
-		return nil, fmt.Errorf("read playlist source winners: %w", err)
-	}
-	defer rows.Close()
-	winners := make(map[string]uuid.UUID, len(uris))
-	for rows.Next() {
-		var uri string
-		var id uuid.UUID
-		if err := rows.Scan(&uri, &id); err != nil {
-			return nil, fmt.Errorf("scan playlist source winner: %w", err)
-		}
-		winners[uri] = id
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read playlist source winners: %w", err)
-	}
-
-	out := make([]store.IngestedPlaylist, len(playlists))
-	copy(out, playlists)
-	for i := range out {
-		if id, ok := winners[out[i].SourceURI]; ok {
-			out[i].ID = id
-		}
-	}
-	return out, nil
+	return recordPlaylistSources(ctx, tx, playlists)
 }
 
 // insertPlaylistGroupMembersBatch writes membership rows in playlist order.
@@ -936,10 +897,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return err
 	}
 
-	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
-	// this request resolved (see applySourceMappingWinners).
-	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
-	if err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -955,7 +913,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("insert playlist_group: %w", err)
 	}
 
-	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, members); err != nil {
+	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
 		return fmt.Errorf("insert playlist_group_members: %w", err)
 	}
 
@@ -1101,10 +1059,7 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	}
 
 	// Upsert playlists
-	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
-	// this request resolved (see applySourceMappingWinners).
-	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
-	if err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1126,7 +1081,7 @@ func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *st
 	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
 		return fmt.Errorf("clear playlist_group_members: %w", err)
 	}
-	if err := insertPlaylistGroupMembersBatch(ctx, tx, rowID, members); err != nil {
+	if err := insertPlaylistGroupMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
 		return fmt.Errorf("insert playlist_group_members: %w", err)
 	}
 
@@ -1242,10 +1197,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return err
 	}
 
-	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
-	// this request resolved (see applySourceMappingWinners).
-	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
-	if err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1261,7 +1213,7 @@ VALUES ($1, $2, $3::jsonb)`
 		return fmt.Errorf("insert channel: %w", err)
 	}
 
-	if err := insertChannelMembersBatch(ctx, tx, in.ID, members); err != nil {
+	if err := insertChannelMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
 		return fmt.Errorf("insert channel_members: %w", err)
 	}
 
@@ -1407,10 +1359,7 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	}
 
 	// Upsert playlists
-	// members is what membership rows must be written from: a URI's mapped winner, not necessarily the id
-	// this request resolved (see applySourceMappingWinners).
-	members, err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists)
-	if err != nil {
+	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
 		return fmt.Errorf("upsert playlists: %w", err)
 	}
 
@@ -1432,7 +1381,7 @@ func (s *Store) UpdateChannel(ctx context.Context, idOrSlug string, in *store.Ch
 	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
 		return fmt.Errorf("clear channel_members: %w", err)
 	}
-	if err := insertChannelMembersBatch(ctx, tx, rowID, members); err != nil {
+	if err := insertChannelMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
 		return fmt.Errorf("insert channel_members: %w", err)
 	}
 

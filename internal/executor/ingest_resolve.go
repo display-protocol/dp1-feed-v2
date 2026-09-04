@@ -41,6 +41,34 @@ func (e *impl) localPlaylistKeyFromURL(raw string) string {
 	return strings.TrimPrefix(strings.TrimSpace(raw), e.playlistAPIPrefix())
 }
 
+// maxPlaylistURILen bounds a reference URI. URIs arrive inside client-submitted documents, which impose
+// no limit of their own beyond the request-body cap, so without this a single reference could be
+// megabytes of junk that the feed then stores. 2048 is the conventional practical URL ceiling and is far
+// above any real DP-1 playlist URL.
+const maxPlaylistURILen = 2048
+
+// requireResolvableURILength rejects an over-long reference. The client chose the URI, so it is a 400.
+func requireResolvableURILength(uri string) error {
+	if len(uri) > maxPlaylistURILen {
+		return fmt.Errorf("%w: playlist URI is %d bytes, over the %d byte limit", ErrPlaylistURITooLong, len(uri), maxPlaylistURILen)
+	}
+	return nil
+}
+
+// lastKnownResolution answers what uri last resolved to, for use when the origin cannot be reached.
+//
+// Reports ok=false when nothing is cached, so the caller can surface the original fetch failure — that is
+// the more useful error, since "we could not reach it and have never seen it" is a fetch problem, not a
+// cache miss. A store error is likewise treated as no answer: the fetch failure is already the reason the
+// request cannot proceed, and replacing it with a database error would obscure that.
+func (e *impl) lastKnownResolution(ctx context.Context, uri string) (store.IngestedPlaylist, bool) {
+	rec, err := e.store.GetPlaylistBySourceURI(ctx, uri)
+	if err != nil {
+		return store.IngestedPlaylist{}, false
+	}
+	return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw, SourceURI: uri}, true
+}
+
 // resolveOnePlaylistRef loads or fetches a single playlist URI:
 //   - Local URL → store.GetPlaylist by id/slug from the path after /playlists/.
 //   - Otherwise → HTTP fetch, validate JSON, parse id/slug from the DP-1 playlist object.
@@ -65,33 +93,34 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
 	}
 
-	// A URI this feed has already ingested resolves from local state, without contacting the origin.
-	//
-	// This is what makes the reference-only contract true rather than nearly true. Ingestion never
-	// refreshes a stored member, so fetching a known reference could only ever rediscover an id already
-	// recorded here — while making the write depend on that origin being reachable. An upstream outage
-	// would then block re-creating or replacing a group whose content, by contract, could not change.
-	// Consulting the mapping first also removes one outbound request per known reference, which lowers the
-	// fan-out ceiling on group and channel writes.
-	//
-	// A store failure other than "not mapped" is fatal: falling back to the network on an unhealthy
-	// database would silently reintroduce the origin dependency this exists to remove.
-	switch rec, err := e.store.GetPlaylistBySourceURI(ctx, uri); {
-	case err == nil:
-		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw, SourceURI: uri}, nil
-	case errors.Is(err, store.ErrNotFound):
-		// Never ingested from this URI, so it has to be fetched to learn what it names.
-	default:
-		return store.IngestedPlaylist{}, fmt.Errorf("playlist source %q: %w", uri, err)
+	if err := requireResolvableURILength(uri); err != nil {
+		return store.IngestedPlaylist{}, err
 	}
 
 	if e.fetch == nil {
+		// No fetcher configured is an unavailable origin like any other, so the cache still applies.
+		if ing, ok := e.lastKnownResolution(ctx, uri); ok {
+			return ing, nil
+		}
 		return store.IngestedPlaylist{}, fmt.Errorf("external playlist %q: fetcher is not configured (set playlist.fetch_* and use absolute URLs)", uri)
 	}
 
 	// Remote: GET body, validate with same rules as operator-authored playlists, then read id/slug from parsed playlist.
 	body, err := e.fetch.FetchPlaylist(ctx, uri)
 	if err != nil {
+		// The origin is unreachable. Fall back to what this URI last resolved to, because ingestion never
+		// refreshes a stored member: the fetch that just failed could only have rediscovered an id already
+		// recorded here, so failing the write would let someone else's outage block a mutation whose
+		// content could not change.
+		//
+		// Deliberately a fallback rather than the first thing tried. Consulting the cache up front skipped
+		// the fetch entirely, which pinned a URI to whatever it first resolved to — globally, permanently,
+		// and set by whichever anonymous caller referenced it first, since creation is open. A publisher
+		// re-pointing their own URL was then never picked up. Fetching first keeps resolution current and
+		// still survives the outage.
+		if ing, ok := e.lastKnownResolution(ctx, uri); ok {
+			return ing, nil
+		}
 		return store.IngestedPlaylist{}, fmt.Errorf("fetch %q: %w", uri, err)
 	}
 

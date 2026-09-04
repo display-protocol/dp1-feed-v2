@@ -57,6 +57,9 @@ var (
 	// the cap while the documents behind it are not, which is the combination that made the reference cap
 	// alone an insufficient bound. The client chose the references, so it is a 400.
 	ErrResolvedTooLarge = errors.New("referenced playlists are too large to resolve in one request")
+	// ErrPlaylistURITooLong is returned when a group or channel reference exceeds maxPlaylistURILen. The
+	// document sets the URI, so this is client input being wrong: 400.
+	ErrPlaylistURITooLong = errors.New("playlist reference URI is too long")
 	// errMissingRawBody means the HTTP layer did not attach the request bytes to a submission (programming error).
 	errMissingRawBody = errors.New("signed submission is missing the raw request body")
 )
@@ -374,5 +377,6 @@ func IsInvalidSubmissionError(err error) bool {
 		errors.Is(err, ErrPublisherRequired) ||
 		errors.Is(err, ErrTooManyReferences) ||
 		errors.Is(err, ErrResolvedTooLarge) ||
+		errors.Is(err, ErrPlaylistURITooLong) ||
 		errors.Is(err, ErrSignedDocumentMismatch))
 }

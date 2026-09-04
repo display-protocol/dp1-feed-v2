@@ -1,30 +1,96 @@
--- playlist_sources: remembers which remote URI a stored playlist was ingested from.
+-- playlist_sources: last known resolution of a remote playlist URI.
 --
--- Why this exists: ingestion is reference-only — once a playlist is stored here, a group or channel that
--- names it is only ever *linked* to the stored row, and the remote representation is never consulted
--- again. But a remote reference's identity was discoverable only by fetching it, so re-creating or
--- replacing a group during an upstream outage failed even though, by contract, nothing about the stored
--- playlist could change. The origin could not rewrite a member, yet it could still block one.
+-- Why this exists: a remote reference's identity is discoverable only by fetching it, so re-creating or
+-- replacing a group or channel failed whenever the referencing origin was unreachable — even though the
+-- stored member could not change, because ingestion never refreshes one. This table is the fallback that
+-- keeps such a write working: when the fetch fails, the URI resolves to whatever it last resolved to.
 --
--- With this mapping the id is resolved from local state first and the fetch is skipped entirely for a
--- reference this feed has already ingested. That closes the availability hole and removes an outbound
--- request per known reference, which also lowers the fan-out ceiling on group/channel writes.
+-- It is deliberately a CACHE, not an authority. Resolution fetches first and only consults this table when
+-- the fetch fails, so a URI that legitimately starts serving a different playlist is picked up normally.
+-- An earlier revision consulted the mapping *before* fetching, which silently pinned a URI to whatever it
+-- first resolved to, globally and permanently: since creation is open, the first caller to reference a URI
+-- fixed its meaning for every later curator, and a publisher re-pointing their own URL was never seen
+-- again. Fetch-first keeps the outage protection without that.
 --
--- uri is the primary key: one URI resolves to exactly one playlist. The first successful ingest wins and
--- later ones do not overwrite it (ON CONFLICT DO NOTHING at the call site), which is the same
--- never-refresh rule the rest of ingestion follows — a URI that starts serving a different document must
--- not silently re-point an existing reference. The reverse direction is not unique: several URIs may map
--- to the same playlist, which is why playlist_id is not a key here.
+-- Because it is last-known-good rather than first-seen, writes UPSERT (see recordPlaylistSources): a
+-- successful resolution refreshes the row so the fallback stays current. Nothing else depends on the row,
+-- so a stale entry can only ever be consulted when the origin is down, and is corrected on the next
+-- successful fetch.
 --
--- ON DELETE CASCADE: when a playlist is deleted its id is tombstoned and must not be resurrected, so a
--- stale mapping pointing at a dead row would be worse than no mapping. Dropping it sends the next ingest
--- back through the full create bar, where the tombstone guard refuses the id.
+-- uri_hash is the primary key, not uri. Postgres cannot index a btree entry larger than about 2704 bytes,
+-- and URIs arrive inside client-submitted documents with no length limit of their own, so keying on the
+-- text turned a long incompressible URI into a failed INSERT and a 500 for client input.
+--
+-- The hash is written by the application rather than being a generated column: convert_to() is STABLE,
+-- not IMMUTABLE, so sha256(convert_to(uri, 'UTF8')) is rejected in a generated-column or index
+-- expression. It is fine in the plain INSERT below, which is why the seed can compute it in SQL while the
+-- runtime path computes it in Go (see recordPlaylistSources / GetPlaylistBySourceURI). uri is still
+-- stored, for operators and for the "which URIs point here" direction — not unique, since several URIs
+-- may resolve to one playlist, which is why playlist_id is not a key.
+--
+-- ON DELETE CASCADE: a deleted playlist's id is tombstoned and must not be resurrected, so a mapping
+-- pointing at a dead row would be worse than no mapping. Dropping it sends the next ingest back through
+-- the full create bar, where the tombstone guard refuses the id.
 
 CREATE TABLE IF NOT EXISTS playlist_sources (
-    uri TEXT PRIMARY KEY,
+    uri TEXT NOT NULL,
+    uri_hash BYTEA PRIMARY KEY,
     playlist_id UUID NOT NULL REFERENCES playlists (id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Supports the cascade and any future "which URIs point here" lookup.
+-- Supports the cascade and the "which URIs point at this playlist" direction.
 CREATE INDEX IF NOT EXISTS playlist_sources_playlist_id_idx ON playlist_sources (playlist_id);
+
+-- Seed the cache from memberships that predate this table.
+--
+-- Without this the fallback is empty on upgrade, so an outage immediately after deploying would still
+-- break writes for every existing remote reference until each happened to be re-ingested. The pairing is
+-- recoverable from what is already stored: membership rows are written with position = index of the URI
+-- in the document's "playlists" array (see insertPlaylistGroupMembersBatch / insertChannelMembersBatch),
+-- so position joins a stored URI to the playlist it resolved to. jsonb_array_elements_text WITH ORDINALITY
+-- gives 1-based ordinals, hence ord - 1.
+--
+-- Newest membership wins, matching the last-known-good rule the runtime path follows. An earlier revision
+-- took the oldest, which matched a first-seen rule this table no longer has.
+--
+-- Same-origin URLs are NOT filtered out. They are inert here: resolveOnePlaylistRef checks
+-- isLocalPlaylistURL before it ever consults this table, so such a row is never read. An earlier revision
+-- excluded anything shaped like '%/api/v1/playlists/%' to avoid recording them, which silently excluded
+-- every *remote* DP-1 feed as well — those use the same route shape — and so skipped almost exactly the
+-- population the seed exists for.
+
+INSERT INTO playlist_sources (uri, uri_hash, playlist_id)
+SELECT DISTINCT ON (refs.uri) refs.uri, sha256(convert_to(refs.uri, 'UTF8')), refs.playlist_id
+FROM (
+    SELECT ref.uri, pgm.playlist_id, g.created_at
+    FROM playlist_groups g
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(g.body -> 'playlists') = 'array'
+             THEN g.body -> 'playlists'
+             ELSE '[]'::jsonb END
+    ) WITH ORDINALITY AS ref(uri, ord)
+    JOIN playlist_group_members pgm
+      ON pgm.playlist_group_id = g.id
+     AND pgm.position = (ref.ord - 1)::int
+
+    UNION ALL
+
+    SELECT ref.uri, cm.playlist_id, c.created_at
+    FROM channels c
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(c.body -> 'playlists') = 'array'
+             THEN c.body -> 'playlists'
+             ELSE '[]'::jsonb END
+    ) WITH ORDINALITY AS ref(uri, ord)
+    JOIN channel_members cm
+      ON cm.channel_id = c.id
+     AND cm.position = (ref.ord - 1)::int
+) AS refs
+WHERE refs.uri ~ '^https?://'
+  -- Skip anything too long to be a real URL. Nothing here can fail on length (the key is a hash), but a
+  -- multi-kilobyte string is junk rather than a reference worth caching.
+  AND length(refs.uri) <= 2048
+ORDER BY refs.uri, refs.created_at DESC, refs.playlist_id
+ON CONFLICT (uri_hash) DO NOTHING;

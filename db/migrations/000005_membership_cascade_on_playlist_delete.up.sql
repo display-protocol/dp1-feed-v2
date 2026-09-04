@@ -18,12 +18,20 @@
 -- signed and immutable, so the feed must not edit it. A later PUT of that group/channel will fail to
 -- resolve the tombstoned reference, which correctly forces the owner to publish an updated document.
 
+-- Added NOT VALID, then validated separately. Only the ON DELETE action changes, so every existing row
+-- already satisfies the constraint; a plain ADD CONSTRAINT would still scan the whole membership table
+-- while holding ACCESS EXCLUSIVE, blocking reads and writes for no benefit. NOT VALID skips that scan,
+-- and VALIDATE CONSTRAINT takes only SHARE UPDATE EXCLUSIVE, so concurrent traffic keeps running.
+-- IF EXISTS on the drop keeps this re-runnable against a database repaired by hand.
+
 ALTER TABLE playlist_group_members
-    DROP CONSTRAINT playlist_group_members_playlist_id_fkey,
+    DROP CONSTRAINT IF EXISTS playlist_group_members_playlist_id_fkey,
     ADD CONSTRAINT playlist_group_members_playlist_id_fkey
-        FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE CASCADE;
+        FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE playlist_group_members VALIDATE CONSTRAINT playlist_group_members_playlist_id_fkey;
 
 ALTER TABLE channel_members
-    DROP CONSTRAINT channel_members_playlist_id_fkey,
+    DROP CONSTRAINT IF EXISTS channel_members_playlist_id_fkey,
     ADD CONSTRAINT channel_members_playlist_id_fkey
-        FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE CASCADE;
+        FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE channel_members VALIDATE CONSTRAINT channel_members_playlist_id_fkey;

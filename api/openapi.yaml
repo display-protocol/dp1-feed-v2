@@ -1027,6 +1027,7 @@ components:
             before resolution; over the configured cap is a `400`.
           items:
             type: string
+            maxLength: 2048
         curator:
           type: string
           description: did:key of the owner; a signature whose kid matches it authorizes the write.
@@ -1072,6 +1073,7 @@ components:
             before resolution; over the configured cap is a `400`.
           items:
             type: string
+            maxLength: 2048
         # Additional fields...
 
     ChannelInput:
@@ -1121,6 +1123,7 @@ components:
             before resolution; over the configured cap is a `400`.
           items:
             type: string
+            maxLength: 2048
         curators:
           type: array
           items:
@@ -1173,6 +1176,7 @@ components:
             before resolution; over the configured cap is a `400`.
           items:
             type: string
+            maxLength: 2048
         # Additional fields...
 
     ChannelRegistry:

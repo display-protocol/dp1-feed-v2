@@ -129,12 +129,14 @@ untouched. Identity is resolved **before** the fetched body is judged, so this h
 has since rotted, rotated keys, or started serving something malformed: the id is enough to link the
 stored playlist, and a member's origin can never retroactively block groups that reference it.
 
-A remote URI this feed has **already ingested** is not fetched at all — the URI→playlist mapping recorded
-at first ingest resolves it from local state. That is what extends the guarantee above to an origin that
-is simply *unreachable*: since a stored member is never refreshed, fetching a known reference could only
-rediscover an id already held here, while making the write fail during someone else's outage. The first
-successful ingest of a URI wins and is not re-pointed later, matching the never-refresh rule; the mapping
-is dropped when the playlist is deleted, so a retired id cannot be relinked. A
+If the origin is **unreachable**, a remote URI falls back to the playlist it last resolved to, recorded at
+ingest. That extends the guarantee above to an outage: since a stored member is never refreshed, the fetch
+that failed could only have rediscovered an id already held here, so failing the write would let someone
+else's downtime block a mutation whose content could not change. The fallback is consulted **only** on
+fetch failure — a reachable origin stays authoritative, so a publisher re-pointing their URL to a
+different playlist is picked up normally, and each successful resolution refreshes the record. It is
+dropped when the playlist is deleted, so a retired id cannot be relinked. Reference URIs are capped at
+2048 bytes (**`400`** beyond that). A
 referenced id that is *new* to this feed is being created, so it is held to the same bar as
 `POST`: the fetched document must be validly self-signed by a curator it declares, and must not name a
 tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
@@ -241,6 +243,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
 | **400** | `bad_request` | A group or channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
 | **400** | `bad_request` | The playlists a group or channel references exceed `playlist.max_resolved_bytes` in total (`ErrResolvedTooLarge`). The reference cap bounds the count, this bounds their combined size — the two multiply, so both are needed. |
+| **400** | `bad_request` | A reference URI longer than 2048 bytes (`ErrPlaylistURITooLong`). |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |

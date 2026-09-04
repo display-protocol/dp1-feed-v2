@@ -46,8 +46,12 @@ func TestMain(m *testing.M) {
 	var err error
 	testProvider, err = pgtest.NewProvider(ctx)
 	if err != nil {
-		// If provider setup fails (e.g. no Docker), skip all tests
-		os.Exit(0)
+		// Fail loudly. This used to exit 0 "if provider setup fails (e.g. no Docker)", which reported a
+		// green package with ZERO tests run — a broken migration or an unavailable database was
+		// indistinguishable from a pass, locally and in CI. These tests only build under -tags=integration,
+		// so reaching here means integration tests were explicitly asked for and could not run.
+		fmt.Fprintf(os.Stderr, "integration provider setup failed: %v\n", err)
+		os.Exit(1)
 	}
 	defer testProvider.Close()
 	code := m.Run()
@@ -1424,10 +1428,10 @@ func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
 	}
 }
 
-// The remote-URI mapping recorded at ingest must survive and resolve on its own, and must not outlive the
-// playlist it points at: a mapping to a deleted (tombstoned) id would send a later ingest back to a row
-// that must not be resurrected.
-func TestIntegration_PlaylistSources_mappingResolvesAndCascades(t *testing.T) {
+// The remote-URI cache must resolve on its own, follow a re-point, tolerate a URI far past the btree
+// index limit, and never outlive the playlist it points at — a row naming a deleted (tombstoned) id would
+// send a later ingest back to a row that must not be resurrected.
+func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
@@ -1466,14 +1470,57 @@ func TestIntegration_PlaylistSources_mappingResolvesAndCascades(t *testing.T) {
 		t.Fatalf("unknown URI should be ErrNotFound, got %v", err)
 	}
 
-	// Deleting the playlist must take the mapping with it (ON DELETE CASCADE), so a later ingest of the
+	// The key is sha256(uri), so a URI far past the ~2704-byte btree limit must still record. Keyed on the
+	// text it raised "index row size exceeds maximum" and turned client input into a 500.
+	longURI := "https://elsewhere.test/" + strings.Repeat("abcdefgh", 500) + ".json"
+	longID := uuid.MustParse("00000000-0000-0000-0000-00000000000d")
+	longGroupID := uuid.MustParse("00000000-0000-0000-0000-00000000000e")
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:   longGroupID,
+		Slug: "long-uri-group",
+		Raw: rawDoc(t, playlistgroup.Group{
+			ID: longGroupID.String(), Slug: "long-uri-group", Title: "Long", Playlists: []string{longURI},
+		}),
+		Playlists: []store.IngestedPlaylist{
+			{ID: longID, Slug: "long-pl", Raw: rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "Long"}), SourceURI: longURI},
+		},
+	}); err != nil {
+		t.Fatalf("a long URI must not break the source mapping: %v", err)
+	}
+	if rec, err := st.GetPlaylistBySourceURI(ctx, longURI); err != nil || rec.ID != longID {
+		t.Fatalf("long URI should resolve to %s, got %v (%v)", longID, rec, err)
+	}
+
+	// Re-pointing: the cache is last-known-good, so a later resolution of the same URI replaces the old
+	// one. Under the previous first-wins rule this silently kept serving the abandoned playlist.
+	repointID := uuid.MustParse("00000000-0000-0000-0000-00000000000f")
+	repointGroupID := uuid.MustParse("00000000-0000-0000-0000-000000000010")
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
+		ID:   repointGroupID,
+		Slug: "repoint-group",
+		Raw: rawDoc(t, playlistgroup.Group{
+			ID: repointGroupID.String(), Slug: "repoint-group", Title: "Repoint", Playlists: []string{remoteURI},
+		}),
+		Playlists: []store.IngestedPlaylist{
+			{ID: repointID, Slug: "repointed-pl", Raw: rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "Repointed"}), SourceURI: remoteURI},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rec, err := st.GetPlaylistBySourceURI(ctx, remoteURI); err != nil || rec.ID != repointID {
+		t.Fatalf("cache should hold the latest resolution %s, got %v (%v)", repointID, rec, err)
+	}
+
+	// Deleting the playlist must take its cache row with it (ON DELETE CASCADE), so a later ingest of the
 	// same URI goes through the full create bar and meets the tombstone guard rather than silently
-	// relinking a retired id.
-	if err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+	// relinking a retired id. Delete the playlist the row currently points at — after the re-point above
+	// that is repointID, not the original: asserting against the original would have passed only because
+	// the row it named no longer existed, which proves nothing about the cascade.
+	if err := st.DeletePlaylist(ctx, repointID.String(), plUpdatedAt(t, ctx, st, repointID.String())); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.GetPlaylistBySourceURI(ctx, remoteURI); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("mapping must not outlive the playlist it points at, got %v", err)
+		t.Fatalf("cache row must not outlive the playlist it points at, got %v", err)
 	}
 }
 

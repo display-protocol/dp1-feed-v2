@@ -5,11 +5,11 @@
 -- not recoverable here; only the constraint is restored.
 
 ALTER TABLE playlist_group_members
-    DROP CONSTRAINT playlist_group_members_playlist_id_fkey,
+    DROP CONSTRAINT IF EXISTS playlist_group_members_playlist_id_fkey,
     ADD CONSTRAINT playlist_group_members_playlist_id_fkey
         FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE RESTRICT;
 
 ALTER TABLE channel_members
-    DROP CONSTRAINT channel_members_playlist_id_fkey,
+    DROP CONSTRAINT IF EXISTS channel_members_playlist_id_fkey,
     ADD CONSTRAINT channel_members_playlist_id_fkey
         FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE RESTRICT;
