@@ -19,7 +19,6 @@
 - **Plural resource segments:** `/api/v1/playlists`, `/api/v1/playlist-groups`, `/api/v1/channels`, `/api/v1/playlist-items`.
 - **Multi-word segments** use **kebab-case** (e.g. `playlist-items`, `playlist-groups`).
 - **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for groups and channels).
-- **Curated registry:** **`GET`** `/api/v1/registry/channels` (read public; **read-only** — there is no write endpoint).
 
 Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two separate path params.
 
@@ -41,7 +40,7 @@ Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two s
 - `GET /api/v1/channels/{id}` (when extensions are enabled)
 - `GET /api/v1/playlist-items/{id}`
 
-**Not in scope for v1:** Paginated **list** GETs (`/playlists`, `/playlist-groups`, `/channels`, `/playlist-items`), **`GET /api/v1/registry/channels`**, and metadata endpoints (`/health`, **`GET /api/v1`**) do **not** send `ETag`. Clients should not rely on conditional requests for those routes until explicitly documented in a future revision.
+**Not in scope for v1:** Paginated **list** GETs (`/playlists`, `/playlist-groups`, `/channels`, `/playlist-items`) and metadata endpoints (`/health`, **`GET /api/v1`**) do **not** send `ETag`. Clients should not rely on conditional requests for those routes until explicitly documented in a future revision.
 
 **Semantics:**
 
@@ -203,8 +202,7 @@ unchecked. Either way the value is part of the signed payload and is preserved a
 Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
 `payload_too_large`, enforced before the body is buffered for authentication.
 
-- **Reads** are unauthenticated by default (health, lists, gets, registry GET). Deployment may still restrict network access.
-- **Registry is read-only over the API** (`GET /api/v1/registry/channels`); there is no write endpoint. Seed it out-of-band.
+- **Reads** are unauthenticated by default (health, lists, gets). Deployment may still restrict network access.
 - **No global allowlist.** "Owner" is derived from the document's own declared curators/publisher, not a configured key list: anyone can create (and thereby own) new resources, but only the declared owner can replace or delete one. Front with a gateway if you need to restrict who may create.
 - **Per-user or OAuth** is out of scope for this service; front with a gateway if needed.
 
@@ -237,10 +235,6 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 - **PUT** — full replacement of the document body (playlist, group, channel); owner-bound and owner-immutable (see Authentication).
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
 - **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
-
-**Registry `GET` `/api/v1/registry/channels`:** body is a **`ChannelRegistry`** object: ordered **`publishers`**, each with **`name`**, optional **`did`**, and one ordered array **`channel_urls`** (channel resource URLs under this API). The registry is **read-only over the API** — there is no write endpoint; seed it out-of-band.
-
-The registry is the **curation gate**, and it is easy to mistake for a mirror of the catalog: downstream consumers that build offline snapshots (e.g. the mobile app's seed-database builder) ingest **only registry-listed channels**, not the feed's full `/channels` listing. Publishing a channel makes it fetchable by URL; it does **not** list it in the registry, so a published-but-unlisted channel is invisible to every registry-driven consumer until the registry is updated out-of-band.
 
 **Channel and extension features:** when extensions are disabled in config, channel routes return **`404`** with error code **`extensions_disabled`** (see below).
 
@@ -276,6 +270,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **403** | `forbidden` | Signature is valid but the signer is not an owner of the resource, or a PUT tried to change the immutable owner set (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `not_found` | The target was **deleted** between authorization and the write. Deliberately not a `409`: the id is tombstoned, so "re-read and retry" could never succeed, whereas `404` is both accurate and terminal. A resource deleted *and re-created* in that window is a `409` instead, because the row exists and a retry can succeed. |
+| **404** | `not_found` | No such endpoint: an unrecognised path, or a method this API does not serve on that path (for example `PATCH`, which was removed). Unmatched requests answer in the same `{error, message}` envelope as everything else rather than the framework's plain-text default, so a client parsing errors uniformly does not hit a different shape at the one place it least expects. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
 | **409** | `conflict` | `POST` collided with a **live** resource: the `id` or `slug` is already taken. A lost-response retry — `GET` the resource; a slug collision needs a different `slug`. Do **not** republish under a new id. |

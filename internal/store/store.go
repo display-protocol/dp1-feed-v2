@@ -115,25 +115,6 @@ type ChannelRecord struct {
 	UpdatedAt time.Time
 }
 
-// RegistryPublisher is a curated channel publisher with ordered channel URLs.
-type RegistryPublisher struct {
-	ID        uuid.UUID
-	Name      string
-	DID       *string // Optional DID; nil when unset in the database.
-	Position  int
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
-// RegistryPublisherChannel is a channel URL belonging to a publisher.
-type RegistryPublisherChannel struct {
-	ID          uuid.UUID
-	PublisherID uuid.UUID
-	ChannelURL  string
-	Position    int
-	CreatedAt   time.Time
-}
-
 // PlaylistItemRecord is a denormalized playlist item from playlist_item_index.
 type PlaylistItemRecord struct {
 	ItemID     uuid.UUID
@@ -265,11 +246,6 @@ type Store interface {
 	ListPlaylistsInChannel(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
 	// DeleteChannel removes a channel row, conditional on expectedUpdatedAt (see UpdatePlaylist).
 	DeleteChannel(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error
-
-	// GetChannelRegistry returns the curated channel registry (ordered publishers with their channel URLs).
-	GetChannelRegistry(ctx context.Context) ([]RegistryPublisher, []RegistryPublisherChannel, error)
-	// ReplaceChannelRegistry atomically replaces the entire registry (publishers + channels) in one transaction.
-	ReplaceChannelRegistry(ctx context.Context, publishers []RegistryPublisher, channels []RegistryPublisherChannel) error
 }
 
 // TestProvider supplies a [Store] for integration contract tests and manages per-test cleanup.

@@ -161,22 +161,6 @@ func (mr *MockExecutorMockRecorder) GetChannel(ctx, idOrSlug any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChannel", reflect.TypeOf((*MockExecutor)(nil).GetChannel), ctx, idOrSlug)
 }
 
-// GetChannelRegistry mocks base method.
-func (m *MockExecutor) GetChannelRegistry(ctx context.Context) ([]store.RegistryPublisher, []store.RegistryPublisherChannel, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetChannelRegistry", ctx)
-	ret0, _ := ret[0].([]store.RegistryPublisher)
-	ret1, _ := ret[1].([]store.RegistryPublisherChannel)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// GetChannelRegistry indicates an expected call of GetChannelRegistry.
-func (mr *MockExecutorMockRecorder) GetChannelRegistry(ctx any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChannelRegistry", reflect.TypeOf((*MockExecutor)(nil).GetChannelRegistry), ctx)
-}
-
 // GetPlaylist mocks base method.
 func (m *MockExecutor) GetPlaylist(ctx context.Context, idOrSlug string) (*store.PlaylistRecord, error) {
 	m.ctrl.T.Helper()

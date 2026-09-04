@@ -1,10 +1,12 @@
 package httpserver
 
 // Route registration: /health, /api/v1/* . All mutating routes (POST/PUT/DELETE) are gated by
-// RequireSignatures — there is no API key and no PATCH. The registry is read-only over the API.
+// RequireSignatures — there is no API key and no PATCH.
 // Channel routes register only when extensions are enabled.
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
@@ -15,6 +17,19 @@ import (
 // requires a signed body (RequireSignatures). PUT is owner-bound and owner-immutable, DELETE takes a
 // signed delete-intent; both are enforced in the executor. See docs/api_design.md.
 func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logger) {
+	// Unmatched paths answer in the documented error shape rather than gin's plain-text default.
+	//
+	// Every other response this API produces is {"error","message"}, so a client parsing errors uniformly
+	// hit a wall exactly where it least expects one. It matters more now that a documented endpoint has
+	// been removed: a caller still requesting /api/v1/registry/channels should get the same machine-
+	// readable not_found every other missing resource returns, not a bare string.
+	r.NoRoute(func(c *gin.Context) {
+		writeError(c.Writer, http.StatusNotFound, "not_found", "no such endpoint")
+	})
+	// No NoMethod handler on purpose: gin only consults one when HandleMethodNotAllowed is set, which it
+	// is not, so a wrong method already falls through to NoRoute above. Registering one would be dead code,
+	// and turning the flag on would change wrong-method responses from 404 to 405 across the whole API —
+	// a separate decision from removing an endpoint.
 	r.GET("/health", h.Health)
 
 	v1 := r.Group("/api/v1")
@@ -58,8 +73,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 
 		v1.GET("/playlist-items", h.ListPlaylistItems)
 		v1.GET("/playlist-items/:id", h.GetPlaylistItem)
-
-		v1.GET("/registry/channels", h.GetChannelRegistry)
 	}
 }
 

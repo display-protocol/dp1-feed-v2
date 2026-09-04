@@ -3,21 +3,19 @@ info:
   title: DP-1 Feed V2
   version: 0.1.0
   description: |
-    REST API for DP-1 playlists, playlist-groups, channels, and curated channel registry.
+    REST API for DP-1 playlists, playlist-groups, and channels.
     
     This service provides:
     - DP-1 playlist management with v1.1+ multisig support
     - Playlist-group (exhibition) composition
     - Channel management (requires extensions enabled)
     - Playlist item indexing and querying
-    - Curated channel registry (read-only over the API)
 
     Authentication: signatures only — there is no API key. Every mutating request is authorized by the
     cryptographic signatures it carries. POST (create) is open: the body must be validly self-signed by a
     key it declares in `curators`/`publisher`. PUT (replace) and DELETE are owner-bound: the request must
     be signed by a key the *stored* document already names as an owner, and the owner set is immutable on
-    replace. The feed always adds its own `feed` signature. There is no PATCH, and the registry has no
-    write endpoint.
+    replace. The feed always adds its own `feed` signature. There is no PATCH.
 
     Because an owner's signatures live inside the document and are public via GET, a previously published
     document could otherwise be replayed. PUT and DELETE therefore also carry a **signed mutation-intent**
@@ -63,8 +61,6 @@ tags:
     description: DP-1 channel management (extensions)
   - name: playlist-items
     description: Indexed playlist items
-  - name: registry
-    description: Curated channel registry
 
 paths:
   /health:
@@ -687,21 +683,6 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/registry/channels:
-    get:
-      tags: [registry]
-      summary: Get curated channel registry
-      description: Returns an ordered list of publishers, each with an optional DID and an ordered channel URL list
-      responses:
-        '200':
-          description: Curated registry
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ChannelRegistry'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
 components:
   parameters:
     IdOrSlug:
@@ -744,7 +725,7 @@ components:
       required: false
       description: >
         Optional conditional GET. When it matches the ETag of the current representation, the server returns
-        304 Not Modified with an empty body. Only single-resource GETs support this (not list or registry GETs);
+        304 Not Modified with an empty body. Only single-resource GETs support this (not list GETs);
         see docs/api_design.md.
       schema:
         type: string
@@ -1182,43 +1163,6 @@ components:
             type: string
             maxLength: 2048
         # Additional fields...
-
-    ChannelRegistry:
-      type: object
-      required:
-        - publishers
-      properties:
-        publishers:
-          type: array
-          minItems: 0
-          maxItems: 1000
-          description: Ordered publishers (GET may be empty; PUT requires at least one publisher)
-          items:
-            $ref: '#/components/schemas/ChannelRegistryPublisher'
-
-    ChannelRegistryPublisher:
-      type: object
-      required:
-        - name
-        - channel_urls
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 256
-          description: Publisher name (unique within the registry)
-        did:
-          type: string
-          maxLength: 2048
-          description: Optional publisher DID
-        channel_urls:
-          type: array
-          maxItems: 10000
-          items:
-            type: string
-            format: uri
-            pattern: '\/api\/v1\/channels\/[0-9a-f-]{36}$'
-          description: Ordered channel URLs (GET may return an empty array; PUT requires at least one)
 
     ErrorResponse:
       type: object

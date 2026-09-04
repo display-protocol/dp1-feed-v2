@@ -110,7 +110,8 @@ type LoggingConfig struct {
 	Debug bool `yaml:"debug"`
 }
 
-// ExtensionsConfig gates optional DP-1 surfaces (registry validation, channel APIs, etc.).
+// ExtensionsConfig gates the optional DP-1 surfaces: the playlists-extension validation overlay applied
+// to playlist documents, and the channel APIs.
 type ExtensionsConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
