@@ -131,8 +131,9 @@ stored playlist, and a member's origin can never retroactively block groups that
 
 If the origin is **unreachable**, a remote URI falls back to the playlist it last resolved to, recorded at
 ingest. Unreachable means no usable answer — DNS failure, refused connection, timeout, or a `5xx`/`429`.
-An origin that *answers* is authoritative even when the answer is a rejection: a `404`, `410` or `403`
-fails the write rather than reusing the cache, because a publisher withdrawing a playlist must not leave
+An origin that *answers* is authoritative even when the answer is a rejection: a `404`, `410` or `403`,
+and a `200` whose body exceeds `playlist.fetch_max_body_bytes`, fail the write rather than reusing the
+cache, because a publisher withdrawing a playlist must not leave
 the old reference alive indefinitely. A destination the SSRF guard refuses is likewise not a fallback: the
 URL now means somewhere this feed will not contact. That extends the guarantee above to an outage: since a stored member is never refreshed, the fetch
 that failed could only have rediscovered an id already held here, so failing the write would let someone
@@ -248,6 +249,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `bad_request` | A group or channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
 | **400** | `bad_request` | The playlists a group or channel references exceed `playlist.max_resolved_bytes` in total (`ErrResolvedTooLarge`). The reference cap bounds the count, this bounds their combined size — the two multiply, so both are needed. |
 | **400** | `bad_request` | A reference URI longer than 2048 bytes (`ErrPlaylistURITooLong`). |
+| **400** | `bad_request` | A group or channel referencing no playlists at all (`ErrNoPlaylistReferences`); the schemas declare `minItems: 1`. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |

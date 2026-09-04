@@ -60,6 +60,10 @@ var (
 	// ErrPlaylistURITooLong is returned when a group or channel reference exceeds maxPlaylistURILen. The
 	// document sets the URI, so this is client input being wrong: 400.
 	ErrPlaylistURITooLong = errors.New("playlist reference URI is too long")
+	// ErrNoPlaylistReferences is returned when a group or channel document lists no playlists. The document
+	// is the client's, so this is a correctable submission error (400) rather than an internal fault; it
+	// previously fell through the error mapper as an unclassified 500.
+	ErrNoPlaylistReferences = errors.New("group or channel references no playlists")
 	// errMissingRawBody means the HTTP layer did not attach the request bytes to a submission (programming error).
 	errMissingRawBody = errors.New("signed submission is missing the raw request body")
 )
@@ -378,5 +382,6 @@ func IsInvalidSubmissionError(err error) bool {
 		errors.Is(err, ErrTooManyReferences) ||
 		errors.Is(err, ErrResolvedTooLarge) ||
 		errors.Is(err, ErrPlaylistURITooLong) ||
+		errors.Is(err, ErrNoPlaylistReferences) ||
 		errors.Is(err, ErrSignedDocumentMismatch))
 }

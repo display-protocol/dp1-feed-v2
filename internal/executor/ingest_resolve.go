@@ -75,6 +75,12 @@ func originUnavailable(err error) bool {
 	if errors.Is(err, fetcher.ErrBlockedDestination) {
 		return false
 	}
+	var oversized *fetcher.OversizedError
+	if errors.As(err, &oversized) {
+		// The origin answered 200 and served this; it is simply too large to accept. That is a statement
+		// about what the URL serves now, not a failure to reach it.
+		return false
+	}
 	var status *fetcher.StatusError
 	if errors.As(err, &status) {
 		return status.Transient()
@@ -106,6 +112,13 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		return store.IngestedPlaylist{}, fmt.Errorf("empty playlist URI")
 	}
 
+	// Checked before branching, not after. Both request schemas declare maxLength 2048 on reference
+	// strings, and a same-origin URL is a reference like any other: slugs have no length cap, so a local
+	// URL could exceed the published limit and be accepted while the identical remote URL was rejected.
+	if err := requireResolvableURILength(uri); err != nil {
+		return store.IngestedPlaylist{}, err
+	}
+
 	if e.isLocalPlaylistURL(uri) {
 		// Same-origin: load already-stored JSON by id or slug fragment after /api/v1/playlists/.
 		key := e.localPlaylistKeyFromURL(uri)
@@ -119,10 +132,6 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		// Carry the stored bytes verbatim: re-marshaling the typed body would orphan the member's own
 		// curator signatures when the upsert writes it back.
 		return store.IngestedPlaylist{ID: rec.ID, Slug: rec.Slug, Raw: rec.Raw}, nil
-	}
-
-	if err := requireResolvableURILength(uri); err != nil {
-		return store.IngestedPlaylist{}, err
 	}
 
 	if e.fetch == nil {
@@ -258,7 +267,7 @@ func playlistIDFromBody(body []byte) (uuid.UUID, bool) {
 // after the check so an oversized list cannot make the feed reserve memory for it either.
 func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.IngestedPlaylist, error) {
 	if len(uris) == 0 {
-		return nil, fmt.Errorf("playlists must be non-empty")
+		return nil, fmt.Errorf("%w: a group or channel must reference at least one playlist", ErrNoPlaylistReferences)
 	}
 	if max := e.maxRefs; max > 0 && len(uris) > max {
 		return nil, fmt.Errorf("%w: %d playlist references exceeds the maximum of %d", ErrTooManyReferences, len(uris), max)

@@ -21,6 +21,15 @@ import (
 // URL, so it is their input that is wrong, not an internal fault.
 var ErrBlockedDestination = errors.New("playlist fetch destination is not allowed")
 
+// OversizedError reports that the origin answered with a body past the configured cap.
+//
+// Typed for the same reason as StatusError: the origin was reached and did answer, so this is a decision
+// about what it now serves, not unavailability. Falling back to a cached resolution here would keep a
+// reference pointing at old content while the origin plainly serves something else.
+type OversizedError struct{ Limit int64 }
+
+func (e *OversizedError) Error() string { return fmt.Sprintf("body exceeds max %d bytes", e.Limit) }
+
 // StatusError reports that the origin answered, with a status this feed will not accept.
 //
 // It exists so callers can tell "the origin said something definitive" from "we could not reach the
@@ -252,7 +261,7 @@ func (f *HTTPFetcher) FetchPlaylist(ctx context.Context, uri string) ([]byte, er
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if int64(len(b)) > f.max {
-		return nil, fmt.Errorf("body exceeds max %d bytes", f.max)
+		return nil, &OversizedError{Limit: f.max}
 	}
 	return b, nil
 }

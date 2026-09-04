@@ -1536,8 +1536,13 @@ func TestCreatePlaylistGroup_emptyPlaylists(t *testing.T) {
 	mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), gomock.Any()).Return(nil, store.ErrNotFound).AnyTimes()
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq())
-	if err == nil || !strings.Contains(err.Error(), "playlists must be non-empty") {
-		t.Fatalf("got %v", err)
+	if !errors.Is(err, executor.ErrNoPlaylistReferences) {
+		t.Fatalf("want ErrNoPlaylistReferences, got %v", err)
+	}
+	// The document is the client's, so an empty membership list is correctable input, not a server fault.
+	// It previously fell through the error mapper unclassified and reached the client as a 500.
+	if !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want a 400-class submission error, got %v", err)
 	}
 }
 
@@ -1824,6 +1829,60 @@ func TestCreatePlaylistGroup_cacheFallbackOnlyWhenOriginUnavailable(t *testing.T
 				t.Fatalf("error should report the origin's status, got %v", err)
 			}
 		})
+	}
+}
+
+// oversizedFetcher answers as a reachable origin serving a body past the cap.
+type oversizedFetcher struct{}
+
+func (oversizedFetcher) FetchPlaylist(_ context.Context, _ string) ([]byte, error) {
+	return nil, &fetcher.OversizedError{Limit: 4 << 20}
+}
+
+// An oversized 200 is the origin answering, not failing to answer. Reusing the cached resolution would
+// leave the reference pointing at old content while the origin plainly serves something else.
+func TestCreatePlaylistGroup_oversizedResponseDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	const remoteURI = "https://elsewhere.test/p.json"
+	cachedID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	cachedBody := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl-one"}`)
+	mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), remoteURI).Return(&store.PlaylistRecord{
+		ID: cachedID, Slug: "pl-one", Raw: cachedBody, Body: mustDecodePlaylist(t, cachedBody),
+	}, nil).AnyTimes()
+
+	e := executor.New(mockStore, mockDP1, false, oversizedFetcher{}, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(remoteURI))
+	if err == nil {
+		t.Fatal("an oversized response is the origin answering, so the write must fail rather than reuse the cache")
+	}
+	if !strings.Contains(err.Error(), "body exceeds max") {
+		t.Fatalf("error should report the oversized body, got %v", err)
+	}
+}
+
+// The published schemas cap reference strings at 2048 bytes. A same-origin URL is a reference like any
+// other, and slugs have no length cap, so the check must precede the local/remote branch — otherwise a
+// local URL is accepted at a length the identical remote URL is rejected at.
+func TestCreatePlaylistGroup_overlongLocalReferenceURIRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	// No GetPlaylist expectation: the length check must reject before any lookup happens.
+	local := localPlaylistRef(strings.Repeat("s", 4096))
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(local))
+	if !errors.Is(err, executor.ErrPlaylistURITooLong) {
+		t.Fatalf("want ErrPlaylistURITooLong for an over-long local reference, got %v", err)
 	}
 }
 
