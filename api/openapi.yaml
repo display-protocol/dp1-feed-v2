@@ -828,15 +828,15 @@ components:
           description: >-
             DP-1 playlist defaults. The member set is governed by dp1-go's published schema and is
             deliberately not restated here, so this document cannot drift from a schema it does not own.
-            It is still decoded strictly: an unknown member inside it is rejected with `400`, so do not
-            add members beyond that schema.
+            Consistently with that, strict decoding does not reach inside it either — dp1-go validates the
+            contents on the next step, and a member it rejects fails the write as a validation error.
         note:
           $ref: '#/components/schemas/Note'
         dynamicQuery:
           type: object
           description: >-
-            DP-1 playlists-extension dynamic query. Member set governed by dp1-go's schema (see
-            `defaults`); decoded strictly, so unknown members are rejected with `400`.
+            DP-1 playlists-extension dynamic query. Member set governed by dp1-go's schema and validated
+            by dp1-go, not by this service's strict decoder (see `defaults`).
         signature:
           type: string
           deprecated: true

@@ -175,15 +175,22 @@ than one JSON value, is a **`400`** naming the field — never silently dropped,
 changes the bytes the client signed. Every request schema in OpenAPI therefore declares
 `additionalProperties: false`, so a generated client cannot construct a body the server will reject.
 
-**Opaque values are the exception, and the boundary is worth knowing.** A few DP-1 sub-objects
-(`inlineManifest`, `defaults`, `dynamicQuery`, and friends) are carried as raw JSON because their member
-sets belong to dp1-go's published schemas rather than to this document. Strict decoding stops at that
-boundary: it rejects an unknown member *beside* one of these values, but does **not** recurse into it, so
-an unknown member **inside** an opaque value is not a `400`. What happens next depends on the deployment:
-with extensions **enabled**, dp1-go validates `inlineManifest` against the ref-manifest schema, so a
-malformed manifest still fails the write; with extensions **disabled**, the core schema does not describe
-the field and DP-1 tolerates unknown members, so it is stored and returned unchecked. Either way the
-value is part of the signed payload and is preserved as sent — the feed never edits it to make it fit.
+**Strict decoding covers the members this API declares, and stops there.** The request envelopes and the
+document's top-level members are defined by this service, so an unknown or misspelled member there is a
+**`400`** naming the field. Everything nested inside them — `defaults`, `dynamicQuery`, `display`, each
+playlist item, and the other DP-1 sub-objects — belongs to dp1-go's published schemas, which validate the
+document on the very next step. This API does not restate those schemas in `api/openapi.yaml` (it would
+drift from a contract it does not own), so it does not enforce them at the decoder either: the two now
+agree, and a body a generated client can construct is a body the server will accept as far as decoding is
+concerned.
+
+Values carried as raw JSON — `inlineManifest`, and `display.margin` — are opaque in the strongest sense:
+nothing inspects them here at all. With extensions **enabled**, dp1-go validates `inlineManifest` against
+the ref-manifest schema, so a malformed manifest still fails the write; with extensions **disabled**, the
+core schema does not describe the field and DP-1 tolerates unknown members, so it is stored and returned
+unchecked. Either way the value is part of the signed payload and is preserved as sent — the feed never
+edits it to make it fit.
+
 Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
 `payload_too_large`, enforced before the body is buffered for authentication.
 
