@@ -1832,6 +1832,34 @@ func TestCreatePlaylistGroup_cacheFallbackOnlyWhenOriginUnavailable(t *testing.T
 	}
 }
 
+// The cap must be measured on the value as submitted, not after trimming.
+//
+// The document is signed, so what the feed persists and serves is the original string, padding included.
+// Trimming before measuring meant a reference could carry megabytes of whitespace around a short URL,
+// resolve normally, and still be stored — defeating the bound the cap exists for and breaking the
+// maxLength both request schemas publish. Normalizing is not an option: rewriting a signed document
+// orphans its signatures, so the reference has to be refused.
+func TestCreatePlaylistGroup_whitespacePaddedReferenceRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+	expectGroupSignedAndValid(t, mockDP1)
+
+	// Short, perfectly valid URL once trimmed; far past the cap as submitted. No store or fetcher
+	// expectations: it must be refused before any resolution happens.
+	padded := strings.Repeat(" ", 4096) + "https://elsewhere.test/p.json"
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(padded))
+	if !errors.Is(err, executor.ErrPlaylistURITooLong) {
+		t.Fatalf("want ErrPlaylistURITooLong for a whitespace-padded over-long reference, got %v", err)
+	}
+	if !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("want a 400-class submission error, got %v", err)
+	}
+}
+
 // oversizedFetcher answers as a reachable origin serving a body past the cap.
 type oversizedFetcher struct{}
 

@@ -48,7 +48,8 @@ func (e *impl) localPlaylistKeyFromURL(raw string) string {
 // above any real DP-1 playlist URL.
 const maxPlaylistURILen = 2048
 
-// requireResolvableURILength rejects an over-long reference. The client chose the URI, so it is a 400.
+// requireResolvableURILength rejects an over-long reference, measured on the value as submitted. The
+// client chose the URI, so it is a 400.
 func requireResolvableURILength(uri string) error {
 	if len(uri) > maxPlaylistURILen {
 		return fmt.Errorf("%w: playlist URI is %d bytes, over the %d byte limit", ErrPlaylistURITooLong, len(uri), maxPlaylistURILen)
@@ -110,13 +111,6 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	uri = strings.TrimSpace(uri)
 	if uri == "" {
 		return store.IngestedPlaylist{}, fmt.Errorf("empty playlist URI")
-	}
-
-	// Checked before branching, not after. Both request schemas declare maxLength 2048 on reference
-	// strings, and a same-origin URL is a reference like any other: slugs have no length cap, so a local
-	// URL could exceed the published limit and be accepted while the identical remote URL was rejected.
-	if err := requireResolvableURILength(uri); err != nil {
-		return store.IngestedPlaylist{}, err
 	}
 
 	if e.isLocalPlaylistURL(uri) {
@@ -281,9 +275,23 @@ func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.
 	// document would then resolve every occurrence to the mapped winner and silently alter membership.
 	// Resolving once makes one URI mean one playlist for the whole request, and incidentally removes the
 	// duplicate fetches.
+	// Enforce the per-reference cap on the RAW value, before trimming and before the local/remote branch.
+	//
+	// Trimming first measured a value the feed does not keep: the document is signed, so what gets
+	// persisted and served is the original string, padding included. A reference could therefore carry
+	// megabytes of whitespace around a short URL, resolve fine, and still be stored — defeating the very
+	// bound this cap exists for, and breaking the maxLength both request schemas publish. Normalizing is
+	// not an option for the same reason it is not elsewhere: rewriting a signed document orphans its
+	// signatures, so an over-long reference must be refused rather than tidied.
+	//
+	// Checking here rather than inside resolveOnePlaylistRef also puts it ahead of the same-origin branch,
+	// which slugs (uncapped) could otherwise slip past.
 	positions := make(map[string][]int, len(uris))
 	order := make([]string, 0, len(uris))
 	for i, uri := range uris {
+		if err := requireResolvableURILength(uri); err != nil {
+			return nil, fmt.Errorf("playlist reference %d: %w", i, err)
+		}
 		key := strings.TrimSpace(uri)
 		if _, seen := positions[key]; !seen {
 			order = append(order, key)
