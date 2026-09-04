@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -104,6 +105,58 @@ func TestRequireSignatures(t *testing.T) {
 		}
 	})
 
+	// A malformed body cannot present signatures, but calling that "unauthenticated" tells the client the
+	// wrong thing: no amount of signing fixes a body the decoder will reject, and the API documents a body
+	// holding more than one JSON value as a 400. It answered 401 while a failed Unmarshal was
+	// indistinguishable from an unsigned body.
+	t.Run("malformed_body_is_bad_request_not_unauthorized", func(t *testing.T) {
+		for _, tc := range []struct{ name, body string }{
+			{"trailing_json_value", `{"signatures":[{"kid":"did:key:abc","alg":"ed25519","sig":"x"}]} {}`},
+			{"truncated", `{"signatures":[{"kid":"did:key:abc"`},
+			{"not_json_at_all", `nonsense`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				router := gin.New()
+				called := false
+				router.POST("/test", RequireSignatures(log), func(c *gin.Context) {
+					called = true
+					c.Status(http.StatusOK)
+				})
+				req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader([]byte(tc.body)))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+
+				router.ServeHTTP(w, req)
+
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400 for a malformed body, got %d: %s", w.Code, w.Body.String())
+				}
+				if !strings.Contains(w.Body.String(), "bad_request") {
+					t.Fatalf("expected the bad_request code, got %s", w.Body.String())
+				}
+				if called {
+					t.Fatal("handler must not run for a malformed body")
+				}
+			})
+		}
+	})
+
+	// A well-formed body that simply carries no signatures is still 401: that is a real authentication
+	// failure, and must not be blurred into the 400 above.
+	t.Run("well_formed_without_signatures_is_unauthorized", func(t *testing.T) {
+		router := gin.New()
+		router.POST("/test", RequireSignatures(log), func(c *gin.Context) { c.Status(http.StatusOK) })
+		req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader([]byte(`{"title":"unsigned"}`)))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for an unsigned body, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
 	t.Run("put_with_signatures_passes", func(t *testing.T) {
 		router := gin.New()
 		called := false
@@ -150,6 +203,12 @@ func TestRequireSignatures(t *testing.T) {
 		}
 	})
 
+	// Bodies that are well-formed JSON but present no signatures. This is authentication failing, so 401.
+	//
+	// `invalid_json` used to live here expecting 401 too. That expectation encoded a defect: a body the
+	// decoder rejects is a client error the API documents as 400, and signing it could never help. It now
+	// lives in malformed_body_is_bad_request_not_unauthorized. An empty body stays here — there is nothing
+	// to decode, so it is unsigned rather than malformed.
 	rejects := []struct {
 		name string
 		body string
@@ -157,7 +216,6 @@ func TestRequireSignatures(t *testing.T) {
 		{"empty_signatures_array", `{"title":"test","signatures":[]}`},
 		{"no_signatures", `{"title":"test"}`},
 		{"null_signatures", `{"title":"test","signatures":null}`},
-		{"invalid_json", `{invalid json`},
 		{"empty_body", ``},
 	}
 	for _, tc := range rejects {

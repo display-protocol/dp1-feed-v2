@@ -23,6 +23,7 @@ import (
 	"github.com/display-protocol/dp1-go/sign"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/executor"
+	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/mocks"
 	"github.com/display-protocol/dp1-feed-v2/internal/models"
 	"github.com/display-protocol/dp1-feed-v2/internal/notification"
@@ -1757,6 +1758,72 @@ func TestCreatePlaylistGroup_overlongReferenceURIRejected(t *testing.T) {
 	}
 	if !executor.IsInvalidSubmissionError(err) {
 		t.Fatalf("want a 400-class submission error, got %v", err)
+	}
+}
+
+// statusFetcher answers as a reachable origin returning a given HTTP status.
+type statusFetcher struct{ code int }
+
+func (f statusFetcher) FetchPlaylist(_ context.Context, _ string) ([]byte, error) {
+	return nil, &fetcher.StatusError{Code: f.code}
+}
+
+// The cache is a fallback for an origin that cannot be reached, not a way to ignore what a reachable one
+// said. A publisher withdrawing a playlist answers 404 or 410; treating that as unavailability would keep
+// the withdrawn reference alive indefinitely, since nothing else revisits it. 5xx and 429 are the origin
+// failing or deferring rather than deciding, so those still fall back.
+func TestCreatePlaylistGroup_cacheFallbackOnlyWhenOriginUnavailable(t *testing.T) {
+	t.Parallel()
+	const remoteURI = "https://elsewhere.test/p.json"
+	cachedID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	cachedBody := []byte(`{"id":"22222222-2222-2222-2222-222222222222","slug":"pl-one","title":"P"}`)
+
+	for _, tc := range []struct {
+		name         string
+		status       int
+		wantFallback bool
+	}{
+		{name: "withdrawn 404 is authoritative", status: 404, wantFallback: false},
+		{name: "gone 410 is authoritative", status: 410, wantFallback: false},
+		{name: "forbidden 403 is authoritative", status: 403, wantFallback: false},
+		{name: "server error 503 is unavailability", status: 503, wantFallback: true},
+		{name: "rate limited 429 is unavailability", status: 429, wantFallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+			mockDP1.EXPECT().VerifyPlaylistGroupSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
+			expectGroupSignedAndValid(t, mockDP1)
+
+			plDoc := mustDecodePlaylist(t, cachedBody)
+			mockStore.EXPECT().GetPlaylistBySourceURI(gomock.Any(), remoteURI).Return(&store.PlaylistRecord{
+				ID: cachedID, Slug: "pl-one", Raw: cachedBody, Body: plDoc,
+			}, nil).AnyTimes()
+			if tc.wantFallback {
+				mockStore.EXPECT().CreatePlaylistGroup(gomock.Any(), gomock.Any()).Do(func(_ context.Context, in *store.PlaylistGroupInput) {
+					if len(in.Playlists) != 1 || in.Playlists[0].ID != cachedID {
+						t.Fatalf("an unavailable origin should fall back to the cached playlist, got %+v", in.Playlists)
+					}
+				}).Return(nil)
+			}
+
+			e := executor.New(mockStore, mockDP1, false, statusFetcher{code: tc.status}, testPublicBase)
+			_, err := e.CreatePlaylistGroup(context.Background(), validGroupCreateReq(remoteURI))
+			if tc.wantFallback {
+				if err != nil {
+					t.Fatalf("status %d should fall back to the cache, got %v", tc.status, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("status %d is the origin answering, so the write must fail rather than reuse the cache", tc.status)
+			}
+			if !strings.Contains(err.Error(), "unexpected status") {
+				t.Fatalf("error should report the origin's status, got %v", err)
+			}
+		})
 	}
 }
 

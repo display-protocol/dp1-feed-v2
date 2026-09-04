@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
 
@@ -53,6 +54,33 @@ func requireResolvableURILength(uri string) error {
 		return fmt.Errorf("%w: playlist URI is %d bytes, over the %d byte limit", ErrPlaylistURITooLong, len(uri), maxPlaylistURILen)
 	}
 	return nil
+}
+
+// originUnavailable reports whether a fetch failure means "could not reach the origin" rather than "the
+// origin answered".
+//
+// Only the former may fall back to the cache. A reachable origin is authoritative: if it answers 404 or
+// 410 the publisher has withdrawn that playlist, and quietly persisting the previously cached membership
+// would contradict an explicit answer — the stale reference could then outlive the withdrawal
+// indefinitely, since nothing else revisits it. 5xx and 429 are the origin failing or deferring rather
+// than deciding, so they count as unavailable.
+//
+// A refused destination is NOT unavailability. The guard fires because the URL now resolves somewhere
+// this feed must not contact, which is a change in what the URL means; following the old answer would be
+// exactly the wrong response to that.
+func originUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fetcher.ErrBlockedDestination) {
+		return false
+	}
+	var status *fetcher.StatusError
+	if errors.As(err, &status) {
+		return status.Transient()
+	}
+	// No usable HTTP response at all: DNS failure, refused connection, timeout, truncated body.
+	return true
 }
 
 // lastKnownResolution answers what uri last resolved to, for use when the origin cannot be reached.
@@ -108,18 +136,20 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	// Remote: GET body, validate with same rules as operator-authored playlists, then read id/slug from parsed playlist.
 	body, err := e.fetch.FetchPlaylist(ctx, uri)
 	if err != nil {
-		// The origin is unreachable. Fall back to what this URI last resolved to, because ingestion never
-		// refreshes a stored member: the fetch that just failed could only have rediscovered an id already
-		// recorded here, so failing the write would let someone else's outage block a mutation whose
-		// content could not change.
+		// Fall back to what this URI last resolved to only when the origin could not be reached. Ingestion
+		// never refreshes a stored member, so a fetch that fails for unavailability could only have
+		// rediscovered an id already recorded here; failing the write would let someone else's outage block
+		// a mutation whose content could not change.
 		//
 		// Deliberately a fallback rather than the first thing tried. Consulting the cache up front skipped
 		// the fetch entirely, which pinned a URI to whatever it first resolved to — globally, permanently,
 		// and set by whichever anonymous caller referenced it first, since creation is open. A publisher
 		// re-pointing their own URL was then never picked up. Fetching first keeps resolution current and
 		// still survives the outage.
-		if ing, ok := e.lastKnownResolution(ctx, uri); ok {
-			return ing, nil
+		if originUnavailable(err) {
+			if ing, ok := e.lastKnownResolution(ctx, uri); ok {
+				return ing, nil
+			}
 		}
 		return store.IngestedPlaylist{}, fmt.Errorf("fetch %q: %w", uri, err)
 	}

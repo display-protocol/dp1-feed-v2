@@ -64,7 +64,15 @@ func RequireSignatures(log *zap.Logger) gin.HandlerFunc {
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-		if !bodyCarriesSignatures(body) {
+		carries, decodeErr := bodyCarriesSignatures(body)
+		if decodeErr != nil {
+			// Malformed JSON is a client error, not an authentication failure: strict decoding promises a
+			// 400 naming the problem, and signing an unparseable body could never satisfy this check.
+			log.Warn("bad request: malformed body", zap.String("path", c.Request.URL.Path), zap.Error(decodeErr))
+			c.AbortWithStatusJSON(http.StatusBadRequest, ErrorResponse{Error: "bad_request", Message: decodeErr.Error()})
+			return
+		}
+		if !carries {
 			log.Warn("unauthorized: no signatures", zap.String("path", c.Request.URL.Path))
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Message: "missing authentication: request body must carry signatures"})
 			return
@@ -80,20 +88,41 @@ func RequireSignatures(log *zap.Logger) gin.HandlerFunc {
 // Two shapes are legitimate: a bare signed document or delete-intent (POST, DELETE) carries `signatures`
 // at the top level, while a PUT carries a `document` and the `authorization` intent that permits
 // replacing the resource with it, each signed in its own right.
-func bodyCarriesSignatures(body []byte) bool {
+// bodyCarriesSignatures reports whether the body presents signatures, and separately whether it is even
+// well-formed JSON.
+//
+// The two answers must not be conflated. A malformed body — bad syntax, or more than one JSON value —
+// cannot present signatures, but reporting that as "unauthenticated" tells the client the wrong thing:
+// the API documents such a body as a 400 from strict decoding, and no amount of signing would fix it. It
+// previously returned 401 here, because a failed Unmarshal was indistinguishable from an unsigned body.
+//
+// Unknown members are deliberately NOT rejected here. That is the route decoder's job, against the
+// concrete request type; this only needs syntax and signature presence, and duplicating the strict rules
+// pre-auth would mean maintaining them twice.
+func bodyCarriesSignatures(body []byte) (carries bool, err error) {
 	var envelope struct {
 		Signatures    []json.RawMessage `json:"signatures"`
 		Document      json.RawMessage   `json:"document"`
 		Authorization json.RawMessage   `json:"authorization"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return false
+	// An empty body is not malformed, it is simply unsigned: there is nothing to decode and nothing to
+	// report as a syntax problem. Reporting it as a decode failure would turn the plainest possible
+	// authentication failure — a mutating request sent with no credentials at all — into a 400.
+	if len(bytes.TrimSpace(body)) == 0 {
+		return false, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := dec.Decode(&envelope); err != nil {
+		return false, err
+	}
+	if dec.More() {
+		return false, errTrailingBody
 	}
 	if len(envelope.Signatures) > 0 {
-		return true
+		return true, nil
 	}
 	// Both halves of a replace must be signed; one without the other authorizes nothing.
-	return hasSignatures(envelope.Document) && hasSignatures(envelope.Authorization)
+	return hasSignatures(envelope.Document) && hasSignatures(envelope.Authorization), nil
 }
 
 func hasSignatures(raw json.RawMessage) bool {

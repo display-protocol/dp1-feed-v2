@@ -130,7 +130,11 @@ has since rotted, rotated keys, or started serving something malformed: the id i
 stored playlist, and a member's origin can never retroactively block groups that reference it.
 
 If the origin is **unreachable**, a remote URI falls back to the playlist it last resolved to, recorded at
-ingest. That extends the guarantee above to an outage: since a stored member is never refreshed, the fetch
+ingest. Unreachable means no usable answer — DNS failure, refused connection, timeout, or a `5xx`/`429`.
+An origin that *answers* is authoritative even when the answer is a rejection: a `404`, `410` or `403`
+fails the write rather than reusing the cache, because a publisher withdrawing a playlist must not leave
+the old reference alive indefinitely. A destination the SSRF guard refuses is likewise not a fallback: the
+URL now means somewhere this feed will not contact. That extends the guarantee above to an outage: since a stored member is never refreshed, the fetch
 that failed could only have rediscovered an id already held here, so failing the write would let someone
 else's downtime block a mutation whose content could not change. The fallback is consulted **only** on
 fetch failure — a reachable origin stays authoritative, so a publisher re-pointing their URL to a

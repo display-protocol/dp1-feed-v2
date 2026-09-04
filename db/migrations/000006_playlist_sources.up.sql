@@ -52,8 +52,15 @@ CREATE INDEX IF NOT EXISTS playlist_sources_playlist_id_idx ON playlist_sources 
 -- so position joins a stored URI to the playlist it resolved to. jsonb_array_elements_text WITH ORDINALITY
 -- gives 1-based ordinals, hence ord - 1.
 --
--- Newest membership wins, matching the last-known-good rule the runtime path follows. An earlier revision
--- took the oldest, which matched a first-seen rule this table no longer has.
+-- Newest membership wins, matching the last-known-good rule the runtime path follows. Ordering is by the
+-- containing document's updated_at, not created_at: membership is rewritten wholesale on every PUT, so an
+-- older group replaced yesterday holds a more recent resolution than a newer group untouched since
+-- creation. Ordering by creation time would then pick the staler mapping. playlist_id breaks ties so the
+-- result is reproducible.
+--
+-- The scheme match is case-insensitive (~*). Runtime scheme checks use EqualFold, so a stored "HTTPS://…"
+-- reference is valid and must be seeded; a case-sensitive match silently skipped it and left exactly the
+-- kind of reference this seed exists to protect without a fallback.
 --
 -- Same-origin URLs are NOT filtered out. They are inert here: resolveOnePlaylistRef checks
 -- isLocalPlaylistURL before it ever consults this table, so such a row is never read. An earlier revision
@@ -64,7 +71,7 @@ CREATE INDEX IF NOT EXISTS playlist_sources_playlist_id_idx ON playlist_sources 
 INSERT INTO playlist_sources (uri, uri_hash, playlist_id)
 SELECT DISTINCT ON (refs.uri) refs.uri, sha256(convert_to(refs.uri, 'UTF8')), refs.playlist_id
 FROM (
-    SELECT ref.uri, pgm.playlist_id, g.created_at
+    SELECT ref.uri, pgm.playlist_id, g.updated_at
     FROM playlist_groups g
     CROSS JOIN LATERAL jsonb_array_elements_text(
         CASE WHEN jsonb_typeof(g.body -> 'playlists') = 'array'
@@ -77,7 +84,7 @@ FROM (
 
     UNION ALL
 
-    SELECT ref.uri, cm.playlist_id, c.created_at
+    SELECT ref.uri, cm.playlist_id, c.updated_at
     FROM channels c
     CROSS JOIN LATERAL jsonb_array_elements_text(
         CASE WHEN jsonb_typeof(c.body -> 'playlists') = 'array'
@@ -88,9 +95,9 @@ FROM (
       ON cm.channel_id = c.id
      AND cm.position = (ref.ord - 1)::int
 ) AS refs
-WHERE refs.uri ~ '^https?://'
+WHERE refs.uri ~* '^https?://'
   -- Skip anything too long to be a real URL. Nothing here can fail on length (the key is a hash), but a
   -- multi-kilobyte string is junk rather than a reference worth caching.
   AND length(refs.uri) <= 2048
-ORDER BY refs.uri, refs.created_at DESC, refs.playlist_id
+ORDER BY refs.uri, refs.updated_at DESC, refs.playlist_id
 ON CONFLICT (uri_hash) DO NOTHING;

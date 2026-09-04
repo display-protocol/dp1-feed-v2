@@ -21,6 +21,23 @@ import (
 // URL, so it is their input that is wrong, not an internal fault.
 var ErrBlockedDestination = errors.New("playlist fetch destination is not allowed")
 
+// StatusError reports that the origin answered, with a status this feed will not accept.
+//
+// It exists so callers can tell "the origin said something definitive" from "we could not reach the
+// origin". Those need opposite handling: a reference whose origin is merely down may fall back to what it
+// last resolved to, whereas one whose origin answered 404 or 410 has been withdrawn on purpose, and
+// silently keeping the old content would contradict the origin's own answer.
+type StatusError struct{ Code int }
+
+func (e *StatusError) Error() string { return fmt.Sprintf("unexpected status %d", e.Code) }
+
+// Transient reports whether the status means "try later" rather than a settled answer. 5xx is the origin
+// failing rather than deciding, and 429 is an explicit "not now"; both are unavailability. Every other
+// non-200 is the origin answering definitively, including 404 and 403.
+func (e *StatusError) Transient() bool {
+	return e.Code == http.StatusTooManyRequests || e.Code >= 500
+}
+
 // maxFetchRedirects caps redirect following. Each hop is re-validated by the dial guard, so the cap is
 // only about bounding work, not safety.
 const maxFetchRedirects = 5
@@ -227,7 +244,7 @@ func (f *HTTPFetcher) FetchPlaylist(ctx context.Context, uri string) ([]byte, er
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return nil, &StatusError{Code: resp.StatusCode}
 	}
 	r := io.LimitReader(resp.Body, f.max+1)
 	b, err := io.ReadAll(r)
