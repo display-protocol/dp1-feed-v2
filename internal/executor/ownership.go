@@ -148,10 +148,18 @@ func ownerSet(declared keySet, ownerRole string, sigs []playlist.Signature) keyS
 	return set
 }
 
-// signerKeySet collects the kids of every signature regardless of role.
-func signerKeySet(sigs []playlist.Signature) keySet {
+// clientSignerKeySet collects the kids of every signature except those in the `feed` role. The feed's
+// own signature is appended server-side after authorization and never takes part in ownership; a client
+// may also label one of its entries `feed`, and such an entry is not an owner-role signature either way.
+// Excluding the role (rather than the feed's kid, which the executor does not know) is what keeps a
+// group whose display-name `curator` happens to equal the feed's key from resolving to the feed as owner
+// once the feed has co-signed it.
+func clientSignerKeySet(sigs []playlist.Signature) keySet {
 	set := make(keySet, len(sigs))
 	for _, s := range sigs {
+		if s.Role == playlist.RoleFeed {
+			continue
+		}
 		if k := strings.TrimSpace(s.Kid); k != "" {
 			set[k] = struct{}{}
 		}
@@ -160,16 +168,18 @@ func signerKeySet(sigs []playlist.Signature) keySet {
 }
 
 // legacyGroupOwner returns the key the group's signed `curator` string names, when that string is the kid
-// of one of the group's signatures (any role); "" otherwise. The DP-1 core schema calls `curator` a
-// display name, but the previous contract of this feed used it as the owner's key and matched it against
-// signature kids regardless of role, so for stored rows it is a signed owner declaration and must be
-// honored ahead of the role-derived rule.
+// of one of the group's client signatures (any role but `feed`); "" otherwise. The DP-1 core schema calls
+// `curator` a display name, but the previous contract of this feed used it as the owner's key and matched
+// it against the client's signature kids regardless of role, so for stored rows it is a signed owner
+// declaration and must be honored ahead of the role-derived rule. The feed's own signature was never
+// matched under that contract (it is appended after authorization) and is excluded here for the same
+// reason.
 func legacyGroupOwner(g *playlistgroup.Group) string {
 	legacy := strings.TrimSpace(g.Curator)
 	if legacy == "" {
 		return ""
 	}
-	if _, ok := signerKeySet(g.Signatures)[legacy]; ok {
+	if _, ok := clientSignerKeySet(g.Signatures)[legacy]; ok {
 		return legacy
 	}
 	return ""
@@ -179,13 +189,15 @@ func legacyGroupOwner(g *playlistgroup.Group) string {
 // submitted `curator` string names one of the document's signers, it must be the curator-role signer.
 // Otherwise a stored row could carry a `curator` naming a licensor co-signer while a different key signed
 // as curator, and the stored-side resolution (which must honor `curator` for legacy rows) would disagree
-// with the create-time owner. A `curator` that names no signer is a display name and is unconstrained.
+// with the create-time owner. A `curator` that names no client signer is a display name and is
+// unconstrained — including one that equals the feed's key, whose signature is appended after this check
+// and is excluded from owner inference (see clientSignerKeySet).
 func requireGroupCuratorConsistent(curator string, sigs []playlist.Signature) error {
 	c := strings.TrimSpace(curator)
 	if c == "" {
 		return nil
 	}
-	if _, isSigner := signerKeySet(sigs)[c]; !isSigner {
+	if _, isSigner := clientSignerKeySet(sigs)[c]; !isSigner {
 		return nil
 	}
 	if _, isOwner := ownerSet(nil, playlist.RoleCurator, sigs)[c]; isOwner {

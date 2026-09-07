@@ -12,6 +12,7 @@ import (
 
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
+	"github.com/display-protocol/dp1-go/playlistgroup"
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 	"github.com/google/uuid"
 )
@@ -420,4 +421,50 @@ func TestIntegration_Ownership_PublisherlessChannelLifecycle(t *testing.T) {
 	raw = doRaw(t, srv, http.MethodDelete, "/api/v1/channels/"+slug, signedDeleteBody(t, other.priv, "channel", id.String(), slug), http.StatusForbidden)
 	mustErrorContaining(t, raw, "forbidden", "not signed by an owner")
 	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/channels/"+slug, signedDeleteBody(t, publisher.priv, "channel", id.String(), slug), http.StatusNoContent)
+}
+
+// TestIntegration_Ownership_GroupCuratorEqualToFeedKey pins that the feed's own server-added `feed`
+// signature never takes part in owner inference: a group whose display `curator` happens to equal the
+// feed's key is created by A, co-signed by the feed, and still owned by A for replace and delete.
+func TestIntegration_Ownership_GroupCuratorEqualToFeedKey(t *testing.T) {
+	srv := newIntegrationServer(t)
+	_, feedKid := newIntegrationSignerAndKid(t)
+
+	curator, curatorKid := newSigner(t, playlist.RoleCurator)
+	plUnsigned := []byte(`{"dpVersion":"1.1.0","id":"4e4e4e4e-1111-4333-8444-555555555555","slug":"feedkey-member",` +
+		`"title":"member","created":"2026-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + curatorKid + `"}],` +
+		`"items":[{"id":"4e4e4e4e-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]}`)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signWithAll(t, plUnsigned, curator)), http.StatusCreated)
+
+	id := uuid.MustParse("4f4f4f4f-1111-4333-8444-555555555555")
+	const slug = "curator-is-feed-key"
+	uris := []string{"http://example.com/api/v1/playlists/feedkey-member"}
+	created := "2026-01-02T03:04:05Z"
+	// signedGroupBody signs with the curator's key but writes the feed's kid into `curator`.
+	body := signedGroupBody(t, curator.priv, feedKid, id.String(), slug, "v1", created, uris)
+	raw := mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", body, http.StatusCreated)
+	var got playlistgroup.Group
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Curator != feedKid {
+		t.Fatalf("curator stored verbatim: %q", got.Curator)
+	}
+	feedSigned := false
+	for _, s := range got.Signatures {
+		if s.Kid == feedKid && s.Role == playlist.RoleFeed {
+			feedSigned = true
+		}
+	}
+	if !feedSigned {
+		t.Fatalf("feed signature expected on the stored group: %+v", got.Signatures)
+	}
+
+	// A, not the feed, owns it: replace and delete succeed with A's key.
+	doc := signedGroupBody(t, curator.priv, feedKid, id.String(), slug, "v2", created, uris)
+	mustDoRaw(t, srv, http.MethodPut, "/api/v1/playlist-groups/"+slug,
+		signedReplaceEnvelope(t, curator.priv, "playlist-group", id.String(), slug, doc), http.StatusOK)
+	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/playlist-groups/"+slug,
+		signedDeleteBody(t, curator.priv, "playlist-group", id.String(), slug), http.StatusNoContent)
 }

@@ -91,8 +91,10 @@ one **owner set** per document with a single rule, applied to every resource kin
   key named by a group's signed `curator` string owned it, matched against signature kids regardless of
   role, and other keys could co-sign in any role without authority. Stored rows from that era may
   therefore carry several curator-role signatures, or an owner who signed under a non-curator role. They
-  are resolved by that signed declaration first: if `curator` is the kid of any of the row's signatures,
-  that key is the owner; otherwise the single curator-role signer is; otherwise (several curator-role
+  are resolved by that signed declaration first: if `curator` is the kid of any of the row's client
+  signatures (the feed's own server-added `feed` signature never counts, so a display name that happens
+  to equal the feed's key does not make the feed the owner), that key is the owner; otherwise the single
+  curator-role signer is; otherwise (several curator-role
   signers, none named) no key can replace or delete the row (**`403`** with a message saying so) until an
   operator migrates it. To keep new rows unambiguous under the same resolution, a submitted group whose
   `curator` names one of its signers must name the curator-role signer (**`400`** otherwise); a `curator`

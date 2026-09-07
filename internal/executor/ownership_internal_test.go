@@ -385,6 +385,8 @@ func TestStoredGroupOwnerSet(t *testing.T) {
 		{name: "legacy: several signers, curator names a non-signer", group: playlistgroup.Group{Curator: "C", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, wantErr: true},
 		{name: "legacy mixed roles: curator names the licensor-signed owner, not the curator-role co-signer", group: playlistgroup.Group{Curator: "A", Signatures: []playlist.Signature{sig("A", playlist.RoleLicensor), sig("B", playlist.RoleCurator)}}, want: keys("A")},
 		{name: "legacy: curator names the only curator-role signer among others", group: playlistgroup.Group{Curator: "A", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor)}}, want: keys("A")},
+		{name: "curator equals the feed key: the feed's own signature never makes it the owner", group: playlistgroup.Group{Curator: "F", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("F", playlist.RoleFeed)}}, want: keys("A")},
+		{name: "a client entry labeled feed is excluded from legacy inference too", group: playlistgroup.Group{Curator: "X", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("X", playlist.RoleFeed)}}, want: keys("A")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -406,7 +408,7 @@ func TestStoredGroupOwnerSet(t *testing.T) {
 
 func TestRequireGroupCuratorConsistent(t *testing.T) {
 	t.Parallel()
-	sigs := []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor)}
+	sigs := []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor), sig("F", playlist.RoleFeed)}
 	for _, tc := range []struct {
 		name, curator string
 		wantErr       bool
@@ -416,6 +418,7 @@ func TestRequireGroupCuratorConsistent(t *testing.T) {
 		{name: "names the curator-role signer", curator: " A "},
 		{name: "names a non-signer key", curator: "did:key:zStranger"},
 		{name: "names the licensor co-signer", curator: "L", wantErr: true},
+		{name: "names a feed-role entry: treated as a display name", curator: "F"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

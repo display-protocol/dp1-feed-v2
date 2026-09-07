@@ -1050,8 +1050,9 @@ components:
           type: string
           description: >-
             Name of the curator who created this exhibition (DP-1 core). Attribution only — unless it is the
-            kid of one of the document's signers, in which case it must be the `curator`-role signer (400
-            otherwise), and it is what identifies the owner of rows stored before role-aware ownership.
+            kid of one of the document's client signers (any role but `feed`), in which case it must be the
+            `curator`-role signer (400 otherwise), and it is what identifies the owner of rows stored before
+            role-aware ownership. The feed's own `feed` signature never takes part in ownership.
         summary:
           type: string
         coverImage:
