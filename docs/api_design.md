@@ -135,21 +135,23 @@ Three postures, by verb:
    are verified independently — one without the other authorizes nothing.
    - **Document:** **identity is immutable and validated, not substituted** — the submitted `id`, `slug`,
      and document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as
-     an instant, since formatting may differ). The **owner set may grow but never shrink**: every stored
+     an instant, since formatting may differ). For **playlists** the **owner set may grow but never shrink** (playlist-groups and channels are strictly single-owner, see below): every stored
      owner must still be in the incoming owner set (**`403` `forbidden`** otherwise — removal would let one
      co-owner evict another), and **every key entering the owner set must sign the incoming document in the
      owner role** (**`403`** otherwise — that proves key possession and consent, so an owner cannot attribute
      the document to an arbitrary public key). **Once declared, always declared:** a document whose stored
      version declares `curators`/`publisher` may not omit it on `PUT` (**`403`**), so a document cannot
      slide from the signed-owner regime to the label-derived one. A declared channel `publisher` is
-     therefore a single owner that cannot change; channel `curators` are attribution and may change
+     therefore a single owner that cannot change, and an undeclared channel is equally single-owner (its
+     one `publisher`-role signer; a second is **`400`**), so a channel's owner can never change or be
+     joined; channel `curators` are attribution and may change
      freely. A playlist-group has no owner declaration at all, so its single owner can never change or be
      joined: the replacement must carry the same key's `curator`-role signature, a second one is
      **`400`**, and only the `curator` display name may change. All signatures must cryptographically verify (**`400`**) and at least one must be an
      authorizing signature from a **stored** owner (**`403`**). Membership is permanent once granted, and
      a deleted id cannot be re-created, so key rotation is "add the new key" only; self-removal via the
      intent is the natural extension and is not built.
-   - **Adding a co-owner to an undeclared document means declaring.** An undeclared document has exactly
+   - **Adding a co-owner to an undeclared playlist means declaring.** An undeclared document has exactly
      one owner, and a replacement with two owner-role signatures and no declaration is ambiguous
      (**`400`**). The owner adds a co-owner with a `PUT` that declares `curators` naming both keys, signed
      by the owner (as the stored owner acting as owner) and by the new key (consent). Once declared,
@@ -307,7 +309,7 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 
 - **POST** — create (open); body must carry an owner-role signature from one of its owners (see Authentication).
 - **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound; declared owners may be added but never removed, and a group's single owner cannot change (see Authentication).
+- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound; a playlist's declared owners may be added but never removed, while a group's or channel's single owner cannot change (see Authentication).
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
 - **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 

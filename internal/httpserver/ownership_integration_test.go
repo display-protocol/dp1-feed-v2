@@ -364,3 +364,60 @@ func TestIntegration_Ownership_AppendedSignerGainsNoAuthority(t *testing.T) {
 	// The author still can.
 	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/playlists/"+slug, signedDeleteBody(t, author.priv, "playlist", id.String(), slug), http.StatusNoContent)
 }
+
+// TestIntegration_Ownership_PublisherlessChannelLifecycle runs a channel that declares no `publisher`
+// through the real validator and the full authorized lifecycle: created by its single publisher-role
+// signer, replaced and deleted by that signer, with a second publisher-role signature refused as
+// ambiguous and a stranger's intent refused as not the owner.
+func TestIntegration_Ownership_PublisherlessChannelLifecycle(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	curator, curatorKid := newSigner(t, playlist.RoleCurator)
+	plUnsigned := []byte(`{"dpVersion":"1.1.0","id":"3c3c3c3c-1111-4333-8444-555555555555","slug":"publess-member",` +
+		`"title":"member","created":"2026-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + curatorKid + `"}],` +
+		`"items":[{"id":"3c3c3c3c-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]}`)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signWithAll(t, plUnsigned, curator)), http.StatusCreated)
+
+	publisher, _ := newSigner(t, channels.RolePublisher)
+	other, _ := newSigner(t, channels.RolePublisher)
+	id := uuid.MustParse("3d3d3d3d-1111-4333-8444-555555555555")
+	const slug = "publisherless"
+	channelDoc := func(title string) []byte {
+		return []byte(`{"id":"` + id.String() + `","slug":"` + slug + `","title":"` + title + `","version":"1.0.0",` +
+			`"created":"2026-01-02T03:04:05Z",` +
+			`"playlists":["http://example.com/api/v1/playlists/publess-member"]}`)
+	}
+
+	// Two publisher-role signers and no declaration: ambiguous.
+	raw := doRaw(t, srv, http.MethodPost, "/api/v1/channels", json.RawMessage(signWithAll(t, channelDoc("v1"), publisher, other)), http.StatusBadRequest)
+	mustErrorContaining(t, raw, "bad_request", "exactly one owner-role signature")
+
+	// One publisher-role signer: created through the real channel validator; the signer owns it.
+	created := mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", json.RawMessage(signWithAll(t, channelDoc("v1"), publisher, curator)), http.StatusCreated)
+	if ok, failed, err := dp1sign.VerifyChannelSignatures(created); err != nil || !ok {
+		t.Fatalf("created channel signatures do not verify: ok=%v failed=%+v err=%v", ok, failed, err)
+	}
+
+	// A stranger cannot replace it, and the owner cannot be joined by co-signing.
+	raw = doRaw(t, srv, http.MethodPut, "/api/v1/channels/"+slug,
+		signedReplaceEnvelope(t, other.priv, "channel", id.String(), slug, json.RawMessage(signWithAll(t, channelDoc("v2"), other))), http.StatusForbidden)
+	mustErrorContaining(t, raw, "forbidden", "owners cannot be removed")
+	raw = doRaw(t, srv, http.MethodPut, "/api/v1/channels/"+slug,
+		signedReplaceEnvelope(t, publisher.priv, "channel", id.String(), slug, json.RawMessage(signWithAll(t, channelDoc("v2"), publisher, other))), http.StatusBadRequest)
+	mustErrorContaining(t, raw, "bad_request", "exactly one owner-role signature")
+
+	// The owner replaces and deletes it.
+	replaced := mustDoRaw(t, srv, http.MethodPut, "/api/v1/channels/"+slug,
+		signedReplaceEnvelope(t, publisher.priv, "channel", id.String(), slug, json.RawMessage(signWithAll(t, channelDoc("v2"), publisher))), http.StatusOK)
+	var got channels.Channel
+	if err := json.Unmarshal(replaced, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "v2" || got.Publisher != nil {
+		t.Fatalf("after PUT: title=%q publisher=%+v", got.Title, got.Publisher)
+	}
+	raw = doRaw(t, srv, http.MethodDelete, "/api/v1/channels/"+slug, signedDeleteBody(t, other.priv, "channel", id.String(), slug), http.StatusForbidden)
+	mustErrorContaining(t, raw, "forbidden", "not signed by an owner")
+	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/channels/"+slug, signedDeleteBody(t, publisher.priv, "channel", id.String(), slug), http.StatusNoContent)
+}

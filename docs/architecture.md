@@ -100,7 +100,7 @@ GET /api/v1/playlists/:id
 
 ## Authentication
 
-- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; owners may be added on replace but never removed). DELETE carries a signed delete-intent body.
+- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace but never removed; groups and channels are single-owner). DELETE carries a signed delete-intent body.
 - **Reads:** public unless restricted by deployment.
 - **Cryptographic signatures:** Ed25519 (v1.1+ multisig) via `dp1svc`; documents carry curator/publisher and feed-operator proof, not end-user OAuth.
 

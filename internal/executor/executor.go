@@ -723,10 +723,11 @@ func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort 
 }
 
 // ReplaceChannel replaces a channel with the client's signed document, stored verbatim, and re-resolves
-// membership. Owner-bound and identity-immutable. A declared `publisher` is a single owner and must stay
-// declared, so with one declared the owner set cannot change at all (omitting it or naming another key
-// would remove it); with none declared the publisher-role signers may grow. Channel curators[] are
-// attribution, not owners, and may change freely. See ReplacePlaylist.
+// membership. Owner-bound and identity-immutable. A channel is strictly single-owner: a declared
+// `publisher` must stay declared and cannot change (omitting it or naming another key would remove it),
+// and an undeclared channel's one publisher-role signer cannot be joined (a second is ambiguous, see
+// requireUnambiguousOwner). Channel curators[] are attribution, not owners, and may change freely. See
+// ReplacePlaylist.
 func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled

@@ -22,8 +22,10 @@ info:
     role: a key listed in `curators` that signs only as `licensor`, `institution` or `agent` is not acting
     as the author. POST (create) is open to any document so signed. PUT (replace) and DELETE are
     owner-bound: the request must be signed, in the owner role, by a key in the *stored* document's owner
-    set. On replace the owner set may grow but never shrink, and every key being added must itself sign
-    the document in the owner role. The feed always adds its own `feed` signature. There is no PATCH.
+    set. On replace a playlist's owner set may grow but never shrink, and every key being added must
+    itself sign the document in the owner role; playlist-groups and channels are strictly single-owner
+    (a group cannot declare owners and `publisher` is a single entity), so their owner can never change
+    or be joined. The feed always adds its own `feed` signature. There is no PATCH.
 
     Limit to know: `role` is not covered by the signature (it lives in the signature entry, outside the
     signed bytes), so the role rule is spec conformance and mistake detection, not a cryptographic
@@ -574,10 +576,11 @@ paths:
         Fully replaces a channel (requires extensions). The body is a `ChannelReplaceRequest`: the full
         re-signed `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound: the
         document and the intent must both carry a `publisher`-role signature from a stored owner, and the
-        identity must equal the stored resource's. A declared `publisher` is a single owner and so cannot
-        change; with none declared the `publisher`-role signers may grow but not shrink. `curators` may
-        change freely. 403 if the signer is not the publisher or an owner would be removed; 409 if the
-        resource changed since it was authorized.
+        identity must equal the stored resource's. A channel is strictly single-owner whether `publisher`
+        is declared or derived from its one `publisher`-role signature: the owner cannot change or be
+        joined (a second `publisher`-role signature on an undeclared channel is 400), and a declared
+        `publisher` may not be omitted. `curators` may change freely. 403 if the signer is not the
+        publisher or the owner would be removed; 409 if the resource changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
