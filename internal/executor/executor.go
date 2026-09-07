@@ -367,14 +367,18 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	}
 
 	// 2) Authorize over the SUBMITTED bytes: every signature must cryptographically verify (400); each
-	// newly added owner must have signed as curator (403); and at least one signature must come from a
-	// stored owner acting as curator (403).
+	// newly added owner must have signed as curator, and an undeclared->declared transition needs every
+	// current owner's curator signature (403); and at least one signature must come from a stored owner
+	// acting as curator (403).
 	ok, failed, err := e.dp1.VerifyPlaylistSignatures(req.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
 	}
 	if !ok {
 		return nil, signatureFailure(failed)
+	}
+	if err := requireRegimeTransitionConsent(storedDeclared, incomingDeclared, stored, playlist.RoleCurator, req.Signatures); err != nil {
+		return nil, err
 	}
 	if err := requireNewOwnerConsent(stored, incoming, playlist.RoleCurator, req.Signatures); err != nil {
 		return nil, err
@@ -743,13 +747,17 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	uris := req.Playlists
 
 	// 2. Authorize over the SUBMITTED bytes BEFORE resolving playlist URIs: crypto-verify all signatures
-	// (400), require consent from any added owner (403), then a stored-owner publisher signature (403).
+	// (400), require consent from any added owner and from every owner on an undeclared->declared
+	// transition (403), then a stored-owner publisher signature (403).
 	ok, failed, err := e.dp1.VerifyChannelSignatures(req.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
 	}
 	if !ok {
 		return nil, signatureFailure(failed)
+	}
+	if err := requireRegimeTransitionConsent(storedDeclared, incomingDeclared, stored, channels.RolePublisher, req.Signatures); err != nil {
+		return nil, err
 	}
 	if err := requireNewOwnerConsent(stored, incoming, channels.RolePublisher, req.Signatures); err != nil {
 		return nil, err

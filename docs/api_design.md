@@ -140,6 +140,11 @@ Three postures, by verb:
      owner set *is* the new document's owner-role signers, so every stored co-owner must sign every `PUT`
      or the absent one counts as removed (**`403`**). Declare `curators`/`publisher` if any one owner
      should be able to edit alone.
+   - **Declaring owners on an undeclared document needs unanimous consent.** That `PUT` moves the resource
+     from the unanimous regime above to any-one-of-owner authorization, so it must carry an owner-role
+     signature from **every** current owner, not just the one submitting it (**`403`** otherwise). Without
+     this a co-owner could declare the existing owner set and thereafter edit alone, stripping the others'
+     veto. (Once declared, adding a further owner only needs that new key's consent, per the rule above.)
    - **Consent is a replace-time rule only (interim assumption).** A `POST` declaring `curators` `[A, B]`
      signed by A alone is accepted and B owns without having signed; the same document as a `PUT` adding B
      is refused. Create is open and trusts the document's own claims; replace is the feed guarding a change

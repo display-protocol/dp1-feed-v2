@@ -55,7 +55,9 @@ package executor
 // Consequence of deriving owners from the stored bytes: when a document declares no owners, the incoming
 // owner set on replace is exactly its owner-role signers, so every stored co-owner must re-sign every
 // PUT (N-of-N), not just one. There is no side table remembering the set. Authors who want any-one-owner
-// edits should declare `curators`/`publisher`.
+// edits should declare `curators`/`publisher` — but the PUT that first declares them moves the resource
+// from that N-of-N regime to any-one authorization, so it needs a signature from EVERY current owner
+// (requireRegimeTransitionConsent); otherwise one co-owner could declare the set and then edit alone.
 
 import (
 	"errors"
@@ -189,6 +191,37 @@ func requireOwnersRetained(stored, incoming keySet) error {
 	}
 	sort.Strings(removed)
 	return fmt.Errorf("%w: %s", ErrOwnerRemoved, strings.Join(removed, ", "))
+}
+
+// requireRegimeTransitionConsent guards the one owner-set change that would otherwise let a co-owner
+// strip another's veto. A document with no declared owners is authorized N-of-N: its owner set is derived
+// from the owner-role signers, so requireOwnersRetained forces every stored owner to sign every replace
+// (see the package comment). A document that declares its owners is authorized any-one-of-N. Turning the
+// first into the second (stored undeclared, incoming declared) drops every other owner's required
+// signature, so the transition must carry an owner-role signature from EVERY stored owner, proving the
+// whole current owner set consents to the weaker regime. Without this a single co-owner could declare the
+// existing owner set and thereafter edit alone.
+//
+// New owners added in the same replace are requireNewOwnerConsent's job; this covers the keys that were
+// already owners. A non-transition — declared->declared, undeclared->undeclared, or the forbidden
+// declared->undeclared (see requireDeclarationRetained) — is a no-op here. storedOwners is the derived
+// stored owner set; sigs must already have been cryptographically verified.
+func requireRegimeTransitionConsent(storedDeclared, incomingDeclared, storedOwners keySet, ownerRole string, sigs []playlist.Signature) error {
+	if len(storedDeclared) > 0 || len(incomingDeclared) == 0 {
+		return nil
+	}
+	signedAsOwner := ownerSet(nil, ownerRole, sigs)
+	var missing []string
+	for k := range storedOwners {
+		if _, ok := signedAsOwner[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf("%w: declaring owners on a resource that had none changes it from unanimous to any-one authorization, so every current owner must sign as %q; missing: %s", ErrOwnerConsentRequired, ownerRole, strings.Join(missing, ", "))
 }
 
 // requireNewOwnerConsent enforces the consent half of the replace rule: every key in incoming that is

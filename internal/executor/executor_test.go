@@ -4418,10 +4418,21 @@ func TestReplacePlaylist_declaredUndeclaredSwitch(t *testing.T) {
 			wantErr:  executor.ErrOwnerRemoved,
 		},
 		{
-			name:     "undeclared {A,B} -> declared [A,B] signed by A: both listed, none added",
+			// The undeclared->declared transition drops the resource from unanimous (N-of-N) to any-one
+			// authorization, so it is NOT enough for A to list both and sign alone: that would let A strip
+			// B's veto. Every current owner must sign the transitioning document.
+			name:     "undeclared {A,B} -> declared [A,B] signed by A only: B's consent to the weaker regime missing",
 			stored:   coreOnlyStored,
 			curators: []identity.Entity{{Key: testCuratorKid}, {Key: other}},
 			sigs:     []playlist.Signature{testSig(testCuratorKid)},
+			verify:   true,
+			wantErr:  executor.ErrOwnerConsentRequired,
+		},
+		{
+			name:     "undeclared {A,B} -> declared [A,B] signed by A and B: whole owner set consents",
+			stored:   coreOnlyStored,
+			curators: []identity.Entity{{Key: testCuratorKid}, {Key: other}},
+			sigs:     []playlist.Signature{testSig(testCuratorKid), testSig(other)},
 			verify:   true,
 		},
 		{

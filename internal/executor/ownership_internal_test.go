@@ -294,3 +294,52 @@ func TestRequireDeclarationRetained(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireRegimeTransitionConsent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                         string
+		storedDeclared, incomingDecl keySet
+		storedOwners                 keySet
+		sigs                         []playlist.Signature
+		wantMissing                  string // "" means allowed
+	}{
+		{
+			name: "not a transition: stays undeclared", storedDeclared: keys(), incomingDecl: keys(),
+			storedOwners: keys("A", "B"), sigs: []playlist.Signature{sig("A", playlist.RoleCurator)},
+		},
+		{
+			name: "not a transition: stays declared", storedDeclared: keys("A"), incomingDecl: keys("A", "B"),
+			storedOwners: keys("A"), sigs: []playlist.Signature{sig("A", playlist.RoleCurator)},
+		},
+		{
+			name: "transition, whole owner set signs", storedDeclared: keys(), incomingDecl: keys("A", "B"),
+			storedOwners: keys("A", "B"), sigs: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)},
+		},
+		{
+			name: "transition, one owner missing", storedDeclared: keys(), incomingDecl: keys("A", "B"),
+			storedOwners: keys("A", "B"), sigs: []playlist.Signature{sig("A", playlist.RoleCurator)},
+			wantMissing: "B",
+		},
+		{
+			name: "transition, an owner signs but as licensor", storedDeclared: keys(), incomingDecl: keys("A", "B"),
+			storedOwners: keys("A", "B"), sigs: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleLicensor)},
+			wantMissing: "B",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := requireRegimeTransitionConsent(tc.storedDeclared, tc.incomingDecl, tc.storedOwners, playlist.RoleCurator, tc.sigs)
+			if tc.wantMissing == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrOwnerConsentRequired) || !strings.HasSuffix(err.Error(), tc.wantMissing) {
+				t.Fatalf("got %v, want ErrOwnerConsentRequired naming %q", err, tc.wantMissing)
+			}
+		})
+	}
+}
