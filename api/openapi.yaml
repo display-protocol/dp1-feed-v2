@@ -12,10 +12,22 @@ info:
     - Playlist item indexing and querying
 
     Authentication: signatures only — there is no API key. Every mutating request is authorized by the
-    cryptographic signatures it carries. POST (create) is open: the body must be validly self-signed by a
-    key it declares in `curators`/`publisher`. PUT (replace) and DELETE are owner-bound: the request must
-    be signed by a key the *stored* document already names as an owner, and the owner set is immutable on
-    replace. The feed always adds its own `feed` signature. There is no PATCH.
+    cryptographic signatures it carries. A document's **owner set** is its declared `curators[].key`
+    (playlists) or `publisher.key` (channels) when present; otherwise it is the kids of the signatures
+    carrying the **owner role** — `curator` for playlists and playlist-groups, `publisher` for channels.
+    Groups have no key field (their `curator` is a display name), so their owners are always their
+    `curator`-role signers. An authorizing signature must be from an owner key **and** carry the owner
+    role: a key listed in `curators` that signs only as `licensor`, `institution` or `agent` is not acting
+    as the author. POST (create) is open to any document so signed. PUT (replace) and DELETE are
+    owner-bound: the request must be signed, in the owner role, by a key in the *stored* document's owner
+    set. On replace the owner set may grow but never shrink, and every key being added must itself sign
+    the document in the owner role. The feed always adds its own `feed` signature. There is no PATCH.
+
+    Limit to know: `role` is not covered by the signature (it lives in the signature entry, outside the
+    signed bytes). For a document that declares no owners, a relayer could strip or relabel entries
+    before a feed first sees it and thereby reshuffle authority among the actual co-signers — never grant
+    it to a key that did not sign. Declaring `curators`/`publisher` makes the owner set part of the signed
+    content and closes that gap.
 
     Because an owner's signatures live inside the document and are public via GET, a previously published
     document could otherwise be replayed. PUT and DELETE therefore also carry a **signed mutation-intent**
@@ -178,7 +190,8 @@ paths:
       summary: Create playlist
       description: >-
         Creates a new DP-1 playlist. Open to any client: the body must carry a non-empty `signatures`
-        array with a valid curator signature over the document. The feed adds its `feed` signature.
+        array with a valid `curator`-role signature from an owner key (a declared `curators[].key`, or
+        any key when `curators` is absent). The feed adds its `feed` signature.
       requestBody:
         required: true
         content:
@@ -237,11 +250,13 @@ paths:
       summary: Replace playlist
       description: >-
         Fully replaces a playlist. The body is a `PlaylistReplaceRequest`: the full re-signed `document`
-        plus an `authorization` intent bound to that document's `payloadHash`. Owner-bound and immutable:
-        the document must be signed by a key the stored playlist lists in `curators`, the `curators` set
-        may not change, and the identity (`id`, `slug`, `created`) must equal the stored resource's. The
-        intent must also be signed by a stored owner and be fresh. 403 if the signer is not an owner or the
-        owner set changed; 409 if the resource changed since it was authorized.
+        plus an `authorization` intent bound to that document's `payloadHash`. Owner-bound: the document
+        must carry a `curator`-role signature from a stored owner, and the identity (`id`, `slug`,
+        `created`) must equal the stored resource's. The owner set may grow (each added curator must sign
+        the document as `curator`) but no stored owner may be dropped. The intent must also be signed, as
+        `curator`, by a stored owner and be fresh. 403 if the signer is not an owner acting as curator, an
+        owner was removed, or an added owner did not consent; 409 if the resource changed since it was
+        authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -275,7 +290,7 @@ paths:
       summary: Delete playlist
       description: >-
         Deletes a playlist. The request body is a signed delete-intent (`PlaylistDeleteRequest`) that must
-        target this playlist and be signed by one of its curators within the freshness window.
+        target this playlist and be signed, as `curator`, by one of its owners within the freshness window.
 
         References from groups or channels do **not** block this: creation is open, so any third party
         could otherwise veto an owner's deletion indefinitely. Their membership links are removed with the
@@ -335,7 +350,8 @@ paths:
       summary: Create playlist-group
       description: >-
         Creates a new playlist-group with resolved playlist references. Open to any client: the body must
-        carry a non-empty `signatures` array with a valid signature from the declared `curator`.
+        carry a non-empty `signatures` array with at least one valid `curator`-role signature; those
+        signers become the owners (`curator` is a display name, not a key).
       requestBody:
         required: true
         content:
@@ -393,10 +409,12 @@ paths:
       summary: Replace playlist-group
       description: >-
         Fully replaces a playlist-group. The body is a `PlaylistGroupReplaceRequest`: the full re-signed
-        `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound and immutable:
-        the document and the intent must both be signed by the stored `curator`, which may not change, and
-        the identity must equal the stored resource's. 403 if the signer is not the owner or the owner
-        changed; 409 if the resource changed since it was authorized.
+        `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound: the document and
+        the intent must both carry a `curator`-role signature from a stored owner (one of the stored
+        document's `curator`-role signers), and the identity must equal the stored resource's. Every stored
+        owner must still sign as `curator`; further `curator` signers may be added. The `curator` display
+        name may change. 403 if the signer is not an owner or a stored owner is dropped; 409 if the resource
+        changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -430,8 +448,8 @@ paths:
       summary: Delete playlist-group
       description: >-
         Deletes a playlist-group (cascades membership). The request body is a signed delete-intent
-        (`PlaylistGroupDeleteRequest`) that must target this group and be signed by its `curator` within the
-        freshness window.
+        (`PlaylistGroupDeleteRequest`) that must target this group and be signed, as `curator`, by one of
+        its owners within the freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -487,8 +505,9 @@ paths:
       summary: Create channel
       description: >-
         Creates a new channel with resolved playlist references (requires extensions). Open to any client:
-        the body must carry a non-empty `signatures` array with a valid signature from the declared
-        `publisher`.
+        the body must carry a non-empty `signatures` array with a valid `publisher`-role signature from an
+        owner key (the declared `publisher.key`, or any key when `publisher` is absent). Channel
+        `curators` are attribution only and never authorize.
       requestBody:
         required: true
         content:
@@ -547,10 +566,12 @@ paths:
       summary: Replace channel
       description: >-
         Fully replaces a channel (requires extensions). The body is a `ChannelReplaceRequest`: the full
-        re-signed `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound and
-        immutable: the document and the intent must both be signed by the stored `publisher`, which may not
-        change, and the identity must equal the stored resource's (`curators` may change). 403 if the signer
-        is not the publisher or the publisher changed; 409 if the resource changed since it was authorized.
+        re-signed `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound: the
+        document and the intent must both carry a `publisher`-role signature from a stored owner, and the
+        identity must equal the stored resource's. A declared `publisher` is a single owner and so cannot
+        change; with none declared the `publisher`-role signers may grow but not shrink. `curators` may
+        change freely. 403 if the signer is not the publisher or an owner would be removed; 409 if the
+        resource changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -584,8 +605,8 @@ paths:
       summary: Delete channel
       description: >-
         Deletes a channel (cascades membership, requires extensions). The request body is a signed
-        delete-intent (`ChannelDeleteRequest`) that must target this channel and be signed by its
-        `publisher` within the freshness window.
+        delete-intent (`ChannelDeleteRequest`) that must target this channel and be signed, as
+        `publisher`, by one of its owners within the freshness window.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -760,10 +781,11 @@ components:
       additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a playlist. Authorization is signature-only: `id`,
-        `created`, `slug`, `curators`, and a matching `signatures` entry are all required, and the feed
-        stores them verbatim (it does not derive a slug or mint item ids after signing). On PUT the
-        identity (`id`, `slug`, document `created`) and the `curators` owner set are immutable and must
-        equal the stored document.
+        `created`, `slug`, and a `curator`-role owner signature in `signatures` are required, and the feed
+        stores the document verbatim (it does not derive a slug or mint item ids after signing). `curators`
+        is optional, as in the DP-1 playlists extension; when present it fixes the owner set inside the
+        signed content. On PUT the identity (`id`, `slug`, document `created`) is immutable and the owner
+        set may only grow.
       required:
         - dpVersion
         - id
@@ -771,7 +793,6 @@ components:
         - slug
         - title
         - items
-        - curators
         - signatures
       properties:
         dpVersion:
@@ -796,7 +817,10 @@ components:
             $ref: '#/components/schemas/PlaylistItemInput'
         curators:
           type: array
-          description: Declared owners; a signature whose kid matches a curator key authorizes the write.
+          description: >-
+            Declared owners. When present, the owner set is exactly these keys and a write is authorized by
+            a `curator`-role signature from one of them. When absent, the owners are the `curator`-role
+            signers. On PUT a key may be added here only if it also signs the document as `curator`.
           items:
             $ref: '#/components/schemas/Entity'
         summary:
@@ -829,8 +853,9 @@ components:
           type: array
           minItems: 1
           description: >-
-            Curator signatures over the document (JCS, signatures stripped). At least one kid must match a
-            `curators` key. The feed always appends its own `feed` signature after verification.
+            Signatures over the document (JCS, signatures stripped). At least one must carry role `curator`
+            and a kid in the owner set (a `curators` key when declared). Other roles are verified and kept
+            but grant nothing. The feed always appends its own `feed` signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -971,15 +996,15 @@ components:
       additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a playlist-group. Signature-only: `id`, `created`, `slug`,
-        `curator`, and a matching `signatures` entry are required and stored verbatim. On PUT the identity
-        (`id`, `slug`, document `created`) and the `curator` owner are immutable.
+        and a `curator`-role signature in `signatures` are required and stored verbatim. The owners are the
+        `curator`-role signers; `curator` is a display name (DP-1 core) and takes no part in authorization.
+        On PUT the identity (`id`, `slug`, document `created`) is immutable and the owner set may only grow.
       required:
         - id
         - created
         - slug
         - title
         - playlists
-        - curator
         - signatures
       properties:
         id:
@@ -1009,7 +1034,7 @@ components:
             maxLength: 2048
         curator:
           type: string
-          description: did:key of the owner; a signature whose kid matches it authorizes the write.
+          description: Name of the curator who created this exhibition (DP-1 core). Attribution only.
         summary:
           type: string
         coverImage:
@@ -1026,8 +1051,9 @@ components:
           type: array
           minItems: 1
           description: >-
-            Curator signatures over the document. At least one kid must equal `curator`. The feed appends
-            its own `feed` signature after verification.
+            Signatures over the document. At least one must carry role `curator`; its signer (and any other
+            `curator`-role signer) owns the group. The feed appends its own `feed` signature after
+            verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1061,9 +1087,10 @@ components:
       additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a channel (requires extensions). Signature-only: `id`,
-        `created`, `slug`, `publisher`, and a matching `signatures` entry are required and stored verbatim.
-        On PUT the identity (`id`, `slug`, document `created`) and the `publisher` owner are immutable;
-        `curators` may change.
+        `created`, `slug`, and a `publisher`-role owner signature in `signatures` are required and stored
+        verbatim. `publisher` is optional, as in the channels extension; when present it is the single
+        owner. On PUT the identity (`id`, `slug`, document `created`) is immutable, a declared `publisher`
+        cannot change, and `curators` may change.
       required:
         - id
         - created
@@ -1071,7 +1098,6 @@ components:
         - title
         - version
         - playlists
-        - publisher
         - signatures
       properties:
         id:
@@ -1112,7 +1138,9 @@ components:
         publisher:
           allOf:
             - $ref: '#/components/schemas/Entity'
-          description: The channel owner; a signature whose kid matches its key authorizes the write.
+          description: >-
+            The channel owner when declared: a `publisher`-role signature whose kid matches its key
+            authorizes the write. When absent, the `publisher`-role signers are the owners.
         summary:
           type: string
         coverImage:
@@ -1129,8 +1157,9 @@ components:
           type: array
           minItems: 1
           description: >-
-            Publisher signatures over the document. At least one kid must equal the publisher key. The feed
-            appends its own `feed` signature after verification.
+            Signatures over the document. At least one must carry role `publisher` and a kid in the owner
+            set (the `publisher` key when declared). `curator` and other roles are verified and kept but
+            grant nothing. The feed appends its own `feed` signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1244,8 +1273,8 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        Authorizes replacing this playlist. Must be signed by a key the stored resource already names as an
-        owner, and `created` must be within `auth.intent_max_clock_skew`.
+        Authorizes replacing this playlist. Must be signed, in the owner role, by a key in the stored resource's
+        owner set, and `created` must be within `auth.intent_max_clock_skew`.
       required: [action, target, payloadHash, created, signatures]
       properties:
         action:
@@ -1267,7 +1296,7 @@ components:
         signatures:
           type: array
           minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed).
+          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1289,7 +1318,7 @@ components:
       additionalProperties: false
       description: >-
         DELETE body for a playlist: a signed intent with no `payloadHash`, since a delete carries no
-        document. Must be signed by a stored owner and be fresh.
+        document. Must be signed by a stored owner in the owner role and be fresh.
       required: [action, target, created, signatures]
       properties:
         action:
@@ -1305,7 +1334,7 @@ components:
         signatures:
           type: array
           minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed).
+          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1328,8 +1357,8 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        Authorizes replacing this playlist-group. Must be signed by a key the stored resource already names as an
-        owner, and `created` must be within `auth.intent_max_clock_skew`.
+        Authorizes replacing this playlist-group. Must be signed, in the owner role, by a key in the stored resource's
+        owner set, and `created` must be within `auth.intent_max_clock_skew`.
       required: [action, target, payloadHash, created, signatures]
       properties:
         action:
@@ -1351,7 +1380,7 @@ components:
         signatures:
           type: array
           minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed).
+          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1373,7 +1402,7 @@ components:
       additionalProperties: false
       description: >-
         DELETE body for a playlist-group: a signed intent with no `payloadHash`, since a delete carries no
-        document. Must be signed by a stored owner and be fresh.
+        document. Must be signed by a stored owner in the owner role and be fresh.
       required: [action, target, created, signatures]
       properties:
         action:
@@ -1389,7 +1418,7 @@ components:
         signatures:
           type: array
           minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed).
+          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1412,8 +1441,8 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        Authorizes replacing this channel. Must be signed by a key the stored resource already names as an
-        owner, and `created` must be within `auth.intent_max_clock_skew`.
+        Authorizes replacing this channel. Must be signed, in the owner role, by a key in the stored resource's
+        owner set, and `created` must be within `auth.intent_max_clock_skew`.
       required: [action, target, payloadHash, created, signatures]
       properties:
         action:
@@ -1435,7 +1464,7 @@ components:
         signatures:
           type: array
           minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed).
+          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1457,7 +1486,7 @@ components:
       additionalProperties: false
       description: >-
         DELETE body for a channel: a signed intent with no `payloadHash`, since a delete carries no
-        document. Must be signed by a stored owner and be fresh.
+        document. Must be signed by a stored owner in the owner role and be fresh.
       required: [action, target, created, signatures]
       properties:
         action:
@@ -1473,7 +1502,7 @@ components:
         signatures:
           type: array
           minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed).
+          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
           items:
             $ref: '#/components/schemas/Signature'
 

@@ -24,8 +24,9 @@ type PlaylistCreateRequest struct {
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
 
-	// Identity and authorization: the client supplies id, created and the curator signatures over the
-	// document. All three are part of the signed payload and are required (there is no API key).
+	// Identity and authorization: the client supplies id, created and the signatures over the document,
+	// at least one of which must be a curator-role signature from an owner (a Curators key when declared,
+	// else any key). All three are part of the signed payload and are required (there is no API key).
 	ID         *string              `json:"id,omitempty"`
 	Created    *string              `json:"created,omitempty"`
 	Signatures []playlist.Signature `json:"signatures,omitempty"`

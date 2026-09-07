@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/playlistgroup"
@@ -152,8 +153,24 @@ func signedPlaylistBody(t *testing.T, priv ed25519.PrivateKey, doc playlist.Play
 	return body
 }
 
-// signedDeleteBody builds a delete-intent signed by priv (a key the stored resource names as owner).
+// ownerRoleFor maps an intent target type to the role its owners sign with. The feed requires an
+// intent to be signed in that role by a stored owner, so every intent helper picks it from the target.
+func ownerRoleFor(targetType string) string {
+	if targetType == "channel" {
+		return channels.RolePublisher
+	}
+	return playlist.RoleCurator
+}
+
+// signedDeleteBody builds a delete-intent signed by priv (a stored owner key) in the target's owner role.
 func signedDeleteBody(t *testing.T, priv ed25519.PrivateKey, targetType, id, slug string) map[string]any {
+	t.Helper()
+	return signedDeleteBodyAs(t, priv, ownerRoleFor(targetType), targetType, id, slug)
+}
+
+// signedDeleteBodyAs is signedDeleteBody with an explicit signature role, for tests that pin what a
+// wrongly-labeled owner signature is refused with.
+func signedDeleteBodyAs(t *testing.T, priv ed25519.PrivateKey, role, targetType, id, slug string) map[string]any {
 	t.Helper()
 	created := time.Now().UTC().Format(time.RFC3339)
 	intent := map[string]any{
@@ -165,7 +182,7 @@ func signedDeleteBody(t *testing.T, priv ed25519.PrivateKey, targetType, id, slu
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, created)
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, role, created)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +310,7 @@ func signedReplaceEnvelope(t *testing.T, priv ed25519.PrivateKey, targetType, id
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, created)
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, ownerRoleFor(targetType), created)
 	if err != nil {
 		t.Fatal(err)
 	}

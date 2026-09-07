@@ -69,28 +69,73 @@ signatures it carries; the middleware (`RequireSignatures`) rejects any POST/PUT
 `feed` signature after verification (JCS canonicalization, SHA-256 payload hash, Ed25519). Each signature
 carries `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see the `Signature` schema in OpenAPI).
 
+**Who owns a document.** DP-1 core has no signed owner field, only a signature chain whose entries carry
+a `role`; the extensions add optional entity fields whose `key`s are identity claims. The feed derives
+one **owner set** per document with a single rule, applied to every resource kind:
+
+- **Declared owners win.** When the signed document declares owners — `curators[].key` on a playlist,
+  `publisher.key` on a channel — those keys are the owner set. They sit inside the signed bytes, so no
+  relayer can change who owns the document without breaking every signature.
+- **Otherwise the signature chain defines them.** The owner set is the kids of the signatures carrying the
+  **owner role**: `curator` for playlists and playlist-groups, `publisher` for channels. This is what lets
+  core-only documents through, as the spec allows. A playlist-group's `curator` is a display name in the
+  core schema, not a key, so groups are always in this case.
+
+An **authorizing signature** must be *declared* (kid in the owner set), *proven* (verifies
+cryptographically) **and** *acting as owner* (`role` equals the owner role). The role check is what stops
+a licensor, institution or agent key that happens to be listed in `curators` from being treated as the
+author: DP-1 assigns authorship to the `curator` role signature, not to any signature. `agent` never owns
+implicitly — an agent signs on behalf of a principal, and its key is usually a shared service key; to give
+one authority, list it in `curators` and have it sign as `curator`. Signatures in other roles are verified
+and stored but grant nothing.
+
+**Accepted limit.** `role` is **not** covered by the signature (`sig` is over the JCS document with
+`signatures` stripped), so for a document that declares no owners a relayer can strip or relabel entries
+before this feed first sees it and thereby reshuffle authority among the actual co-signers. Nobody who
+did not sign the content can gain ownership that way, and a document that declares `curators`/`publisher`
+is immune. This cannot be closed without a spec change to what the signature covers; authors who care
+should declare their owners.
+
 Three postures, by verb:
 
 1. **POST (create) — open.** Any client may create. The body must include `id` (UUID), `created`
-   (RFC3339, not in the future), `slug`, and a non-empty `signatures` array with a signature whose `kid`
-   matches a curator `key` (playlists/groups) or the publisher `key` (channels) declared in the document.
-   These are all part of the signed document and are stored **verbatim** — the feed does not derive a slug
-   or mint item ids after signing, so every playlist item must already carry a UUID `id` (missing slug or
-   item id → **`400` `bad_request`**). The signer becomes the resource's **owner**.
+   (RFC3339, not in the future), `slug`, and a non-empty `signatures` array with an authorizing signature
+   as defined above (**`400` `signature_verification_failed`** otherwise; when an owner key did sign but
+   under another role, the message names the role required). `curators` (playlists) and `publisher`
+   (channels) are optional, as in the extensions. These are all part of the signed document and are stored
+   **verbatim** — the feed does not derive a slug or mint item ids after signing, so every playlist item
+   must already carry a UUID `id` (missing slug or item id → **`400` `bad_request`**). The owner set at
+   creation is the resource's **owners**.
 
-2. **PUT (replace) — owner-bound, owner-immutable, replay-bound.** The body is a route-specific replace envelope
+2. **PUT (replace) — owner-bound, owner-monotone, replay-bound.** The body is a route-specific replace envelope
    (**`PlaylistReplaceRequest`**, **`PlaylistGroupReplaceRequest`**, **`ChannelReplaceRequest`**): `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
    are verified independently — one without the other authorizes nothing.
    - **Document:** **identity is immutable and validated, not substituted** — the submitted `id`, `slug`,
      and document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as
-     an instant, since formatting may differ). The **owner set is immutable**: `curators` (playlists),
-     `curator` (groups), and `publisher` (channels) must equal the stored document's, else **`403`
-     `forbidden`** (channel `curators` may change). All signatures must cryptographically verify
-     (**`400`**) and at least one signer's `kid` must be an owner of the **stored** document (**`403`**).
+     an instant, since formatting may differ). The **owner set may grow but never shrink**: every stored
+     owner must still be in the incoming owner set (**`403` `forbidden`** otherwise — removal would let one
+     co-owner evict another), and **every key entering the owner set must sign the incoming document in the
+     owner role** (**`403`** otherwise — that proves key possession and consent, so an owner cannot attribute
+     the document to an arbitrary public key). A declared channel `publisher` is a single owner and so
+     cannot change; channel `curators` are attribution and may change freely; a group's `curator` name may
+     change. All signatures must cryptographically verify (**`400`**) and at least one must be an
+     authorizing signature from a **stored** owner (**`403`**). Membership is permanent once granted, and
+     a deleted id cannot be re-created, so key rotation is "add the new key" only; self-removal via the
+     intent is the natural extension and is not built.
+   - **Co-owners of an undeclared document re-sign unanimously.** When the owner set comes from the
+     signature chain (always for groups; playlists/channels without `curators`/`publisher`), the incoming
+     owner set *is* the new document's owner-role signers, so every stored co-owner must sign every `PUT`
+     or the absent one counts as removed (**`403`**). Declare `curators`/`publisher` if any one owner
+     should be able to edit alone.
+   - **Consent is a replace-time rule only (interim assumption).** A `POST` declaring `curators` `[A, B]`
+     signed by A alone is accepted and B owns without having signed; the same document as a `PUT` adding B
+     is refused. Create is open and trusts the document's own claims; replace is the feed guarding a change
+     to an authorization state it already enforces, and additions are permanent. Requiring every declared
+     owner to sign at creation would make multi-curator publishing an N-of-N ceremony, so it is not done.
    - **Authorization intent:** `action` must be `"replace"`, `target` must name this resource,
      `payloadHash` must equal the DP-1 signing digest of the submitted `document` (binding the intent to
      that exact content), `created` must fall within `auth.intent_max_clock_skew`, and the intent's own
-     signatures must verify and include a **stored owner** (**`403`** otherwise).
+     signatures must verify and include a **stored owner signing in the owner role** (**`403`** otherwise).
    - The write is persisted by stored UUID, conditional on the generation observed at authorization
      (**`409`** if the resource changed in between). The feed then co-signs and stores the document with
      no field added, dropped or rewritten (see the note on content vs. bytes below).
@@ -108,7 +153,8 @@ Three postures, by verb:
    exact stored resource (`id` and `slug`), its `created` must fall within the server's freshness window
    (`auth.intent_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
    must verify over the intent bytes (JCS, `signatures` stripped), and at least one signer must be an owner
-   of the stored resource. DP-1 defines no delete document; this envelope is feed-local. The delete is
+   of the stored resource signing in the owner role. DP-1 defines no delete document; this envelope is
+   feed-local. The delete is
    conditional on the generation observed at authorization (**`409`** if the resource changed in between),
    and it **tombstones the id** in the same transaction.
    - **A third party cannot block it.** Creation is open, so anyone may publish a group or channel
@@ -142,8 +188,8 @@ different playlist is picked up normally, and each successful resolution refresh
 dropped when the playlist is deleted, so a retired id cannot be relinked. Reference URIs are capped at
 2048 bytes (**`400`** beyond that). A
 referenced id that is *new* to this feed is being created, so it is held to the same bar as
-`POST`: the fetched document must be validly self-signed by a curator it declares, and must not name a
-tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
+`POST`: the fetched document must carry a verifying `curator`-role signature from one of its owners, and
+must not name a tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
 re-ingesting a group does not refresh member bodies. (Without this, any client able to create a channel
 could host a document reusing another owner's playlist id and overwrite it; verifying signatures alone
 would not help, since an attacker self-signs the spoof with their own key.) Cross-feed propagation is the
@@ -203,7 +249,7 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 `payload_too_large`, enforced before the body is buffered for authentication.
 
 - **Reads** are unauthenticated by default (health, lists, gets). Deployment may still restrict network access.
-- **No global allowlist.** "Owner" is derived from the document's own declared curators/publisher, not a configured key list: anyone can create (and thereby own) new resources, but only the declared owner can replace or delete one. Front with a gateway if you need to restrict who may create.
+- **No global allowlist.** "Owner" is derived from the document itself (its declared curators/publisher, else its owner-role signers), not a configured key list: anyone can create (and thereby own) new resources, but only an owner can replace or delete one. Front with a gateway if you need to restrict who may create.
 - **Per-user or OAuth** is out of scope for this service; front with a gateway if needed.
 
 ---
@@ -230,9 +276,9 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 
 ## Methods and semantics
 
-- **POST** — create (open); body must be validly self-signed by its declared curator/publisher.
+- **POST** — create (open); body must carry an owner-role signature from one of its owners (see Authentication).
 - **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound and owner-immutable (see Authentication).
+- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound, owners may be added but not removed (see Authentication).
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
 - **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 
@@ -262,12 +308,12 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `bad_request` | A group or channel referencing no playlists at all (`ErrNoPlaylistReferences`); the schemas declare `minItems: 1`. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
-| **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures (`IsSignatureVerificationError`). |
+| **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures, or a create carries no owner-role signature from an owner (`IsSignatureVerificationError`). |
 | **400** | `invalid_timestamp` | `created` is in the future, or a mutation-intent `created` — replace or delete — is outside the freshness window (`IsInvalidTimestampError`). |
 | **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
 | **400** | `bad_request` | Malformed delete-intent, or its `action`/`target` disagree with the stored resource (`IsDeleteRequestError`). |
 | **401** | `unauthorized` | Missing authentication — a mutating request whose body carries no signatures (`IsSignaturesRequiredError`; also enforced by `RequireSignatures`). |
-| **403** | `forbidden` | Signature is valid but the signer is not an owner of the resource, or a PUT tried to change the immutable owner set (`IsForbiddenError`). |
+| **403** | `forbidden` | Signature is valid but the signer is not an owner acting in the owner role, a PUT tried to remove a stored owner, or it added an owner whose key did not sign the document in the owner role (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `not_found` | The target was **deleted** between authorization and the write. Deliberately not a `409`: the id is tombstoned, so "re-read and retry" could never succeed, whereas `404` is both accurate and terminal. A resource deleted *and re-created* in that window is a `409` instead, because the row exists and a retry can succeed. |
 | **404** | `not_found` | No such endpoint: an unrecognised path, or a method this API does not serve on that path (for example `PATCH`, which was removed). Unmatched requests answer in the same `{error, message}` envelope as everything else rather than the framework's plain-text default, so a client parsing errors uniformly does not hit a different shape at the one place it least expects. |

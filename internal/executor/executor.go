@@ -42,14 +42,16 @@ import (
 //
 // Authorization model (there is no API key): every mutating method is authorized by cryptographic
 // signatures, never a shared secret.
-//   - Create is open: any client may submit a document validly self-signed by its own declared
-//     curator/publisher. The signer becomes the resource's owner.
-//   - Replace and Delete are owner-bound: the request must carry a verifying signature whose kid is an
-//     owner (curator/publisher) of the *stored* resource, and the owner set is immutable — a Replace
-//     may not change curators/publisher. Any edit re-derives the document bytes, so the owner re-signs
-//     and the feed co-signs.
+//   - Create is open: any client may submit a document validly signed by its owner — a signature whose
+//     kid is in the document's owner set AND whose role is the owner role (`curator` for playlists and
+//     groups, `publisher` for channels). The owner set is the declared `curators[]`/`publisher` keys
+//     when present, else the kids of the owner-role signatures (see ownership.go).
+//   - Replace and Delete are owner-bound: the request must carry a verifying owner-role signature from a
+//     key in the *stored* resource's owner set. A Replace may add owners (each new key must itself sign
+//     in the owner role) but never remove one. Any edit re-derives the document bytes, so the owner
+//     re-signs and the feed co-signs.
 //
-// See internal/executor/signed_auth.go for the shared owner checks and the signed delete-intent.
+// See internal/executor/ownership.go for the owner-set rules and signed_auth.go for the mutation intent.
 type Executor interface {
 	// CreatePlaylist verifies the client's curator signatures, feed co-signs, validates, and stores a new playlist.
 	CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*store.PlaylistRecord, error)
@@ -234,17 +236,20 @@ var (
 	ErrInvalidID = errors.New("invalid id: must be a valid UUID")
 	// ErrSignatureVerificationFailed is returned when signature cryptographic verification fails.
 	ErrSignatureVerificationFailed = errors.New("signature verification failed")
-	// ErrNoValidCuratorSignature is returned when playlist/group has no signature matching curators[].
+	// ErrNoValidCuratorSignature is returned when a playlist or group submission carries no `curator`-role
+	// signature from one of its owners (declared curators[] keys, or — with none declared — any key).
 	ErrNoValidCuratorSignature = errors.New("no valid curator signature found")
-	// ErrNoValidPublisherSignature is returned when channel has no signature matching publisher.
+	// ErrNoValidPublisherSignature is returned when a channel submission carries no `publisher`-role
+	// signature from its owner (the declared publisher key, or — with none declared — any key).
 	ErrNoValidPublisherSignature = errors.New("no valid publisher signature found")
 )
 
-// CreatePlaylist verifies the client's curator signatures over the received bytes, appends the feed
-// signature to those same bytes, validates, and stores them verbatim.
+// CreatePlaylist verifies the client's signatures over the received bytes, appends the feed signature to
+// those same bytes, validates, and stores them verbatim.
 //
-// Create is open: any client may create a document validly self-signed by a key it declares in
-// curators[]. id, created, slug and signatures[] are required and are stored exactly as submitted.
+// Create is open: any client may create a document validly signed by its owner (a `curator`-role
+// signature from a declared curators[] key, or from any key when the document declares none). id,
+// created, slug and signatures[] are required and are stored exactly as submitted.
 func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*store.PlaylistRecord, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
@@ -256,7 +261,7 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 	if err := requireItemIDs(req.Items); err != nil {
 		return nil, err
 	}
-	if err := e.verifyPlaylistCuratorSignatures(req.Raw, req.Signatures, req.Curators); err != nil {
+	if err := e.verifyPlaylistOwnerSignatures(req.Raw, req.Signatures, req.Curators); err != nil {
 		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
 
@@ -337,7 +342,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 		return nil, err
 	}
 
-	// 1) Get the existing playlist row and its owner (curator) key set.
+	// 1) Get the existing playlist row and its owner set; the incoming owner set may only grow (403).
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
@@ -349,13 +354,15 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err := si.mustMatchStored(rec.ID, rec.Slug, rec.Body.Created); err != nil {
 		return nil, err
 	}
-	ownerKeys := entityKeySet(rec.Body.Curators)
-	if err := requireImmutableEntityOwner(ownerKeys, entityKeySet(req.Curators)); err != nil {
+	stored := ownerSet(entityKeySet(rec.Body.Curators), playlist.RoleCurator, rec.Body.Signatures)
+	incoming := ownerSet(entityKeySet(req.Curators), playlist.RoleCurator, req.Signatures)
+	if err := requireOwnersRetained(stored, incoming); err != nil {
 		return nil, err
 	}
 
-	// 2) Authorize over the SUBMITTED bytes: every signature must cryptographically verify (400), and at
-	// least one must come from a stored owner key (403).
+	// 2) Authorize over the SUBMITTED bytes: every signature must cryptographically verify (400); each
+	// newly added owner must have signed as curator (403); and at least one signature must come from a
+	// stored owner acting as curator (403).
 	ok, failed, err := e.dp1.VerifyPlaylistSignatures(req.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
@@ -363,13 +370,16 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if !ok {
 		return nil, signatureFailure(failed)
 	}
-	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
+	if err := requireNewOwnerConsent(stored, incoming, playlist.RoleCurator, req.Signatures); err != nil {
+		return nil, err
+	}
+	if err := requireOwnerSignature(stored, playlist.RoleCurator, req.Signatures, ErrNotResourceOwner); err != nil {
 		return nil, err
 	}
 	// The document proves the owner authored this content; the intent proves the owner is asking for it to
 	// replace THIS resource NOW. Without it the document's own (public) signatures would authorize replaying
 	// an older version to roll the resource back.
-	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetPlaylist, rec.ID, rec.Slug, ownerKeys, req.Raw); err != nil {
+	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetPlaylist, rec.ID, rec.Slug, stored, playlist.RoleCurator, req.Raw); err != nil {
 		return nil, err
 	}
 
@@ -389,15 +399,16 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
 }
 
-// DeletePlaylist authorizes a signed delete-intent against the stored playlist's curator (owner) keys,
-// then removes the playlist row. The intent must name this exact resource and carry a fresh, verifying
-// owner signature (see verifyIntent).
+// DeletePlaylist authorizes a signed delete-intent against the stored playlist's owner set, then removes
+// the playlist row. The intent must name this exact resource and carry a fresh, verifying owner
+// signature (see verifyIntent).
 func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	rec, err := e.store.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
 		return err
 	}
-	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylist, rec.ID, rec.Slug, entityKeySet(rec.Body.Curators), nil); err != nil {
+	owners := ownerSet(entityKeySet(rec.Body.Curators), playlist.RoleCurator, rec.Body.Signatures)
+	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylist, rec.ID, rec.Slug, owners, playlist.RoleCurator, nil); err != nil {
 		return err
 	}
 	// Delete by stable UUID, not the caller-supplied slug, and conditional on the updated_at this
@@ -442,6 +453,9 @@ func (e *impl) GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*playlist
 // CreatePlaylistGroup verifies the client's curator signature over the received bytes, resolves playlist
 // URIs (parallel fetch or local GET), feed co-signs the same bytes, validates, and commits upserted
 // playlists, the group row, and membership in one transaction.
+//
+// A group's `curator` is a display name in the DP-1 core schema, not a key, so it never takes part in
+// ownership: the owners are the kids of the group's `curator`-role signatures.
 func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGroupCreateRequest) (*store.PlaylistGroupRecord, error) {
 	uris := req.Playlists
 
@@ -454,7 +468,7 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 	if err != nil {
 		return nil, err
 	}
-	if err := e.verifyPlaylistGroupCuratorSignatures(req.Raw, req.Signatures, req.Curator); err != nil {
+	if err := e.verifyOwnerSignatures(e.dp1.VerifyPlaylistGroupSignatures, req.Raw, nil, playlist.RoleCurator, req.Signatures, ErrNoValidCuratorSignature); err != nil {
 		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
 
@@ -515,13 +529,18 @@ func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string,
 }
 
 // ReplacePlaylistGroup replaces a group with the client's signed document, stored verbatim, and
-// re-resolves membership. Owner-bound, identity- and owner-immutable (see ReplacePlaylist).
+// re-resolves membership. Owner-bound and identity-immutable; the owner set may grow but not shrink
+// (see ReplacePlaylist). The `curator` display name may change freely: it is not a key.
+//
+// Because a group's owners are its curator-role signers and nothing else, the incoming owner set IS the
+// new document's curator signers: every stored co-owner must re-sign every replace (N-of-N), or the
+// missing one counts as removed. A single owner is the common case and unaffected.
 func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest, intent *models.SignedIntent) (*store.PlaylistGroupRecord, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
 	}
 
-	// 1. Get the existing playlist-group row and its owner (curator).
+	// 1. Get the existing playlist-group row and its owner set (curator-role signers).
 	rec, err := e.store.GetPlaylistGroup(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
@@ -533,14 +552,16 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err := si.mustMatchStored(rec.ID, rec.Slug, rec.Body.Created); err != nil {
 		return nil, err
 	}
-	if err := requireImmutableStringOwner(rec.Body.Curator, req.Curator); err != nil {
+	stored := ownerSet(nil, playlist.RoleCurator, rec.Body.Signatures)
+	incoming := ownerSet(nil, playlist.RoleCurator, req.Signatures)
+	if err := requireOwnersRetained(stored, incoming); err != nil {
 		return nil, err
 	}
-	ownerKeys := stringOwnerKeySet(rec.Body.Curator)
 	uris := req.Playlists
 
 	// 2. Authorize over the SUBMITTED bytes BEFORE resolving playlist URIs (resolution can fetch remote
-	// URLs): crypto-verify all signatures (400), then require a stored-owner signature (403).
+	// URLs): crypto-verify all signatures (400), then require a stored-owner signature (403). With no
+	// declared owners the incoming set is by construction the curator-role signers, so consent is implicit.
 	ok, failed, err := e.dp1.VerifyPlaylistGroupSignatures(req.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
@@ -548,13 +569,13 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if !ok {
 		return nil, signatureFailure(failed)
 	}
-	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
+	if err := requireOwnerSignature(stored, playlist.RoleCurator, req.Signatures, ErrNotResourceOwner); err != nil {
 		return nil, err
 	}
 	// The document proves the owner authored this content; the intent proves the owner is asking for it to
 	// replace THIS resource NOW. Without it the document's own (public) signatures would authorize replaying
 	// an older version to roll the resource back.
-	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, ownerKeys, req.Raw); err != nil {
+	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, stored, playlist.RoleCurator, req.Raw); err != nil {
 		return nil, err
 	}
 
@@ -581,14 +602,15 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	return &store.PlaylistGroupRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *group}, nil
 }
 
-// DeletePlaylistGroup authorizes a signed delete-intent against the stored group's curator (owner), then
-// removes the playlist-group row (membership CASCADE).
+// DeletePlaylistGroup authorizes a signed delete-intent against the stored group's owner set (its
+// curator-role signers), then removes the playlist-group row (membership CASCADE).
 func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	rec, err := e.store.GetPlaylistGroup(ctx, idOrSlug)
 	if err != nil {
 		return err
 	}
-	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, stringOwnerKeySet(rec.Body.Curator), nil); err != nil {
+	owners := ownerSet(nil, playlist.RoleCurator, rec.Body.Signatures)
+	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, owners, playlist.RoleCurator, nil); err != nil {
 		return err
 	}
 	// Delete by stable UUID and conditional on the authorized updated_at (see DeletePlaylist).
@@ -612,10 +634,7 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 	if err != nil {
 		return nil, err
 	}
-	if err := requirePublisherKey(publisherKey(req.Publisher)); err != nil {
-		return nil, err
-	}
-	if err := e.verifyChannelPublisherSignatures(req.Raw, req.Signatures, req.Publisher); err != nil {
+	if err := e.verifyOwnerSignatures(e.dp1.VerifyChannelSignatures, req.Raw, publisherKeySet(req.Publisher), channels.RolePublisher, req.Signatures, ErrNoValidPublisherSignature); err != nil {
 		return nil, fmt.Errorf("publisher signature verification: %w", err)
 	}
 
@@ -682,8 +701,10 @@ func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort 
 }
 
 // ReplaceChannel replaces a channel with the client's signed document, stored verbatim, and re-resolves
-// membership. Owner-bound, identity- and owner-immutable: the publisher (owner) may not change; channel
-// curators[] may. See ReplacePlaylist.
+// membership. Owner-bound and identity-immutable. A declared `publisher` is a single owner, so with one
+// declared the owner set cannot change at all (any other key would remove it); with none declared the
+// publisher-role signers may grow. Channel curators[] are attribution, not owners, and may change freely.
+// See ReplacePlaylist.
 func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled
@@ -692,7 +713,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 		return nil, err
 	}
 
-	// 1. Get the existing channel row and its owner (publisher).
+	// 1. Get the existing channel row and its owner set.
 	rec, err := e.store.GetChannel(ctx, idOrSlug)
 	if err != nil {
 		return nil, err
@@ -704,17 +725,15 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	if err := si.mustMatchStored(rec.ID, rec.Slug, rec.Body.Created); err != nil {
 		return nil, err
 	}
-	if err := requirePublisherKey(publisherKey(req.Publisher)); err != nil {
+	stored := ownerSet(publisherKeySet(rec.Body.Publisher), channels.RolePublisher, rec.Body.Signatures)
+	incoming := ownerSet(publisherKeySet(req.Publisher), channels.RolePublisher, req.Signatures)
+	if err := requireOwnersRetained(stored, incoming); err != nil {
 		return nil, err
 	}
-	if err := requireImmutableStringOwner(publisherKey(rec.Body.Publisher), publisherKey(req.Publisher)); err != nil {
-		return nil, err
-	}
-	ownerKeys := stringOwnerKeySet(publisherKey(rec.Body.Publisher))
 	uris := req.Playlists
 
 	// 2. Authorize over the SUBMITTED bytes BEFORE resolving playlist URIs: crypto-verify all signatures
-	// (400), then require a stored-owner (publisher) signature (403).
+	// (400), require consent from any added owner (403), then a stored-owner publisher signature (403).
 	ok, failed, err := e.dp1.VerifyChannelSignatures(req.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
@@ -722,13 +741,16 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	if !ok {
 		return nil, signatureFailure(failed)
 	}
-	if err := requireStoredOwnerSignature(ownerKeys, req.Signatures); err != nil {
+	if err := requireNewOwnerConsent(stored, incoming, channels.RolePublisher, req.Signatures); err != nil {
+		return nil, err
+	}
+	if err := requireOwnerSignature(stored, channels.RolePublisher, req.Signatures, ErrNotResourceOwner); err != nil {
 		return nil, err
 	}
 	// The document proves the owner authored this content; the intent proves the owner is asking for it to
 	// replace THIS resource NOW. Without it the document's own (public) signatures would authorize replaying
 	// an older version to roll the resource back.
-	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetChannel, rec.ID, rec.Slug, ownerKeys, req.Raw); err != nil {
+	if err := e.verifyIntent(intent, models.IntentActionReplace, models.IntentTargetChannel, rec.ID, rec.Slug, stored, channels.RolePublisher, req.Raw); err != nil {
 		return nil, err
 	}
 
@@ -758,8 +780,8 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	return &store.ChannelRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *ch}, nil
 }
 
-// DeleteChannel authorizes a signed delete-intent against the stored channel's publisher (owner), then
-// removes the channel row (membership CASCADE) and notifies clients.
+// DeleteChannel authorizes a signed delete-intent against the stored channel's owner set, then removes
+// the channel row (membership CASCADE) and notifies clients.
 func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error {
 	if !e.extensionsEnabled {
 		return ErrExtensionsDisabled
@@ -768,7 +790,8 @@ func (e *impl) DeleteChannel(ctx context.Context, idOrSlug string, req *models.S
 	if err != nil {
 		return err
 	}
-	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetChannel, rec.ID, rec.Slug, stringOwnerKeySet(publisherKey(rec.Body.Publisher)), nil); err != nil {
+	owners := ownerSet(publisherKeySet(rec.Body.Publisher), channels.RolePublisher, rec.Body.Signatures)
+	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetChannel, rec.ID, rec.Slug, owners, channels.RolePublisher, nil); err != nil {
 		return err
 	}
 	// Delete by stable UUID and conditional on the authorized updated_at (see DeletePlaylist).
@@ -872,102 +895,28 @@ func parseUserProvidedCreated(createdStr *string) (time.Time, error) {
 	return t, nil
 }
 
-// publisherKey returns the channel publisher's key, or "" when there is no publisher. It is the channel
-// owner identity used for replace/delete authorization.
-func publisherKey(publisher *identity.Entity) string {
-	if publisher == nil {
-		return ""
-	}
-	return strings.TrimSpace(publisher.Key)
-}
+// signatureVerifier is the dp1svc verification entry point for one document kind (playlist, group,
+// channel); all three share the DP-1 §7.1 wire shape and return the same (ok, failed, err) triple.
+type signatureVerifier func(raw []byte) (ok bool, failed []playlist.Signature, err error)
 
-// verifyPlaylistCuratorSignatures verifies that at least one signature in sigs matches a curator key.
-// Returns ErrNoValidCuratorSignature if no matching curator signature is found, or ErrSignatureVerificationFailed
-// if signature cryptographic verification fails.
-func (e *impl) verifyPlaylistCuratorSignatures(raw []byte, sigs []playlist.Signature, curators []identity.Entity) error {
-	// First, verify all signatures cryptographically
-	ok, failed, err := e.dp1.VerifyPlaylistSignatures(raw)
+// verifyOwnerSignatures authorizes a create: every signature must cryptographically verify over raw
+// (ErrSignatureVerificationFailed), and at least one must come from the document's owner set acting in
+// ownerRole (missing — ErrNoValidCuratorSignature / ErrNoValidPublisherSignature). declared are the keys
+// the document names as owners, empty when it names none; see ownerSet for how the two combine.
+func (e *impl) verifyOwnerSignatures(verify signatureVerifier, raw []byte, declared keySet, ownerRole string, sigs []playlist.Signature, missing error) error {
+	ok, failed, err := verify(raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
 	}
 	if !ok {
-		// Build detailed error message showing which signatures failed
-		var failedKids []string
-		for _, sig := range failed {
-			failedKids = append(failedKids, sig.Kid)
-		}
-		return fmt.Errorf("%w: failed signatures: %v", ErrSignatureVerificationFailed, failedKids)
+		return signatureFailure(failed)
 	}
-
-	// Extract curator keys from request
-	curatorKeys := make(map[string]bool)
-	for _, curator := range curators {
-		if curator.Key != "" {
-			curatorKeys[curator.Key] = true
-		}
-	}
-
-	// Check if at least one signature matches a curator
-	for _, sig := range sigs {
-		if curatorKeys[sig.Kid] {
-			return nil // Found valid curator signature
-		}
-	}
-
-	return ErrNoValidCuratorSignature
+	return requireOwnerSignature(ownerSet(declared, ownerRole, sigs), ownerRole, sigs, missing)
 }
 
-// verifyPlaylistGroupCuratorSignatures verifies that at least one signature matches the curator field.
-// Playlist groups have a single curator string field, not an array.
-func (e *impl) verifyPlaylistGroupCuratorSignatures(raw []byte, sigs []playlist.Signature, curatorKey string) error {
-	// First, verify all signatures cryptographically
-	ok, failed, err := e.dp1.VerifyPlaylistGroupSignatures(raw)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
-	}
-	if !ok {
-		var failedKids []string
-		for _, sig := range failed {
-			failedKids = append(failedKids, sig.Kid)
-		}
-		return fmt.Errorf("%w: failed signatures: %v", ErrSignatureVerificationFailed, failedKids)
-	}
-
-	// Check if at least one signature matches the curator
-	for _, sig := range sigs {
-		if sig.Kid == curatorKey {
-			return nil // Found valid curator signature
-		}
-	}
-
-	return ErrNoValidCuratorSignature
-}
-
-// verifyChannelPublisherSignatures verifies that at least one signature matches the publisher.
-func (e *impl) verifyChannelPublisherSignatures(raw []byte, sigs []playlist.Signature, publisher *identity.Entity) error {
-	// First, verify all signatures cryptographically
-	ok, failed, err := e.dp1.VerifyChannelSignatures(raw)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)
-	}
-	if !ok {
-		var failedKids []string
-		for _, sig := range failed {
-			failedKids = append(failedKids, sig.Kid)
-		}
-		return fmt.Errorf("%w: failed signatures: %v", ErrSignatureVerificationFailed, failedKids)
-	}
-
-	if publisher == nil || publisher.Key == "" {
-		return fmt.Errorf("document has no publisher")
-	}
-
-	// Check if at least one signature matches the publisher
-	for _, sig := range sigs {
-		if sig.Kid == publisher.Key {
-			return nil // Found valid publisher signature
-		}
-	}
-
-	return ErrNoValidPublisherSignature
+// verifyPlaylistOwnerSignatures is verifyOwnerSignatures for a playlist document: owners are the declared
+// curators[] keys, or the curator-role signers when none are declared. Shared by POST and by remote
+// ingest, which materializes a playlist under the same bar as POST.
+func (e *impl) verifyPlaylistOwnerSignatures(raw []byte, sigs []playlist.Signature, curators []identity.Entity) error {
+	return e.verifyOwnerSignatures(e.dp1.VerifyPlaylistSignatures, raw, entityKeySet(curators), playlist.RoleCurator, sigs, ErrNoValidCuratorSignature)
 }
