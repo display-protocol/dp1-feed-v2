@@ -20,11 +20,21 @@ package executor
 // the author: the spec assigns authorship to the `curator` role signature, not to any signature.
 //
 // Known limit, accepted deliberately: `role` is NOT covered by the signature (sig is over the JCS
-// document with `signatures` stripped), so for a document with no declared owners a relayer can strip
-// or relabel entries before the feed first sees it and thereby reshuffle authority among the actual
-// co-signers. Nobody who did not sign the content can gain ownership that way, and a document that
-// declares its owners is immune. This is documented in docs/api_design.md; it cannot be closed without
-// a spec change to what the signature covers.
+// document with `signatures` stripped), so the role check is a consistency rule, not a cryptographic
+// boundary — a relayer can relabel any signature entry without breaking it. What the signature does
+// bind is the content, including the declared owners. Two consequences follow:
+//   - For a document with no declared owners, a relayer can strip or relabel entries before the feed
+//     first sees it and thereby reshuffle authority among the actual co-signers. Declaring owners fixes
+//     the SET OF KEYS inside the signed bytes, so that particular move is closed.
+//   - For any document, a relayer can relabel an owner key's non-owner-role signature to the owner role,
+//     so a declared owner key that signed only as licensor can be made to authorize (create, replace,
+//     delete, or consent). Declaring owners does not prevent this.
+//
+// Nobody who did not sign the content gains authority either way. What the role rule buys is spec
+// conformance — players MUST verify a `curator`/`publisher`-role signature, which a kid-only feed did not
+// guarantee — and detection of honest mislabeling by client tooling. It does not defend against a
+// relayer and cannot until DP-1 covers `role` in the signed bytes. Documented in docs/api_design.md and
+// pinned by TestIntegration_Ownership_RelabeledRoleIsNotDetected.
 //
 // Ownership of a stored resource may grow on replace but never shrink: adding an owner is monotone
 // (nobody loses authority), removing one is an eviction primitive a co-owner could turn against the
@@ -150,6 +160,19 @@ func requireOwnerSignature(owners keySet, ownerRole string, sigs []playlist.Sign
 		return fmt.Errorf("%w: an owner key signed with a non-owner role (%s); the %q role is required", missing, strings.Join(wrongRole, ", "), ownerRole)
 	}
 	return missing
+}
+
+// requireDeclarationRetained enforces that a document which declares its owners keeps declaring them:
+// once `curators`/`publisher` is present in the stored document, a replacement may not omit it. Dropping
+// the declaration would move the document from the signed-owner regime to the label-derived one (see the
+// package comment), and for a channel it would let a single declared publisher silently become
+// publisher-less and then multi-owner. Which keys the declaration must contain is requireOwnersRetained's
+// job; this only guards the presence of the declaration.
+func requireDeclarationRetained(storedDeclared, incomingDeclared keySet) error {
+	if len(storedDeclared) > 0 && len(incomingDeclared) == 0 {
+		return fmt.Errorf("%w: the stored document declares its owners, so the replacement must declare them too", ErrOwnerRemoved)
+	}
+	return nil
 }
 
 // requireOwnersRetained enforces the no-eviction half of the replace rule: every stored owner must still

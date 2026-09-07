@@ -238,3 +238,32 @@ func TestIntegration_Ownership_ChannelPublisherRole(t *testing.T) {
 	mustErrorContaining(t, raw, "forbidden", "not signed by an owner")
 	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/channels/"+slug, signedDeleteBody(t, publisher.priv, "channel", id.String(), slug), http.StatusNoContent)
 }
+
+// TestIntegration_Ownership_RelabeledRoleIsNotDetected pins the documented limit rather than a
+// guarantee: `role` sits in the signature entry, outside the signed bytes, so a relayer can rewrite a
+// declared curator's `licensor` entry to `curator` and the feed — like every DP-1 verifier — cannot
+// tell. The role check is spec conformance and honest-mistake detection, not a cryptographic boundary;
+// this test exists so that anyone who tightens the claim in the docs has to argue with it first.
+func TestIntegration_Ownership_RelabeledRoleIsNotDetected(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	asLicensor, kid := newSigner(t, playlist.RoleLicensor)
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"0f0f0f0f-1111-4333-8444-555555555555","slug":"relabeled",` +
+		`"title":"relabel","created":"2026-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Rights holder","key":"` + kid + `"}],` +
+		`"items":[{"id":"0f0f0f0f-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]}`)
+	signedAsLicensor := signWithAll(t, unsigned, asLicensor)
+
+	// As signed: refused, the licensor entry does not authorize.
+	doRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signedAsLicensor), http.StatusBadRequest)
+
+	// Relabeled by a relayer, bytes of `sig` untouched: still verifies, and now authorizes.
+	relabeled := strings.Replace(string(signedAsLicensor), `"role":"licensor"`, `"role":"curator"`, 1)
+	if relabeled == string(signedAsLicensor) {
+		t.Fatal("test setup: expected a licensor role entry to relabel")
+	}
+	if ok, _, err := dp1sign.VerifyPlaylistSignatures([]byte(relabeled)); err != nil || !ok {
+		t.Fatalf("relabeled document should still verify (role is unsigned): ok=%v err=%v", ok, err)
+	}
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(relabeled), http.StatusCreated)
+}

@@ -89,12 +89,23 @@ implicitly — an agent signs on behalf of a principal, and its key is usually a
 one authority, list it in `curators` and have it sign as `curator`. Signatures in other roles are verified
 and stored but grant nothing.
 
-**Accepted limit.** `role` is **not** covered by the signature (`sig` is over the JCS document with
-`signatures` stripped), so for a document that declares no owners a relayer can strip or relabel entries
-before this feed first sees it and thereby reshuffle authority among the actual co-signers. Nobody who
-did not sign the content can gain ownership that way, and a document that declares `curators`/`publisher`
-is immune. This cannot be closed without a spec change to what the signature covers; authors who care
-should declare their owners.
+**Accepted limit — the role check is not a cryptographic boundary.** `role` is **not** covered by the
+signature (`sig` is over the JCS document with `signatures` stripped), so a relayer can relabel any
+signature entry without breaking it. What the signature binds is the content, including the declared
+owners. Two consequences:
+
+- For a document that declares no owners, a relayer can strip or relabel entries before this feed first
+  sees it and reshuffle authority among the actual co-signers. Declaring `curators`/`publisher` fixes the
+  *set of keys* inside the signed bytes and closes that move.
+- For any document, a relayer can relabel an owner key's non-owner-role signature to the owner role, so a
+  declared curator that signed only as `licensor` can be made to authorize. Declaring owners does not
+  prevent this.
+
+Nobody who did not sign the content gains authority either way. What the role rule buys is spec
+conformance (players **MUST** verify a `curator`/`publisher`-role signature, which a kid-only feed did not
+guarantee) and detection of honest mislabeling by client tooling. It cannot defend against a relayer until
+DP-1 covers `role` in the signed bytes; the integration test
+`TestIntegration_Ownership_RelabeledRoleIsNotDetected` pins this so the claim cannot silently drift.
 
 Three postures, by verb:
 
@@ -116,9 +127,11 @@ Three postures, by verb:
      owner must still be in the incoming owner set (**`403` `forbidden`** otherwise — removal would let one
      co-owner evict another), and **every key entering the owner set must sign the incoming document in the
      owner role** (**`403`** otherwise — that proves key possession and consent, so an owner cannot attribute
-     the document to an arbitrary public key). A declared channel `publisher` is a single owner and so
-     cannot change; channel `curators` are attribution and may change freely; a group's `curator` name may
-     change. All signatures must cryptographically verify (**`400`**) and at least one must be an
+     the document to an arbitrary public key). **Once declared, always declared:** a document whose stored
+     version declares `curators`/`publisher` may not omit it on `PUT` (**`403`**), so a document cannot
+     slide from the signed-owner regime to the label-derived one. A declared channel `publisher` is
+     therefore a single owner that cannot change; channel `curators` are attribution and may change
+     freely; a group's `curator` name may change. All signatures must cryptographically verify (**`400`**) and at least one must be an
      authorizing signature from a **stored** owner (**`403`**). Membership is permanent once granted, and
      a deleted id cannot be re-created, so key rotation is "add the new key" only; self-removal via the
      intent is the natural extension and is not built.

@@ -4425,22 +4425,25 @@ func TestReplacePlaylist_declaredUndeclaredSwitch(t *testing.T) {
 			verify:   true,
 		},
 		{
-			name:   "declared [A] -> undeclared signed by A: owner set still {A}",
-			stored: func() *store.PlaylistRecord { return storedPlaylistRecord(t, id, "test-playlist") },
-			sigs:   []playlist.Signature{testSig(testCuratorKid)},
-			verify: true,
-		},
-		{
-			name:    "declared [A] -> undeclared signed by B only: A removed",
+			// Once declared, always declared: even with the same owner signing, dropping curators[] would
+			// move the document to the label-derived regime and is refused.
+			name:    "declared [A] -> undeclared signed by A: declaration dropped",
 			stored:  func() *store.PlaylistRecord { return storedPlaylistRecord(t, id, "test-playlist") },
-			sigs:    []playlist.Signature{testSig(other)},
+			sigs:    []playlist.Signature{testSig(testCuratorKid)},
 			wantErr: executor.ErrOwnerRemoved,
 		},
 		{
-			name:   "declared [A] -> undeclared signed by A and B: grows to {A,B} with implicit consent",
-			stored: func() *store.PlaylistRecord { return storedPlaylistRecord(t, id, "test-playlist") },
-			sigs:   []playlist.Signature{testSig(testCuratorKid), testSig(other)},
-			verify: true,
+			name:    "declared [A] -> undeclared signed by A and B: declaration dropped",
+			stored:  func() *store.PlaylistRecord { return storedPlaylistRecord(t, id, "test-playlist") },
+			sigs:    []playlist.Signature{testSig(testCuratorKid), testSig(other)},
+			wantErr: executor.ErrOwnerRemoved,
+		},
+		{
+			name:     "declared [A] -> declared [A,B] signed by A and B: grows with consent",
+			stored:   func() *store.PlaylistRecord { return storedPlaylistRecord(t, id, "test-playlist") },
+			curators: []identity.Entity{{Key: testCuratorKid}, {Key: other}},
+			sigs:     []playlist.Signature{testSig(testCuratorKid), testSig(other)},
+			verify:   true,
 		},
 	}
 	for _, tc := range tests {
@@ -4492,5 +4495,27 @@ func TestDeleteChannel_intentSignedAsCurator(t *testing.T) {
 	req.Raw = mustJSONRaw(req)
 	if err := e.DeleteChannel(context.Background(), "cid", req); !errors.Is(err, executor.ErrNotResourceOwner) {
 		t.Fatalf("want not-owner, got %v", err)
+	}
+}
+
+// A stored channel with a declared publisher cannot be replaced by a document that omits `publisher`,
+// even when the same key signs it as publisher: that would let a single-publisher channel become
+// publisher-less and then grow its owner set through the signature chain.
+func TestReplaceChannel_declaredPublisherCannotBeDropped(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(storedOwnedChannel(id, "cid"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	req := validChannelCreateReq("cid", ref)
+	req.Publisher = nil
+	req.Signatures = []playlist.Signature{publisherSig(testPublisherKid), publisherSig("did:key:secondPublisher")}
+	req.Raw = mustJSONRaw(req)
+	if _, err := e.ReplaceChannel(context.Background(), "cid", req, nil); !errors.Is(err, executor.ErrOwnerRemoved) {
+		t.Fatalf("want owner-removed (declaration dropped), got %v", err)
 	}
 }

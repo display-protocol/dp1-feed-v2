@@ -354,8 +354,12 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err := si.mustMatchStored(rec.ID, rec.Slug, rec.Body.Created); err != nil {
 		return nil, err
 	}
-	stored := ownerSet(entityKeySet(rec.Body.Curators), playlist.RoleCurator, rec.Body.Signatures)
-	incoming := ownerSet(entityKeySet(req.Curators), playlist.RoleCurator, req.Signatures)
+	storedDeclared, incomingDeclared := entityKeySet(rec.Body.Curators), entityKeySet(req.Curators)
+	if err := requireDeclarationRetained(storedDeclared, incomingDeclared); err != nil {
+		return nil, err
+	}
+	stored := ownerSet(storedDeclared, playlist.RoleCurator, rec.Body.Signatures)
+	incoming := ownerSet(incomingDeclared, playlist.RoleCurator, req.Signatures)
 	if err := requireOwnersRetained(stored, incoming); err != nil {
 		return nil, err
 	}
@@ -701,10 +705,10 @@ func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort 
 }
 
 // ReplaceChannel replaces a channel with the client's signed document, stored verbatim, and re-resolves
-// membership. Owner-bound and identity-immutable. A declared `publisher` is a single owner, so with one
-// declared the owner set cannot change at all (any other key would remove it); with none declared the
-// publisher-role signers may grow. Channel curators[] are attribution, not owners, and may change freely.
-// See ReplacePlaylist.
+// membership. Owner-bound and identity-immutable. A declared `publisher` is a single owner and must stay
+// declared, so with one declared the owner set cannot change at all (omitting it or naming another key
+// would remove it); with none declared the publisher-role signers may grow. Channel curators[] are
+// attribution, not owners, and may change freely. See ReplacePlaylist.
 func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error) {
 	if !e.extensionsEnabled {
 		return nil, ErrExtensionsDisabled
@@ -725,8 +729,12 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	if err := si.mustMatchStored(rec.ID, rec.Slug, rec.Body.Created); err != nil {
 		return nil, err
 	}
-	stored := ownerSet(publisherKeySet(rec.Body.Publisher), channels.RolePublisher, rec.Body.Signatures)
-	incoming := ownerSet(publisherKeySet(req.Publisher), channels.RolePublisher, req.Signatures)
+	storedDeclared, incomingDeclared := publisherKeySet(rec.Body.Publisher), publisherKeySet(req.Publisher)
+	if err := requireDeclarationRetained(storedDeclared, incomingDeclared); err != nil {
+		return nil, err
+	}
+	stored := ownerSet(storedDeclared, channels.RolePublisher, rec.Body.Signatures)
+	incoming := ownerSet(incomingDeclared, channels.RolePublisher, req.Signatures)
 	if err := requireOwnersRetained(stored, incoming); err != nil {
 		return nil, err
 	}

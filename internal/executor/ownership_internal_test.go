@@ -271,3 +271,26 @@ func TestIsForbiddenError(t *testing.T) {
 		t.Error("non-ownership errors must not be forbidden")
 	}
 }
+
+func TestRequireDeclarationRetained(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		stored, incoming keySet
+		wantErr          bool
+	}{
+		{name: "both undeclared", stored: keys(), incoming: keys()},
+		{name: "both declared", stored: keys("K1"), incoming: keys("K1", "K2")},
+		{name: "undeclared -> declared is allowed", stored: keys(), incoming: keys("K1")},
+		{name: "declared -> undeclared is refused", stored: keys("K1"), incoming: keys(), wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := requireDeclarationRetained(tc.stored, tc.incoming)
+			if tc.wantErr != (err != nil) || (err != nil && !errors.Is(err, ErrOwnerRemoved)) {
+				t.Fatalf("got %v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}

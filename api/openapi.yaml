@@ -24,10 +24,12 @@ info:
     the document in the owner role. The feed always adds its own `feed` signature. There is no PATCH.
 
     Limit to know: `role` is not covered by the signature (it lives in the signature entry, outside the
-    signed bytes). For a document that declares no owners, a relayer could strip or relabel entries
-    before a feed first sees it and thereby reshuffle authority among the actual co-signers — never grant
-    it to a key that did not sign. Declaring `curators`/`publisher` makes the owner set part of the signed
-    content and closes that gap.
+    signed bytes), so the role rule is spec conformance and mistake detection, not a cryptographic
+    boundary. A relayer can relabel any entry without breaking it: for a document that declares no owners
+    that can reshuffle authority among the actual co-signers, and for any document it can turn an owner
+    key's `licensor`/`agent` entry into an authorizing one. Nobody who did not sign the content gains
+    authority either way. Declaring `curators`/`publisher` fixes the set of owner keys inside the signed
+    content; once declared, a document must keep declaring them on PUT.
 
     Because an owner's signatures live inside the document and are public via GET, a previously published
     document could otherwise be replayed. PUT and DELETE therefore also carry a **signed mutation-intent**
@@ -253,7 +255,8 @@ paths:
         plus an `authorization` intent bound to that document's `payloadHash`. Owner-bound: the document
         must carry a `curator`-role signature from a stored owner, and the identity (`id`, `slug`,
         `created`) must equal the stored resource's. The owner set may grow (each added curator must sign
-        the document as `curator`) but no stored owner may be dropped. The intent must also be signed, as
+        the document as `curator`) but no stored owner may be dropped, and a stored document that declares
+        `curators` must keep declaring them. The intent must also be signed, as
         `curator`, by a stored owner and be fresh. 403 if the signer is not an owner acting as curator, an
         owner was removed, or an added owner did not consent; 409 if the resource changed since it was
         authorized.
@@ -820,7 +823,8 @@ components:
           description: >-
             Declared owners. When present, the owner set is exactly these keys and a write is authorized by
             a `curator`-role signature from one of them. When absent, the owners are the `curator`-role
-            signers. On PUT a key may be added here only if it also signs the document as `curator`.
+            signers. On PUT a key may be added here only if it also signs the document as `curator`, and
+            a stored document that declares `curators` may not omit it.
           items:
             $ref: '#/components/schemas/Entity'
         summary:
@@ -1140,7 +1144,8 @@ components:
             - $ref: '#/components/schemas/Entity'
           description: >-
             The channel owner when declared: a `publisher`-role signature whose kid matches its key
-            authorizes the write. When absent, the `publisher`-role signers are the owners.
+            authorizes the write. When absent, the `publisher`-role signers are the owners. A stored
+            channel that declares a publisher may not omit or change it on PUT.
         summary:
           type: string
         coverImage:
