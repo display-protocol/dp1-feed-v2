@@ -1584,8 +1584,10 @@ components:
 
     Forbidden:
       description: >-
-        The signature is valid but the signer is not an owner of the resource, or a replace attempted to
-        change the immutable owner set.
+        The signatures verify but do not authorize: no signer is a stored owner acting in the owner role
+        (an owner key signing as `licensor`/`agent` is named with the role required), a replace would drop
+        a stored owner or a stored `curators`/`publisher` declaration, or a replace adds an owner whose key
+        did not sign the document in the owner role.
       content:
         application/json:
           schema:
@@ -1595,10 +1597,18 @@ components:
               value:
                 error: forbidden
                 message: request is not signed by an owner of the resource
-            owner_immutable:
+            owner_wrong_role:
               value:
                 error: forbidden
-                message: resource owner is immutable and cannot be changed
+                message: 'request is not signed by an owner of the resource: an owner key signed with a non-owner role (did:key:z6Mk… signed as "licensor"); the "curator" role is required'
+            owner_removed:
+              value:
+                error: forbidden
+                message: 'owners cannot be removed from a resource: did:key:z6Mk…'
+            owner_consent_required:
+              value:
+                error: forbidden
+                message: 'a new owner must sign the document in the owner role: did:key:z6Mk…'
 
     NotFound:
       description: Resource not found

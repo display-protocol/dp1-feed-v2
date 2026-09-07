@@ -14,8 +14,8 @@ import (
 )
 
 // RegisterRoutes attaches all HTTP routes to the Gin engine. Reads are public; every mutating route
-// requires a signed body (RequireSignatures). PUT is owner-bound and owner-immutable, DELETE takes a
-// signed delete-intent; both are enforced in the executor. See docs/api_design.md.
+// requires a signed body (RequireSignatures). PUT is owner-bound (owners may be added, never removed),
+// DELETE takes a signed delete-intent; both are enforced in the executor. See docs/api_design.md.
 func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logger) {
 	// Unmatched paths answer in the documented error shape rather than gin's plain-text default.
 	//

@@ -53,13 +53,13 @@ import (
 //
 // See internal/executor/ownership.go for the owner-set rules and signed_auth.go for the mutation intent.
 type Executor interface {
-	// CreatePlaylist verifies the client's curator signatures, feed co-signs, validates, and stores a new playlist.
+	// CreatePlaylist verifies the client's signatures and owner-role authority, feed co-signs, validates, and stores a new playlist.
 	CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*store.PlaylistRecord, error)
 	// GetPlaylist returns the stored playlist document for id or slug (HTTP layer JSON-encodes the response).
 	GetPlaylist(ctx context.Context, idOrSlug string) (*store.PlaylistRecord, error)
 	// ListPlaylists returns one page of playlist bodies and an optional next cursor (optional channel or playlist-group filter; id or slug).
 	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]store.PlaylistRecord, string, error)
-	// ReplacePlaylist performs a full PUT (owner-bound, owner immutable): verify owner signature, feed co-sign, validate, update.
+	// ReplacePlaylist performs a full PUT (owner-bound; owners may be added, never removed): verify owner signature, feed co-sign, validate, update.
 	ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest, intent *models.SignedIntent) (*store.PlaylistRecord, error)
 	// DeletePlaylist verifies the signed delete-intent against the stored owner keys, then removes the playlist row.
 	DeletePlaylist(ctx context.Context, idOrSlug string, req *models.SignedDeleteRequest) error
@@ -330,10 +330,12 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 
 // ReplacePlaylist replaces a playlist by id or slug with the client's signed document, stored verbatim.
 //
-// Owner-bound, identity- and owner-immutable: signatures[] is required; the document's id, slug and
+// Owner-bound, identity-immutable, owner-monotone: signatures[] is required; the document's id, slug and
 // created must EQUAL the stored row's (validated by mustMatchStored, never substituted — substituting
-// would change bytes the client signed); the curator (owner) set may not change; every item must carry a
-// UUID id; all signatures must verify over the submitted bytes; and at least one must be a stored owner.
+// would change bytes the client signed); the owner set may grow (each added key signing as curator) but
+// never shrink, and a stored curators[] declaration may not be omitted; every item must carry a UUID id;
+// all signatures must verify over the submitted bytes; and at least one must be a stored owner signing
+// as curator. See ownership.go.
 func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest, intent *models.SignedIntent) (*store.PlaylistRecord, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
