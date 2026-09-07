@@ -10,9 +10,17 @@ package executor
 //   - Declared owners win. When the signed document declares owners (`curators[].key`,
 //     `publisher.key`), those keys are the owner set. They sit inside the signed bytes, so a relayer
 //     cannot change who owns the document without breaking every signature.
-//   - Otherwise the signature chain defines them. The owner set is the kids of the signatures carrying
-//     the resource's owner role (`curator` for playlists and groups, `publisher` for channels). This is
-//     what lets core-only documents through, as the spec allows.
+//   - Otherwise the signature chain defines them — but only when it is unambiguous. Signing is
+//     permissionless: anyone can produce a valid signature over anyone's content, and `signatures` is
+//     outside the signed bytes, so a relayer can append its own owner-role entry to an authentic document
+//     before this feed first sees it. Reading every owner-role signer as an owner would make that relayer
+//     a durable co-owner with delete and veto authority. The feed therefore accepts an undeclared document
+//     only when it carries EXACTLY ONE signature in the resource's owner role (`curator` for playlists and
+//     groups, `publisher` for channels), and that key is the sole owner (requireUnambiguousOwner). Two or
+//     more without a declaration is refused: the feed cannot tell a co-author from a relayer, and it does
+//     not guess. Co-ownership is available only through the declaration, which is the one place it is
+//     tamper-proof. This is what lets core-only documents through, as the spec allows, without letting a
+//     stranger in with them.
 //
 // Authority then requires a signature that is declared (kid in the owner set), proven (cryptographically
 // verified by the caller) AND acting as owner (role equals the owner role). The role check is what stops
@@ -52,12 +60,13 @@ package executor
 // ceremony before a document can exist at all. Revisit if attribution-without-consent on create turns
 // out to matter in practice.
 //
-// Consequence of deriving owners from the stored bytes: when a document declares no owners, the incoming
-// owner set on replace is exactly its owner-role signers, so every stored co-owner must re-sign every
-// PUT (N-of-N), not just one. There is no side table remembering the set. Authors who want any-one-owner
-// edits should declare `curators`/`publisher` — but the PUT that first declares them moves the resource
-// from that N-of-N regime to any-one authorization, so it needs a signature from EVERY current owner
-// (requireRegimeTransitionConsent); otherwise one co-owner could declare the set and then edit alone.
+// Consequence of the single-signer rule: an undeclared document always has exactly one owner, so adding a
+// co-owner is always the PUT that first declares `curators`/`publisher`, signed by the current owner (it
+// is a stored owner acting as owner) and by every key being added (consent). requireRegimeTransitionConsent
+// additionally requires every stored owner to sign that PUT; with the invariant above that is the same
+// single key, so the guard is redundant for rows created under this rule and is kept as defense in depth
+// for any stored row that predates it (a multi-signer undeclared row would otherwise let one co-owner
+// declare the set and then edit alone).
 
 import (
 	"errors"
@@ -80,6 +89,10 @@ var (
 	// document in the owner role. Without that signature the feed would co-sign and serve an attribution
 	// the named key never agreed to, and could not even tell the key exists.
 	ErrOwnerConsentRequired = errors.New("a new owner must sign the document in the owner role")
+	// ErrAmbiguousOwner is returned when a document that declares no owners carries more than one
+	// owner-role signature. The feed cannot tell a co-author from a relayer who appended a signature, so it
+	// refuses the shape rather than guess (400: the client fixes it by declaring the owners).
+	ErrAmbiguousOwner = errors.New("a document with no declared owners must carry exactly one owner-role signature; declare the owners to have more than one")
 )
 
 // keySet is a set of signing-key identifiers (did:key / did:pkh kids).
@@ -129,6 +142,27 @@ func ownerSet(declared keySet, ownerRole string, sigs []playlist.Signature) keyS
 		}
 	}
 	return set
+}
+
+// requireUnambiguousOwner enforces the single-signer rule for undeclared documents: with no declared
+// owners, exactly one signature may carry the owner role. Zero is the caller's "no owner" case; two or
+// more is ErrAmbiguousOwner. Declared documents are exempt — their owner set is fixed by signed content,
+// so extra owner-role signatures are inert. Needs no cryptographic verification: it is a shape rule on the
+// submitted entries, applied to every incoming document (create, replace, ingest).
+func requireUnambiguousOwner(declared keySet, ownerRole string, sigs []playlist.Signature) error {
+	if len(declared) > 0 {
+		return nil
+	}
+	signers := ownerSet(nil, ownerRole, sigs)
+	if len(signers) <= 1 {
+		return nil
+	}
+	kids := make([]string, 0, len(signers))
+	for k := range signers {
+		kids = append(kids, k)
+	}
+	sort.Strings(kids)
+	return fmt.Errorf("%w: %q-role signers: %s", ErrAmbiguousOwner, ownerRole, strings.Join(kids, ", "))
 }
 
 // requireOwnerSignature enforces authority: at least one signature must carry a kid in owners AND the

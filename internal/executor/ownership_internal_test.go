@@ -343,3 +343,28 @@ func TestRequireRegimeTransitionConsent(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireUnambiguousOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		declared keySet
+		sigs     []playlist.Signature
+		wantErr  bool
+	}{
+		{name: "undeclared, one owner-role signer", sigs: []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor)}},
+		{name: "undeclared, no owner-role signer is the caller's problem, not ambiguity", sigs: []playlist.Signature{sig("L", playlist.RoleLicensor)}},
+		{name: "undeclared, same key signing twice as owner is one signer", sigs: []playlist.Signature{sig("A", playlist.RoleCurator), sig("A", playlist.RoleCurator)}},
+		{name: "undeclared, two owner-role signers", sigs: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}, wantErr: true},
+		{name: "declared: any number of owner-role signers", declared: keys("A"), sigs: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator), sig("R", playlist.RoleCurator)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := requireUnambiguousOwner(tc.declared, playlist.RoleCurator, tc.sigs)
+			if tc.wantErr != (err != nil) || (err != nil && !errors.Is(err, ErrAmbiguousOwner)) {
+				t.Fatalf("got %v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}

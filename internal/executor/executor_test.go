@@ -2515,9 +2515,8 @@ func TestReplacePlaylistGroup_notOwner(t *testing.T) {
 	}
 }
 
-// TestReplacePlaylistGroup_intentNotOwner: the document is co-signed by the stored owner and a newcomer
-// (a legitimate owner addition), but the intent is signed only by the newcomer, who is not yet a stored
-// owner: 403.
+// TestReplacePlaylistGroup_intentNotOwner: the document is correctly signed by the stored owner, but the
+// intent is signed by a stranger: 403 at the intent.
 func TestReplacePlaylistGroup_intentNotOwner(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -2531,11 +2530,34 @@ func TestReplacePlaylistGroup_intentNotOwner(t *testing.T) {
 
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
 	req := validGroupCreateReq(ref)
-	req.Signatures = []playlist.Signature{testSig(testCuratorKid), testSig("did:key:newcomer")}
-	req.Raw = mustJSONRaw(req) // document bytes must reflect the final request
-	intent := replaceIntent(models.IntentTargetPlaylistGroup, id.String(), "group-title", "did:key:newcomer")
+	req.Raw = mustJSONRaw(req)
+	intent := replaceIntent(models.IntentTargetPlaylistGroup, id.String(), "group-title", "did:key:stranger")
 	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req, intent); !errors.Is(err, executor.ErrNotResourceOwner) {
 		t.Fatalf("want not-owner, got %v", err)
+	}
+}
+
+// A group has no key field, so it can never declare owners and therefore never has more than one: a
+// second curator-role signature on a group is ambiguous (co-author or relayer?) and refused, on create and
+// on replace alike.
+func TestPlaylistGroup_twoCuratorSignersRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "group-title"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	req := validGroupCreateReq(ref)
+	req.Signatures = []playlist.Signature{testSig(testCuratorKid), testSig("did:key:second")}
+	req.Raw = mustJSONRaw(req)
+	if _, err := e.CreatePlaylistGroup(context.Background(), req); !errors.Is(err, executor.ErrAmbiguousOwner) || !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("create: want ambiguous-owner (400), got %v", err)
+	}
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req, nil); !errors.Is(err, executor.ErrAmbiguousOwner) {
+		t.Fatalf("replace: want ambiguous-owner, got %v", err)
 	}
 }
 
@@ -4356,14 +4378,14 @@ func TestCreateChannel_publisherSignedAsCuratorRejected(t *testing.T) {
 	}
 }
 
-// Without a declared publisher the channel owner set is its publisher-role signers and may grow like any
-// other: a second publisher co-signs, the stored one authorizes.
-func TestReplaceChannel_noDeclaredPublisher_addOwner(t *testing.T) {
+// A channel has exactly one owner, declared or not: an undeclared channel with two publisher-role
+// signatures is ambiguous and refused, and since `publisher` is a single entity there is no declaration
+// that could name two. Co-signing a channel in the curator role remains free (attribution only).
+func TestReplaceChannel_noDeclaredPublisher_twoPublishersRejected(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
-	expectIntentOK(mockDP1)
 	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	mockStore.EXPECT().GetChannel(gomock.Any(), "cid").Return(&store.ChannelRecord{
 		ID: id, Slug: "cid",
@@ -4371,22 +4393,65 @@ func TestReplaceChannel_noDeclaredPublisher_addOwner(t *testing.T) {
 			Signatures: []playlist.Signature{publisherSig(testPublisherKid)}},
 	}, nil)
 	ref := memberPlaylistExpect(t, mockStore)
-	signed := []byte(`{"kind":"signed-channel"}`)
-	wantCh := mustDecodeChannel(t, signed)
-	gomock.InOrder(
-		mockDP1.EXPECT().VerifyChannelSignatures(gomock.Any()).Return(true, nil, nil),
-		mockDP1.EXPECT().SignChannel(gomock.Any(), gomock.Any()).Return(signed, nil),
-		mockDP1.EXPECT().ValidateChannel(signed).Return(&wantCh, nil),
-	)
-	mockStore.EXPECT().UpdateChannel(gomock.Any(), id.String(), gomock.Any(), gomock.Any()).Return(nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
 	req := validChannelCreateReq("cid", ref)
 	req.Publisher = nil
 	req.Signatures = []playlist.Signature{publisherSig(testPublisherKid), publisherSig("did:key:secondPublisher")}
 	req.Raw = mustJSONRaw(req)
-	if _, err := e.ReplaceChannel(context.Background(), "cid", req, replaceIntent(models.IntentTargetChannel, id.String(), "cid", testPublisherKid)); err != nil {
+	if _, err := e.ReplaceChannel(context.Background(), "cid", req, nil); !errors.Is(err, executor.ErrAmbiguousOwner) {
+		t.Fatalf("want ambiguous-owner, got %v", err)
+	}
+}
+
+// The single-signer rule applies only to undeclared documents. Declared co-curators may all sign at
+// creation (their keys are fixed by the signed `curators[]`), and an extra curator-role signature from a
+// key that is not declared is inert rather than fatal.
+func TestCreatePlaylist_declaredCoCuratorsMaySignTogether(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil)
+	signed := []byte(`{"dpVersion":"1.1.0","title":"co"}`)
+	parsed := mustDecodePlaylist(t, signed)
+	mockDP1.EXPECT().SignPlaylist(gomock.Any(), gomock.Any()).Return(signed, nil)
+	mockDP1.EXPECT().ValidatePlaylist(signed).Return(&parsed, nil)
+	mockStore.EXPECT().CreatePlaylist(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+	const second = "did:key:z6MkSecondCuratorXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := validCreateReq()
+	req.Curators = append(req.Curators, identity.Entity{Key: second})
+	req.Signatures = []playlist.Signature{testSig(testCuratorKid), testSig(second), testSig("did:key:relayer")}
+	req.Raw = mustJSONRaw(req)
+	if _, err := e.CreatePlaylist(context.Background(), req); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// An undeclared playlist with two curator-role signatures is refused on create and on replace: the feed
+// cannot tell the second signer from a relayer who appended itself.
+func TestPlaylist_undeclaredTwoCuratorsRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	storedUndeclared := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"test-playlist","title":"Old","created":"` + testCreatedRFC + `","items":[{"id":"` + testItemID + `","source":"https://old"}],` +
+		`"signatures":[{"alg":"ed25519","kid":"` + testCuratorKid + `","ts":"t","payload_hash":"h","role":"curator","sig":"s"}]}`)
+	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(&store.PlaylistRecord{ID: id, Slug: "test-playlist", Raw: storedUndeclared, Body: mustDecodePlaylist(t, storedUndeclared)}, nil)
+
+	e := executor.New(mockStore, mockDP1, false, nil, "")
+	req := validCreateReq()
+	req.Curators = nil
+	req.Signatures = []playlist.Signature{testSig(testCuratorKid), testSig("did:key:appended")}
+	req.Raw = mustJSONRaw(req)
+	if _, err := e.CreatePlaylist(context.Background(), req); !errors.Is(err, executor.ErrAmbiguousOwner) || !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("create: want ambiguous-owner (400), got %v", err)
+	}
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, nil); !errors.Is(err, executor.ErrAmbiguousOwner) {
+		t.Fatalf("replace: want ambiguous-owner, got %v", err)
 	}
 }
 

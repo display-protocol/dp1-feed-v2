@@ -284,10 +284,12 @@ func IsBlockedFetchDestinationError(err error) bool {
 }
 
 // IsInvalidSubmissionError reports whether err is a client-correctable defect in a signed create/replace
-// submission (missing slug, an item without a UUID id, too many or oversized references, or a PUT whose
-// document identity does not match the stored resource). Maps to 400.
+// submission (missing slug, an item without a UUID id, too many or oversized references, an undeclared
+// document with more than one owner-role signature, or a PUT whose document identity does not match the
+// stored resource). Maps to 400.
 func IsInvalidSubmissionError(err error) bool {
-	return err != nil && (errors.Is(err, ErrSlugRequired) ||
+	return err != nil && (errors.Is(err, ErrAmbiguousOwner) ||
+		errors.Is(err, ErrSlugRequired) ||
 		errors.Is(err, ErrItemIDRequired) ||
 		errors.Is(err, ErrTooManyReferences) ||
 		errors.Is(err, ErrResolvedTooLarge) ||

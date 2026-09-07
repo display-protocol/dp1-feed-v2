@@ -13,10 +13,12 @@ info:
 
     Authentication: signatures only — there is no API key. Every mutating request is authorized by the
     cryptographic signatures it carries. A document's **owner set** is its declared `curators[].key`
-    (playlists) or `publisher.key` (channels) when present; otherwise it is the kids of the signatures
-    carrying the **owner role** — `curator` for playlists and playlist-groups, `publisher` for channels.
-    Groups have no key field (their `curator` is a display name), so their owners are always their
-    `curator`-role signers. An authorizing signature must be from an owner key **and** carry the owner
+    (playlists) or `publisher.key` (channels) when present; otherwise the document must carry **exactly
+    one** signature in the **owner role** — `curator` for playlists and playlist-groups, `publisher` for
+    channels — and that key is its sole owner (two or more without a declaration is `400`: signing is
+    permissionless, so the feed cannot tell a co-author from a relayer who appended a signature, and it
+    does not guess). Groups have no key field (their `curator` is a display name), so a group always has
+    exactly one owner. An authorizing signature must be from an owner key **and** carry the owner
     role: a key listed in `curators` that signs only as `licensor`, `institution` or `agent` is not acting
     as the author. POST (create) is open to any document so signed. PUT (replace) and DELETE are
     owner-bound: the request must be signed, in the owner role, by a key in the *stored* document's owner
@@ -413,11 +415,11 @@ paths:
       description: >-
         Fully replaces a playlist-group. The body is a `PlaylistGroupReplaceRequest`: the full re-signed
         `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound: the document and
-        the intent must both carry a `curator`-role signature from a stored owner (one of the stored
-        document's `curator`-role signers), and the identity must equal the stored resource's. Every stored
-        owner must still sign as `curator`; further `curator` signers may be added. The `curator` display
-        name may change. 403 if the signer is not an owner or a stored owner is dropped; 409 if the resource
-        changed since it was authorized.
+        the intent must both carry a `curator`-role signature from the stored owner (the stored document's
+        single `curator`-role signer), and the identity must equal the stored resource's. A group cannot
+        declare owners, so it has exactly one; a second `curator`-role signature is 400. The `curator`
+        display name may change. 403 if the signer is not the owner or the owner is dropped; 409 if the
+        resource changed since it was authorized.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -822,9 +824,10 @@ components:
           type: array
           description: >-
             Declared owners. When present, the owner set is exactly these keys and a write is authorized by
-            a `curator`-role signature from one of them. When absent, the owners are the `curator`-role
-            signers. On PUT a key may be added here only if it also signs the document as `curator`, and
-            a stored document that declares `curators` may not omit it.
+            a `curator`-role signature from one of them. When absent, the document must carry exactly one
+            `curator`-role signature and that key is the sole owner; declare `curators` to have more than
+            one. On PUT a key may be added here only if it also signs the document as `curator`, and a
+            stored document that declares `curators` may not omit it.
           items:
             $ref: '#/components/schemas/Entity'
         summary:
@@ -1055,9 +1058,9 @@ components:
           type: array
           minItems: 1
           description: >-
-            Signatures over the document. At least one must carry role `curator`; its signer (and any other
-            `curator`-role signer) owns the group. The feed appends its own `feed` signature after
-            verification.
+            Signatures over the document. Exactly one must carry role `curator`; its signer owns the group
+            (a second `curator`-role signature is `400`, since a group cannot declare co-owners). Other
+            roles may co-sign freely. The feed appends its own `feed` signature after verification.
           items:
             $ref: '#/components/schemas/Signature'
 
@@ -1144,8 +1147,9 @@ components:
             - $ref: '#/components/schemas/Entity'
           description: >-
             The channel owner when declared: a `publisher`-role signature whose kid matches its key
-            authorizes the write. When absent, the `publisher`-role signers are the owners. A stored
-            channel that declares a publisher may not omit or change it on PUT.
+            authorizes the write. When absent, the document must carry exactly one `publisher`-role
+            signature and that key is the owner. A stored channel that declares a publisher may not omit or
+            change it on PUT.
         summary:
           type: string
         coverImage:

@@ -360,6 +360,9 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	if err := requireDeclarationRetained(storedDeclared, incomingDeclared); err != nil {
 		return nil, err
 	}
+	if err := requireUnambiguousOwner(incomingDeclared, playlist.RoleCurator, req.Signatures); err != nil {
+		return nil, err
+	}
 	stored := ownerSet(storedDeclared, playlist.RoleCurator, rec.Body.Signatures)
 	incoming := ownerSet(incomingDeclared, playlist.RoleCurator, req.Signatures)
 	if err := requireOwnersRetained(stored, incoming); err != nil {
@@ -542,9 +545,9 @@ func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string,
 // re-resolves membership. Owner-bound and identity-immutable; the owner set may grow but not shrink
 // (see ReplacePlaylist). The `curator` display name may change freely: it is not a key.
 //
-// Because a group's owners are its curator-role signers and nothing else, the incoming owner set IS the
-// new document's curator signers: every stored co-owner must re-sign every replace (N-of-N), or the
-// missing one counts as removed. A single owner is the common case and unaffected.
+// A group cannot declare owners, so it has exactly one: its single curator-role signer (a second one is
+// ambiguous and refused, see requireUnambiguousOwner). The replacement must therefore carry that same
+// key's curator signature, or the owner counts as removed.
 func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest, intent *models.SignedIntent) (*store.PlaylistGroupRecord, error) {
 	if err := requireSignatures(req.Signatures); err != nil {
 		return nil, err
@@ -560,6 +563,9 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		return nil, err
 	}
 	if err := si.mustMatchStored(rec.ID, rec.Slug, rec.Body.Created); err != nil {
+		return nil, err
+	}
+	if err := requireUnambiguousOwner(nil, playlist.RoleCurator, req.Signatures); err != nil {
 		return nil, err
 	}
 	stored := ownerSet(nil, playlist.RoleCurator, rec.Body.Signatures)
@@ -737,6 +743,9 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 	}
 	storedDeclared, incomingDeclared := publisherKeySet(rec.Body.Publisher), publisherKeySet(req.Publisher)
 	if err := requireDeclarationRetained(storedDeclared, incomingDeclared); err != nil {
+		return nil, err
+	}
+	if err := requireUnambiguousOwner(incomingDeclared, channels.RolePublisher, req.Signatures); err != nil {
 		return nil, err
 	}
 	stored := ownerSet(storedDeclared, channels.RolePublisher, rec.Body.Signatures)
@@ -922,6 +931,10 @@ type signatureVerifier func(raw []byte) (ok bool, failed []playlist.Signature, e
 // ownerRole (missing — ErrNoValidCuratorSignature / ErrNoValidPublisherSignature). declared are the keys
 // the document names as owners, empty when it names none; see ownerSet for how the two combine.
 func (e *impl) verifyOwnerSignatures(verify signatureVerifier, raw []byte, declared keySet, ownerRole string, sigs []playlist.Signature, missing error) error {
+	// Shape before crypto: an ambiguous owner set is a client error regardless of whether the entries verify.
+	if err := requireUnambiguousOwner(declared, ownerRole, sigs); err != nil {
+		return err
+	}
 	ok, failed, err := verify(raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSignatureVerificationFailed, err)

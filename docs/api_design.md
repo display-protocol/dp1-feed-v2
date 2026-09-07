@@ -76,10 +76,17 @@ one **owner set** per document with a single rule, applied to every resource kin
 - **Declared owners win.** When the signed document declares owners — `curators[].key` on a playlist,
   `publisher.key` on a channel — those keys are the owner set. They sit inside the signed bytes, so no
   relayer can change who owns the document without breaking every signature.
-- **Otherwise the signature chain defines them.** The owner set is the kids of the signatures carrying the
-  **owner role**: `curator` for playlists and playlist-groups, `publisher` for channels. This is what lets
-  core-only documents through, as the spec allows. A playlist-group's `curator` is a display name in the
-  core schema, not a key, so groups are always in this case.
+- **Otherwise the single owner-role signer owns it.** A document with no declaration is accepted only when
+  it carries **exactly one** signature in the **owner role** (`curator` for playlists and playlist-groups,
+  `publisher` for channels), and that key is its sole owner. Two or more owner-role signatures with no
+  declaration are refused (**`400` `bad_request`**). The reason is that signing is permissionless and
+  `signatures` sits outside the signed bytes: anyone who sees a document before this feed does can append
+  a valid owner-role signature of their own, and if every such signer became an owner the relayer would
+  gain delete and veto authority over the author's document. Without a declaration the feed cannot tell a
+  co-author from that relayer, so it does not guess. Co-ownership is available only through the
+  declaration, which is the one place it is tamper-proof. This is what lets core-only documents through,
+  as the spec allows. A playlist-group's `curator` is a display name in the core schema, not a key, so a
+  group always has exactly one owner — which matches the spec's singular `curator`.
 
 An **authorizing signature** must be *declared* (kid in the owner set), *proven* (verifies
 cryptographically) **and** *acting as owner* (`role` equals the owner role). The role check is what stops
@@ -135,16 +142,13 @@ Three postures, by verb:
      authorizing signature from a **stored** owner (**`403`**). Membership is permanent once granted, and
      a deleted id cannot be re-created, so key rotation is "add the new key" only; self-removal via the
      intent is the natural extension and is not built.
-   - **Co-owners of an undeclared document re-sign unanimously.** When the owner set comes from the
-     signature chain (always for groups; playlists/channels without `curators`/`publisher`), the incoming
-     owner set *is* the new document's owner-role signers, so every stored co-owner must sign every `PUT`
-     or the absent one counts as removed (**`403`**). Declare `curators`/`publisher` if any one owner
-     should be able to edit alone.
-   - **Declaring owners on an undeclared document needs unanimous consent.** That `PUT` moves the resource
-     from the unanimous regime above to any-one-of-owner authorization, so it must carry an owner-role
-     signature from **every** current owner, not just the one submitting it (**`403`** otherwise). Without
-     this a co-owner could declare the existing owner set and thereafter edit alone, stripping the others'
-     veto. (Once declared, adding a further owner only needs that new key's consent, per the rule above.)
+   - **Adding a co-owner to an undeclared document means declaring.** An undeclared document has exactly
+     one owner, and a replacement with two owner-role signatures and no declaration is ambiguous
+     (**`400`**). The owner adds a co-owner with a `PUT` that declares `curators` naming both keys, signed
+     by the owner (as the stored owner acting as owner) and by the new key (consent). Once declared,
+     either owner may edit alone and further owners are added the same way. The feed also requires every
+     stored owner to sign the `PUT` that first declares owners; under the single-owner invariant that is
+     the same key, and the check is kept as defense in depth for any stored row that predates the rule.
    - **Consent is a replace-time rule only (interim assumption).** A `POST` declaring `curators` `[A, B]`
      signed by A alone is accepted and B owns without having signed; the same document as a `PUT` adding B
      is refused. Create is open and trusts the document's own claims; replace is the feed guarding a change
@@ -329,7 +333,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures, or a create carries no owner-role signature from an owner (`IsSignatureVerificationError`). |
 | **400** | `invalid_timestamp` | `created` is in the future, or a mutation-intent `created` — replace or delete — is outside the freshness window (`IsInvalidTimestampError`). |
 | **400** | `invalid_id` | User-provided `id` is not a valid UUID (`IsInvalidIDError`). |
-| **400** | `bad_request` | Malformed delete-intent, or its `action`/`target` disagree with the stored resource (`IsDeleteRequestError`). |
+| **400** | `bad_request` | Malformed delete-intent, or its `action`/`target` disagree with the stored resource (`IsDeleteRequestError`); or a document with no declared owners carries more than one owner-role signature (`IsInvalidSubmissionError`). |
 | **401** | `unauthorized` | Missing authentication — a mutating request whose body carries no signatures (`IsSignaturesRequiredError`; also enforced by `RequireSignatures`). |
 | **403** | `forbidden` | Signature is valid but the signer is not an owner acting in the owner role, a PUT tried to remove a stored owner, or it added an owner whose key did not sign the document in the owner role (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |

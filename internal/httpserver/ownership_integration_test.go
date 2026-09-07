@@ -267,3 +267,100 @@ func TestIntegration_Ownership_RelabeledRoleIsNotDetected(t *testing.T) {
 	}
 	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(relabeled), http.StatusCreated)
 }
+
+// TestIntegration_Ownership_UndeclaredOwnerAddsCoOwnerByDeclaring walks the only way an undeclared
+// (single-owner) playlist gains a co-owner: the owner declares `curators` and the new key co-signs. Two
+// curator signatures with no declaration are refused as ambiguous, and a declaration signed by the
+// current owner alone is refused for lack of the new key's consent.
+func TestIntegration_Ownership_UndeclaredOwnerAddsCoOwnerByDeclaring(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	a, aKid := newSigner(t, playlist.RoleCurator)
+	b, bKid := newSigner(t, playlist.RoleCurator)
+	id := uuid.MustParse("1a1a1a1a-1111-4333-8444-555555555555")
+	const slug = "regime-change"
+
+	// Core-only body (no curators[]); declared, when non-empty, adds the declaration.
+	body := func(title string, declared ...string) []byte {
+		curatorsField := ""
+		if len(declared) > 0 {
+			entities := make([]string, 0, len(declared))
+			for _, k := range declared {
+				entities = append(entities, `{"name":"Curator","key":"`+k+`"}`)
+			}
+			curatorsField = `"curators":[` + strings.Join(entities, ",") + `],`
+		}
+		return []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `","created":"2026-01-02T03:04:05Z",` +
+			curatorsField +
+			`"items":[{"id":"1a1a1a1a-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}],` +
+			`"title":"` + title + `"}`)
+	}
+
+	// An undeclared playlist co-signed by A and B cannot even be created: which one is the author?
+	raw := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signWithAll(t, body("v1"), a, b)), http.StatusBadRequest)
+	mustErrorContaining(t, raw, "bad_request", "exactly one owner-role signature")
+
+	// A alone creates it. A is the sole owner.
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signWithAll(t, body("v1"), a)), http.StatusCreated)
+
+	// A cannot add B by merely co-signing an undeclared replacement: still ambiguous.
+	raw = doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, a.priv, "playlist", id.String(), slug, json.RawMessage(signWithAll(t, body("v2"), a, b))), http.StatusBadRequest)
+	mustErrorContaining(t, raw, "bad_request", "exactly one owner-role signature")
+
+	// A declares [A, B] signed only by A: refused, B never consented.
+	raw = doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, a.priv, "playlist", id.String(), slug, json.RawMessage(signWithAll(t, body("v2", aKid, bKid), a))), http.StatusForbidden)
+	mustErrorContaining(t, raw, "forbidden", bKid)
+
+	// A declares [A, B] and both sign: accepted. The declaration is what makes the co-ownership trustworthy.
+	replaced := doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, a.priv, "playlist", id.String(), slug, json.RawMessage(signWithAll(t, body("v2", aKid, bKid), a, b))), http.StatusOK)
+	mustVerifyAll(t, "declaring PUT", replaced)
+
+	// Now declared: either owner may edit alone.
+	replaced = doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, b.priv, "playlist", id.String(), slug, json.RawMessage(signWithAll(t, body("v3", aKid, bKid), b))), http.StatusOK)
+	mustVerifyAll(t, "co-owner PUT after declaration", replaced)
+}
+
+// TestIntegration_Ownership_AppendedSignerGainsNoAuthority pins that a third party cannot become an
+// owner of someone else's document by co-signing it. Signing is permissionless — anyone can produce a
+// valid signature over any content — so authority must come from the signed content, never from the
+// signature array alone. A relayer who appends its own curator-role signature to A's core-only playlist
+// before its first POST must not be able to delete it or veto A's edits.
+func TestIntegration_Ownership_AppendedSignerGainsNoAuthority(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	author, _ := newSigner(t, playlist.RoleCurator)
+	relayer, _ := newSigner(t, playlist.RoleCurator)
+	id := uuid.MustParse("2b2b2b2b-1111-4333-8444-555555555555")
+	const slug = "relayed"
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `",` +
+		`"title":"authentic","created":"2026-01-02T03:04:05Z",` +
+		`"items":[{"id":"2b2b2b2b-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}]}`)
+
+	// The relayer submits A's document with its own curator signature appended. Both verify — and that is
+	// exactly why the feed cannot accept the shape: with no declaration it cannot tell which of the two
+	// is the author.
+	relayed := signWithAll(t, unsigned, author, relayer)
+	if ok, _, err := dp1sign.VerifyPlaylistSignatures(relayed); err != nil || !ok {
+		t.Fatalf("relayed document should verify: ok=%v err=%v", ok, err)
+	}
+	raw := doRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(relayed), http.StatusBadRequest)
+	mustErrorContaining(t, raw, "bad_request", "exactly one owner-role signature")
+
+	// A's own single-signed submission is unambiguous and is accepted; A alone owns it.
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signWithAll(t, unsigned, author)), http.StatusCreated)
+
+	// The relayer cannot delete it, and cannot replace it by co-signing (ambiguous) or alone (not owner).
+	raw = doRaw(t, srv, http.MethodDelete, "/api/v1/playlists/"+slug,
+		signedDeleteBody(t, relayer.priv, "playlist", id.String(), slug), http.StatusForbidden)
+	mustErrorContaining(t, raw, "forbidden", "not signed by an owner")
+	raw = doRaw(t, srv, http.MethodPut, "/api/v1/playlists/"+slug,
+		signedReplaceEnvelope(t, relayer.priv, "playlist", id.String(), slug, json.RawMessage(relayed)), http.StatusBadRequest)
+	mustErrorContaining(t, raw, "bad_request", "exactly one owner-role signature")
+
+	// The author still can.
+	mustDoRaw(t, srv, http.MethodDelete, "/api/v1/playlists/"+slug, signedDeleteBody(t, author.priv, "playlist", id.String(), slug), http.StatusNoContent)
+}
