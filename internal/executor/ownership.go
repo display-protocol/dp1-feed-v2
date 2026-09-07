@@ -76,6 +76,7 @@ import (
 
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
+	"github.com/display-protocol/dp1-go/playlistgroup"
 )
 
 var (
@@ -142,6 +143,29 @@ func ownerSet(declared keySet, ownerRole string, sigs []playlist.Signature) keyS
 		}
 	}
 	return set
+}
+
+// storedGroupOwnerSet derives the owner set of a STORED playlist-group. Groups cannot declare owners, so
+// the owners are the curator-role signers — exactly one for any group created under
+// requireUnambiguousOwner. Rows that predate that rule may carry several: the previous contract took the
+// `curator` string as the owner's key and let other keys co-sign in the curator role without authority.
+// Reading every signer as an owner would hand those co-signers delete authority they never had, so:
+//   - one curator-role signer: that key owns;
+//   - several, and the signed `curator` string equals exactly one of them: that key owns (the legacy
+//     declaration — `curator` is inside the signed bytes, so it is as tamper-proof as curators[] is);
+//   - several otherwise: nobody. The row fails closed until an operator migrates it (ErrNotResourceOwner,
+//     with a message that says why, so the 403 is not mistaken for a wrong-key error).
+func storedGroupOwnerSet(g *playlistgroup.Group) (keySet, error) {
+	signers := ownerSet(nil, playlist.RoleCurator, g.Signatures)
+	if len(signers) <= 1 {
+		return signers, nil
+	}
+	if legacy := strings.TrimSpace(g.Curator); legacy != "" {
+		if _, ok := signers[legacy]; ok {
+			return keySet{legacy: struct{}{}}, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: the stored group carries several curator-role signatures and its curator field names none of them, so no key can be established as its owner; the row needs operator migration", ErrNotResourceOwner)
 }
 
 // requireUnambiguousOwner enforces the single-signer rule for undeclared documents: with no declared

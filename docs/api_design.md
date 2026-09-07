@@ -87,6 +87,11 @@ one **owner set** per document with a single rule, applied to every resource kin
   declaration, which is the one place it is tamper-proof. This is what lets core-only documents through,
   as the spec allows. A playlist-group's `curator` is a display name in the core schema, not a key, so a
   group always has exactly one owner — which matches the spec's singular `curator`.
+- **Stored groups from before this rule.** Under the previous contract the key named by a group's signed
+  `curator` string owned it and other keys could co-sign in the curator role without authority, so such
+  rows may carry several curator-role signatures. They are not read as co-owned: if the `curator` string
+  names exactly one of the signers, that key is the owner; otherwise no key can replace or delete the row
+  (**`403`** with a message saying so) until an operator migrates it. New groups cannot have that shape.
 
 An **authorizing signature** must be *declared* (kid in the owner set), *proven* (verifies
 cryptographically) **and** *acting as owner* (`role` equals the owner role). The role check is what stops

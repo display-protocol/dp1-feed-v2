@@ -8,6 +8,7 @@ import (
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
+	"github.com/display-protocol/dp1-go/playlistgroup"
 )
 
 // The ownership rules are pure functions over key sets and signature entries, so they are exercised
@@ -364,6 +365,38 @@ func TestRequireUnambiguousOwner(t *testing.T) {
 			err := requireUnambiguousOwner(tc.declared, playlist.RoleCurator, tc.sigs)
 			if tc.wantErr != (err != nil) || (err != nil && !errors.Is(err, ErrAmbiguousOwner)) {
 				t.Fatalf("got %v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestStoredGroupOwnerSet(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		group   playlistgroup.Group
+		want    keySet
+		wantErr bool
+	}{
+		{name: "single signer owns", group: playlistgroup.Group{Curator: "Name", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor)}}, want: keys("A")},
+		{name: "no curator-role signer: empty, not an error", group: playlistgroup.Group{Signatures: []playlist.Signature{sig("L", playlist.RoleLicensor)}}, want: keys()},
+		{name: "legacy: several signers, curator names one", group: playlistgroup.Group{Curator: " B ", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, want: keys("B")},
+		{name: "legacy: several signers, curator is a name", group: playlistgroup.Group{Curator: "Name", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, wantErr: true},
+		{name: "legacy: several signers, curator names a non-signer", group: playlistgroup.Group{Curator: "C", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := tc.group
+			got, err := storedGroupOwnerSet(&g)
+			if tc.wantErr {
+				if !errors.Is(err, ErrNotResourceOwner) {
+					t.Fatalf("want fail-closed ErrNotResourceOwner, got %v", err)
+				}
+				return
+			}
+			if err != nil || !sameKeys(got, tc.want) {
+				t.Fatalf("got %v, %v; want %v", got, err, tc.want)
 			}
 		})
 	}

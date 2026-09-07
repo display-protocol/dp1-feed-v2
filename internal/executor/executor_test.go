@@ -4595,3 +4595,54 @@ func TestReplaceChannel_declaredPublisherCannotBeDropped(t *testing.T) {
 		t.Fatalf("want owner-removed (declaration dropped), got %v", err)
 	}
 }
+
+// Groups stored before the single-signer rule may carry curator-role co-signatures that had no authority
+// under the previous contract (only the key named by the signed `curator` string owned). Deriving owners
+// from every stored signer would hand those co-signers delete authority they never had. The legacy
+// declaration resolves the owner; with no resolution the row fails closed.
+func TestPlaylistGroup_legacyMultiSignerRows(t *testing.T) {
+	t.Parallel()
+	const coSigner = "did:key:z6MkLegacyCoSignerXXXXXXXXXXXXXXXXXXXXXXXXX"
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	legacy := func(curatorField string) *store.PlaylistGroupRecord {
+		return &store.PlaylistGroupRecord{ID: id, Slug: "gid", Body: playlistgroup.Group{
+			ID: id.String(), Slug: "gid", Created: testCreatedRFC, Curator: curatorField,
+			Signatures: []playlist.Signature{testSig(testCuratorKid), testSig(coSigner)},
+		}}
+	}
+	tests := []struct {
+		name    string
+		stored  *store.PlaylistGroupRecord
+		signer  string
+		wantErr error // nil: delete succeeds
+	}{
+		{name: "curator names the owner: co-signer cannot delete", stored: legacy(testCuratorKid), signer: coSigner, wantErr: executor.ErrNotResourceOwner},
+		{name: "curator names the owner: owner can delete", stored: legacy(testCuratorKid), signer: testCuratorKid},
+		{name: "curator is a display name: nobody can delete (fail closed)", stored: legacy("Group Curator"), signer: testCuratorKid, wantErr: executor.ErrNotResourceOwner},
+		{name: "curator is a display name: co-signer cannot delete either", stored: legacy("Group Curator"), signer: coSigner, wantErr: executor.ErrNotResourceOwner},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+			mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(tc.stored, nil)
+			if tc.wantErr == nil || errors.Is(tc.wantErr, executor.ErrNotResourceOwner) && tc.stored.Body.Curator == testCuratorKid {
+				// Only rows with a resolvable owner get as far as intent verification.
+				mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+			}
+			if tc.wantErr == nil {
+				mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), id.String(), gomock.Any()).Return(nil)
+			}
+			e := executor.New(mockStore, mockDP1, false, nil, "")
+			err := e.DeletePlaylistGroup(context.Background(), "gid", deleteReq(models.IntentTargetPlaylistGroup, id.String(), "gid", tc.signer))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr != nil && tc.stored.Body.Curator != testCuratorKid && !strings.Contains(err.Error(), "operator migration") {
+				t.Fatalf("fail-closed error should say why: %v", err)
+			}
+		})
+	}
+}

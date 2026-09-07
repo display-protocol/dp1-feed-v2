@@ -568,7 +568,10 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 	if err := requireUnambiguousOwner(nil, playlist.RoleCurator, req.Signatures); err != nil {
 		return nil, err
 	}
-	stored := ownerSet(nil, playlist.RoleCurator, rec.Body.Signatures)
+	stored, err := storedGroupOwnerSet(&rec.Body)
+	if err != nil {
+		return nil, err
+	}
 	incoming := ownerSet(nil, playlist.RoleCurator, req.Signatures)
 	if err := requireOwnersRetained(stored, incoming); err != nil {
 		return nil, err
@@ -625,7 +628,10 @@ func (e *impl) DeletePlaylistGroup(ctx context.Context, idOrSlug string, req *mo
 	if err != nil {
 		return err
 	}
-	owners := ownerSet(nil, playlist.RoleCurator, rec.Body.Signatures)
+	owners, err := storedGroupOwnerSet(&rec.Body)
+	if err != nil {
+		return err
+	}
 	if err := e.verifyIntent(req, models.IntentActionDelete, models.IntentTargetPlaylistGroup, rec.ID, rec.Slug, owners, playlist.RoleCurator, nil); err != nil {
 		return err
 	}
