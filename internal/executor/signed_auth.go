@@ -289,6 +289,7 @@ func IsBlockedFetchDestinationError(err error) bool {
 // stored resource). Maps to 400.
 func IsInvalidSubmissionError(err error) bool {
 	return err != nil && (errors.Is(err, ErrAmbiguousOwner) ||
+		errors.Is(err, ErrGroupCuratorMismatch) ||
 		errors.Is(err, ErrSlugRequired) ||
 		errors.Is(err, ErrItemIDRequired) ||
 		errors.Is(err, ErrTooManyReferences) ||

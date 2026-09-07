@@ -481,6 +481,9 @@ func (e *impl) CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGrou
 	if err != nil {
 		return nil, err
 	}
+	if err := requireGroupCuratorConsistent(req.Curator, req.Signatures); err != nil {
+		return nil, err
+	}
 	if err := e.verifyOwnerSignatures(e.dp1.VerifyPlaylistGroupSignatures, req.Raw, nil, playlist.RoleCurator, req.Signatures, ErrNoValidCuratorSignature); err != nil {
 		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
@@ -566,6 +569,9 @@ func (e *impl) ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *m
 		return nil, err
 	}
 	if err := requireUnambiguousOwner(nil, playlist.RoleCurator, req.Signatures); err != nil {
+		return nil, err
+	}
+	if err := requireGroupCuratorConsistent(req.Curator, req.Signatures); err != nil {
 		return nil, err
 	}
 	stored, err := storedGroupOwnerSet(&rec.Body)

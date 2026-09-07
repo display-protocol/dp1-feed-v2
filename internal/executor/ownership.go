@@ -94,6 +94,9 @@ var (
 	// owner-role signature. The feed cannot tell a co-author from a relayer who appended a signature, so it
 	// refuses the shape rather than guess (400: the client fixes it by declaring the owners).
 	ErrAmbiguousOwner = errors.New("a document with no declared owners must carry exactly one owner-role signature; declare the owners to have more than one")
+	// ErrGroupCuratorMismatch is returned when a playlist-group's `curator` string names one of the
+	// document's signers but that signer did not sign in the curator role. See requireGroupCuratorConsistent.
+	ErrGroupCuratorMismatch = errors.New("a playlist-group curator that names a signer must name the curator-role signer")
 )
 
 // keySet is a set of signing-key identifiers (did:key / did:pkh kids).
@@ -145,27 +148,74 @@ func ownerSet(declared keySet, ownerRole string, sigs []playlist.Signature) keyS
 	return set
 }
 
-// storedGroupOwnerSet derives the owner set of a STORED playlist-group. Groups cannot declare owners, so
-// the owners are the curator-role signers — exactly one for any group created under
-// requireUnambiguousOwner. Rows that predate that rule may carry several: the previous contract took the
-// `curator` string as the owner's key and let other keys co-sign in the curator role without authority.
-// Reading every signer as an owner would hand those co-signers delete authority they never had, so:
-//   - one curator-role signer: that key owns;
-//   - several, and the signed `curator` string equals exactly one of them: that key owns (the legacy
-//     declaration — `curator` is inside the signed bytes, so it is as tamper-proof as curators[] is);
-//   - several otherwise: nobody. The row fails closed until an operator migrates it (ErrNotResourceOwner,
-//     with a message that says why, so the 403 is not mistaken for a wrong-key error).
+// signerKeySet collects the kids of every signature regardless of role.
+func signerKeySet(sigs []playlist.Signature) keySet {
+	set := make(keySet, len(sigs))
+	for _, s := range sigs {
+		if k := strings.TrimSpace(s.Kid); k != "" {
+			set[k] = struct{}{}
+		}
+	}
+	return set
+}
+
+// legacyGroupOwner returns the key the group's signed `curator` string names, when that string is the kid
+// of one of the group's signatures (any role); "" otherwise. The DP-1 core schema calls `curator` a
+// display name, but the previous contract of this feed used it as the owner's key and matched it against
+// signature kids regardless of role, so for stored rows it is a signed owner declaration and must be
+// honored ahead of the role-derived rule.
+func legacyGroupOwner(g *playlistgroup.Group) string {
+	legacy := strings.TrimSpace(g.Curator)
+	if legacy == "" {
+		return ""
+	}
+	if _, ok := signerKeySet(g.Signatures)[legacy]; ok {
+		return legacy
+	}
+	return ""
+}
+
+// requireGroupCuratorConsistent keeps new group rows unambiguous for storedGroupOwnerSet: if the
+// submitted `curator` string names one of the document's signers, it must be the curator-role signer.
+// Otherwise a stored row could carry a `curator` naming a licensor co-signer while a different key signed
+// as curator, and the stored-side resolution (which must honor `curator` for legacy rows) would disagree
+// with the create-time owner. A `curator` that names no signer is a display name and is unconstrained.
+func requireGroupCuratorConsistent(curator string, sigs []playlist.Signature) error {
+	c := strings.TrimSpace(curator)
+	if c == "" {
+		return nil
+	}
+	if _, isSigner := signerKeySet(sigs)[c]; !isSigner {
+		return nil
+	}
+	if _, isOwner := ownerSet(nil, playlist.RoleCurator, sigs)[c]; isOwner {
+		return nil
+	}
+	return fmt.Errorf("%w: curator %q is one of the signers but did not sign in the %q role", ErrGroupCuratorMismatch, c, playlist.RoleCurator)
+}
+
+// storedGroupOwnerSet derives the owner set of a STORED playlist-group. Groups cannot declare owners in
+// the extension sense, so the owner is the single curator-role signer for any group created under
+// requireUnambiguousOwner and requireGroupCuratorConsistent. Rows that predate those rules were owned by
+// the key named in the signed `curator` string, matched against signature kids regardless of role, and
+// could carry other keys co-signing in any role without authority. Reading such a row through the
+// role-derived rule alone would hand a co-signer authority it never had (or, when the owner signed under
+// a non-curator role, strip the owner and promote the co-signer), so:
+//   - the signed `curator` string names a stored signer (any role): that key owns — the legacy
+//     declaration, inside the signed bytes and therefore as tamper-proof as curators[]; for rows created
+//     under the new rules this is by construction the curator-role signer;
+//   - otherwise, exactly one curator-role signer: that key owns;
+//   - otherwise several curator-role signers: nobody. The row fails closed until an operator migrates it
+//     (ErrNotResourceOwner, with a message that says why, so the 403 is not mistaken for a wrong-key error).
 func storedGroupOwnerSet(g *playlistgroup.Group) (keySet, error) {
+	if legacy := legacyGroupOwner(g); legacy != "" {
+		return keySet{legacy: struct{}{}}, nil
+	}
 	signers := ownerSet(nil, playlist.RoleCurator, g.Signatures)
 	if len(signers) <= 1 {
 		return signers, nil
 	}
-	if legacy := strings.TrimSpace(g.Curator); legacy != "" {
-		if _, ok := signers[legacy]; ok {
-			return keySet{legacy: struct{}{}}, nil
-		}
-	}
-	return nil, fmt.Errorf("%w: the stored group carries several curator-role signatures and its curator field names none of them, so no key can be established as its owner; the row needs operator migration", ErrNotResourceOwner)
+	return nil, fmt.Errorf("%w: the stored group carries several curator-role signatures and its curator field names none of its signers, so no key can be established as its owner; the row needs operator migration", ErrNotResourceOwner)
 }
 
 // requireUnambiguousOwner enforces the single-signer rule for undeclared documents: with no declared

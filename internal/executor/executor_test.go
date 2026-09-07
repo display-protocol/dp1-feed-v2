@@ -4646,3 +4646,69 @@ func TestPlaylistGroup_legacyMultiSignerRows(t *testing.T) {
 		})
 	}
 }
+
+// A legacy group could store `curator: A` with A signing under a non-curator role (the old rule matched
+// kids only) and B co-signing as curator. The signed `curator` string keeps naming the owner: B gains
+// nothing, and A — signing its intent as curator now — keeps delete authority.
+func TestPlaylistGroup_legacyMixedRoleRow(t *testing.T) {
+	t.Parallel()
+	const coSigner = "did:key:z6MkLegacyCoSignerXXXXXXXXXXXXXXXXXXXXXXXXX"
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	stored := func() *store.PlaylistGroupRecord {
+		return &store.PlaylistGroupRecord{ID: id, Slug: "gid", Body: playlistgroup.Group{
+			ID: id.String(), Slug: "gid", Created: testCreatedRFC, Curator: testCuratorKid,
+			Signatures: []playlist.Signature{sigWithRole(testCuratorKid, playlist.RoleLicensor), testSig(coSigner)},
+		}}
+	}
+	for _, tc := range []struct {
+		name    string
+		signer  string
+		wantErr error
+	}{
+		{name: "curator-role co-signer cannot delete", signer: coSigner, wantErr: executor.ErrNotResourceOwner},
+		{name: "legacy owner can delete", signer: testCuratorKid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockStore := mocks.NewMockStore(ctrl)
+			mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+			mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(stored(), nil)
+			mockDP1.EXPECT().VerifySignatures(gomock.Any()).Return(true, nil, nil)
+			if tc.wantErr == nil {
+				mockStore.EXPECT().DeletePlaylistGroup(gomock.Any(), id.String(), gomock.Any()).Return(nil)
+			}
+			e := executor.New(mockStore, mockDP1, false, nil, "")
+			err := e.DeletePlaylistGroup(context.Background(), "gid", deleteReq(models.IntentTargetPlaylistGroup, id.String(), "gid", tc.signer))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A submitted group whose `curator` names one of its signers must name the curator-role signer, so that
+// the stored-side resolution (which honors `curator` for legacy rows) cannot disagree with the owner
+// established at create. A `curator` naming no signer is a display name and is free.
+func TestPlaylistGroup_curatorNamingNonCuratorSignerRejected(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	id := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	mockStore.EXPECT().GetPlaylistGroup(gomock.Any(), "gid").Return(storedOwnedGroup(id, "group-title"), nil)
+	ref := memberPlaylistExpect(t, mockStore)
+
+	const licensor = "did:key:z6MkLicensorXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase)
+	req := validGroupCreateReq(ref)
+	req.Curator = licensor
+	req.Signatures = []playlist.Signature{testSig(testCuratorKid), sigWithRole(licensor, playlist.RoleLicensor)}
+	req.Raw = mustJSONRaw(req)
+	if _, err := e.CreatePlaylistGroup(context.Background(), req); !errors.Is(err, executor.ErrGroupCuratorMismatch) || !executor.IsInvalidSubmissionError(err) {
+		t.Fatalf("create: want curator-mismatch (400), got %v", err)
+	}
+	if _, err := e.ReplacePlaylistGroup(context.Background(), "gid", req, nil); !errors.Is(err, executor.ErrGroupCuratorMismatch) {
+		t.Fatalf("replace: want curator-mismatch, got %v", err)
+	}
+}

@@ -1048,7 +1048,10 @@ components:
             maxLength: 2048
         curator:
           type: string
-          description: Name of the curator who created this exhibition (DP-1 core). Attribution only.
+          description: >-
+            Name of the curator who created this exhibition (DP-1 core). Attribution only — unless it is the
+            kid of one of the document's signers, in which case it must be the `curator`-role signer (400
+            otherwise), and it is what identifies the owner of rows stored before role-aware ownership.
         summary:
           type: string
         coverImage:
