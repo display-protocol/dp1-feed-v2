@@ -950,9 +950,6 @@ components:
           format: uri
         title:
           type: string
-        created:
-          type: string
-          format: date-time
         duration:
           type: number
         note:
