@@ -355,8 +355,9 @@ paths:
       summary: Create playlist-group
       description: >-
         Creates a new playlist-group with resolved playlist references. Open to any client: the body must
-        carry a non-empty `signatures` array with at least one valid `curator`-role signature; those
-        signers become the owners (`curator` is a display name, not a key).
+        carry a non-empty `signatures` array with exactly one valid `curator`-role signature; that signer
+        is the group's single owner (`curator` is a display name, not a key, so a group cannot declare
+        co-owners; a second `curator`-role signature is 400). Other roles may co-sign freely.
       requestBody:
         required: true
         content:
@@ -1003,9 +1004,12 @@ components:
       additionalProperties: false
       description: >-
         Create (POST) / replace (PUT) body for a playlist-group. Signature-only: `id`, `created`, `slug`,
-        and a `curator`-role signature in `signatures` are required and stored verbatim. The owners are the
-        `curator`-role signers; `curator` is a display name (DP-1 core) and takes no part in authorization.
-        On PUT the identity (`id`, `slug`, document `created`) is immutable and the owner set may only grow.
+        and exactly one `curator`-role signature in `signatures` are required and stored verbatim. That
+        signer is the group's single owner; `curator` is a display name (DP-1 core) and takes no part in
+        authorization. A group has no owner declaration, so it can never have more than one owner and the
+        owner cannot change on PUT: the identity (`id`, `slug`, document `created`) is immutable and the
+        replacement must carry the same key's `curator`-role signature. Additional signatures in other
+        roles are accepted and preserved.
       required:
         - id
         - created

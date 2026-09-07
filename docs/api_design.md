@@ -138,7 +138,9 @@ Three postures, by verb:
      version declares `curators`/`publisher` may not omit it on `PUT` (**`403`**), so a document cannot
      slide from the signed-owner regime to the label-derived one. A declared channel `publisher` is
      therefore a single owner that cannot change; channel `curators` are attribution and may change
-     freely; a group's `curator` name may change. All signatures must cryptographically verify (**`400`**) and at least one must be an
+     freely. A playlist-group has no owner declaration at all, so its single owner can never change or be
+     joined: the replacement must carry the same key's `curator`-role signature, a second one is
+     **`400`**, and only the `curator` display name may change. All signatures must cryptographically verify (**`400`**) and at least one must be an
      authorizing signature from a **stored** owner (**`403`**). Membership is permanent once granted, and
      a deleted id cannot be re-created, so key rotation is "add the new key" only; self-removal via the
      intent is the natural extension and is not built.
@@ -300,7 +302,7 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 
 - **POST** — create (open); body must carry an owner-role signature from one of its owners (see Authentication).
 - **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound, owners may be added but not removed (see Authentication).
+- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound; declared owners may be added but never removed, and a group's single owner cannot change (see Authentication).
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
 - **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 
