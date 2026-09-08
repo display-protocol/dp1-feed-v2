@@ -84,7 +84,7 @@ Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membersh
 POST /api/v1/playlists
   → RequireSignatures: body must carry a non-empty signatures[]
   → Parse JSON into models
-  → Executor: verify curator/publisher signatures → feed co-sign (dp1svc) → validate → store
+  → Executor: verify signatures + owner-role authority → feed co-sign (dp1svc) → validate → store
   → Return signed playlist JSON
 ```
 
@@ -100,11 +100,11 @@ GET /api/v1/playlists/:id
 
 ## Authentication
 
-- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; owner immutable). DELETE carries a signed delete-intent body.
+- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace but never removed; groups and channels are single-owner). DELETE carries a signed delete-intent body.
 - **Reads:** public unless restricted by deployment.
 - **Cryptographic signatures:** Ed25519 (v1.1+ multisig) via `dp1svc`; documents carry curator/publisher and feed-operator proof, not end-user OAuth.
 
-Ownership is derived from each document's declared curators/publisher — there is no global key allowlist. Since anyone can create (and thereby own) a resource, production may front the service with a gateway or reverse proxy to restrict who may create. See `docs/api_design.md` for the full authorization posture.
+Ownership is derived from each document itself — its declared `curators`/`publisher` keys when present, else the signers carrying the owner role (`curator` for playlists and groups, `publisher` for channels) — and an authorizing signature must come from an owner key *and* carry that role. The rules live in `internal/executor/ownership.go`. There is no global key allowlist: since anyone can create (and thereby own) a resource, production may front the service with a gateway or reverse proxy to restrict who may create. See `docs/api_design.md` for the full authorization posture.
 
 ---
 

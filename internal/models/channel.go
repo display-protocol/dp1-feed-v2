@@ -9,7 +9,8 @@ import (
 
 // ChannelCreateRequest is the JSON body for POST /api/v1/channels (extensions).
 // Playlists is an ordered list of playlist URIs, resolved the same way as for playlist-groups.
-// Slug is optional; when omitted, whitespace-only, or un-slugifiable, the executor derives a unique slug from title (same pattern as playlist-groups). If the title is also un-slugifiable, the executor uses a "channel-" prefix with a short id suffix.
+// Publisher is optional (channels extension); when present it is the single owner, otherwise the
+// publisher-role signers own the channel. Curators are attribution only.
 type ChannelCreateRequest struct {
 	Title      string            `json:"title" binding:"required"`
 	Slug       string            `json:"slug,omitempty"`
@@ -20,8 +21,9 @@ type ChannelCreateRequest struct {
 	Summary    string            `json:"summary,omitempty"`
 	CoverImage string            `json:"coverImage,omitempty"`
 
-	// Identity and authorization: the client supplies id, created and the publisher signatures over the
-	// document. All three are part of the signed payload and are required (there is no API key).
+	// Identity and authorization: the client supplies id, created and the signatures over the document,
+	// at least one of which must be a publisher-role signature from an owner. All three are part of the
+	// signed payload and are required (there is no API key).
 	ID         *string              `json:"id,omitempty"`
 	Created    *string              `json:"created,omitempty"`
 	Signatures []playlist.Signature `json:"signatures,omitempty"`

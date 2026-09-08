@@ -191,11 +191,11 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: nil parsed document", uri)
 	}
 	// A remote document this feed does not already hold would be *created* by this ingest, so hold it to
-	// the same bar as POST: it must be validly self-signed by a key it declares as a curator. Schema
-	// validity alone is not enough — an unsigned or badly signed body would otherwise be published here
-	// under the referencing party's request. (This cannot authorize overwriting an existing playlist:
+	// the same bar as POST: it must carry a verifying curator-role signature from one of its owners.
+	// Schema validity alone is not enough — an unsigned or badly signed body would otherwise be published
+	// here under the referencing party's request. (This cannot authorize overwriting an existing playlist:
 	// ingestion only ever links those, never modifies them.)
-	if err := e.verifyPlaylistCuratorSignatures(body, p.Signatures, p.Curators); err != nil {
+	if err := e.verifyPlaylistOwnerSignatures(body, p.Signatures, p.Curators); err != nil {
 		return store.IngestedPlaylist{}, fmt.Errorf("playlist %q: curator signature verification: %w", uri, err)
 	}
 	// Materializing a remote document is a create, so it must satisfy exactly what POST requires. The feed

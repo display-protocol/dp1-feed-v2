@@ -73,14 +73,14 @@ Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_grou
 
 ## Request flow (illustrative)
 
-- **Create playlist:** POST → RequireSignatures (body has signatures[]) → parse models → executor: verify curator/publisher signatures → feed co-sign (`dp1svc`) → validate → store → JSON response.
+- **Create playlist:** POST → RequireSignatures (body has signatures[]) → parse models → executor: verify signatures + owner-role authority → feed co-sign (`dp1svc`) → validate → store → JSON response.
 - **Read playlist:** GET → store by id/slug → JSONB body (signatures included).
 
 ## Authentication
 
-- **Writes:** signatures only — no API key. `RequireSignatures` rejects any POST/PUT/DELETE without a `signatures[]` body; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; owner immutable). DELETE carries a signed delete-intent body.
+- **Writes:** signatures only — no API key. `RequireSignatures` rejects any POST/PUT/DELETE without a `signatures[]` body; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace, never removed; groups and channels are single-owner). DELETE carries a signed delete-intent body.
 - **Reads:** public unless deployment restricts.
-- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (curator/publisher + feed operator), not end-user OAuth. Ownership is document-declared; there is no global key allowlist.
+- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (owner + feed operator), not end-user OAuth. Ownership is derived from the document itself — declared `curators`/`publisher` keys when present, else the signers carrying the owner role (`curator` for playlists and groups, `publisher` for channels) — and an authorizing signature must be from an owner key *and* carry that role. Rules live in `internal/executor/ownership.go`; `docs/api_design.md` is canonical. There is no global key allowlist.
 
 ## Technology stack
 

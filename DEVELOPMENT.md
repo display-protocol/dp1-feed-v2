@@ -352,8 +352,10 @@ For Docker: `make up-infra` or `make up`. For local `go run`: ensure Postgres is
 
 **"unauthorized" API responses**  
 Mutating requests are authorized by signatures, not an API key. A `401 unauthorized` means the request
-body carried no `signatures` array; a `403 forbidden` means the signer is not an owner of the resource (or
-a PUT changed the immutable owner set). See [docs/api_design.md](docs/api_design.md#authentication-and-authorization).
+body carried no `signatures` array; a `403 forbidden` means no signer is an owner acting in the owner role
+(`curator` for playlists and groups, `publisher` for channels — an owner key signing as `licensor` or
+`agent` does not count), or a PUT tried to remove a stored owner or add one without that key's owner-role
+signature. See [docs/api_design.md](docs/api_design.md#authentication-and-authorization).
 
 ## Need Help?
 
