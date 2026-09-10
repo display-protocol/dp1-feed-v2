@@ -481,7 +481,7 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 			containerTable, memberTable, containerColumn = "playlist_groups", "playlist_group_members", "playlist_group_id"
 			key = pgF
 		}
-		containerID, found, err := s.resolveContainer(ctx, containerTable, key)
+		containerID, _, found, err := resolveContainer(ctx, s.pool, containerTable, key)
 		if err != nil {
 			return nil, "", err
 		}
@@ -656,29 +656,39 @@ LIMIT $1`, tupleOp, order, order)
 	return out, nextCursor, nil
 }
 
-// resolveContainer turns a channel / playlist-group filter value into the container's id, the way
-// GetChannel and ListPlaylistsInChannel do: a value that parses as a UUID is looked up by id, anything
-// else by slug. found is false when no such container exists — for a UUID too, because callers decide
-// "unknown container" (empty page, and no cursor binding check) from found, and a parseable id that
-// matches no row is exactly as unknown as a slug that matches none. It must be one or the other,
-// never `id::text = $n OR slug = $n`: create is open and slugs are client-chosen, so a second container
-// whose slug equals the first one's UUID string is creatable, and matching both would merge two
-// containers' membership — interleaving rows in a position-ordered list, and leaking a decoy's items
-// into a UUID-filtered item list. containerTable is one of the two table-name literals the callers
-// own; the only parameter is the slug.
-func (s *Store) resolveContainer(ctx context.Context, containerTable, key string) (id uuid.UUID, found bool, err error) {
+// rowQuerier is the one method resolveContainer needs, satisfied by both the pool and a pgx.Tx so a
+// caller can resolve inside the same snapshot it reads membership from.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// resolveContainer turns a channel / playlist-group filter value into the container's id and its
+// updated_at, the way GetChannel and ListPlaylistsInChannel resolve it: a value that parses as a UUID
+// is looked up by id, anything else by slug. found is false when no such container exists — for a
+// UUID too, because callers decide "unknown container" (empty page, and no cursor binding check) from
+// found, and a parseable id that matches no row is exactly as unknown as a slug that matches none. It
+// must be one or the other, never `id::text = $n OR slug = $n`: create is open and slugs are
+// client-chosen, so a second container whose slug equals the first one's UUID string is creatable,
+// and matching both would merge two containers' membership — interleaving rows in a position-ordered
+// list, and leaking a decoy's items into a UUID-filtered item list. containerTable is one of the two
+// table-name literals the callers own; the only parameter is the key.
+//
+// updatedAt is the container row's updated_at, bumped by trigger on every replace, which also
+// rebuilds the membership rows; listPlaylistsByMembership uses it as the membership revision a cursor
+// is bound to.
+func resolveContainer(ctx context.Context, q rowQuerier, containerTable, key string) (id uuid.UUID, updatedAt time.Time, found bool, err error) {
 	if parsed, perr := uuid.Parse(key); perr == nil {
-		err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE id = $1`, containerTable), parsed).Scan(&id)
+		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE id = $1`, containerTable), parsed).Scan(&id, &updatedAt)
 	} else {
-		err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE slug = $1`, containerTable), key).Scan(&id)
+		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE slug = $1`, containerTable), key).Scan(&id, &updatedAt)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, false, nil
+		return uuid.Nil, time.Time{}, false, nil
 	}
 	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("resolve %s %q: %w", containerTable, key, err)
+		return uuid.Nil, time.Time{}, false, fmt.Errorf("resolve %s %q: %w", containerTable, key, err)
 	}
-	return id, true, nil
+	return id, updatedAt, true, nil
 }
 
 // listPlaylistsByMembership is ListPlaylists for a channel or playlist-group filter: one row per
@@ -693,12 +703,19 @@ func (s *Store) resolveContainer(ctx context.Context, containerTable, key string
 // with a single container it is a complete keyset — no id tie-break — but across two it has ties,
 // and LIMIT plus a position cursor would then skip or repeat rows.
 //
-// The cursor carries the container kind, the resolved container id, the sort direction and the last
-// position, and a request must present the same kind, container and direction to use it. The
-// position alone is not a page boundary: the same number means a different row in another container,
-// and under the opposite direction the comparison flips, so a token reused that way would return a
-// successful page that repeats or skips rows. Binding those three to the token turns that into the
-// documented 400.
+// The cursor carries the container kind, the resolved container id, the sort direction, the
+// container's membership revision (its updated_at) and the last position, and a request must present
+// the same kind, container and direction, against an unchanged revision, to use it. The position
+// alone is not a page boundary: the same number means a different row in another container; under
+// the opposite direction the comparison flips; and a replace of the container deletes and rebuilds
+// its membership rows under the same id, so after `[A,B,C,D]` becomes `[D,C,B,A]` a "position > 1"
+// token would serve `[B,A]` — repeating B, dropping D and C — an order that matches neither signed
+// document. Binding all of those to the token turns each case into the documented 400, and the
+// client restarts from the first page.
+//
+// The revision is read in the same REPEATABLE READ snapshot as the membership rows, so a replace that
+// commits between the two statements cannot pass the check with the old revision and then page the
+// new rows.
 func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlaylistsParams, limit int, chF, pgF string) ([]store.PlaylistRecord, string, error) {
 	kind, memberTable, containerColumn, containerTable := membershipKindPlaylistGroup, "playlist_group_members", "playlist_group_id", "playlist_groups"
 	container := pgF
@@ -728,7 +745,13 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 	}
-	containerID, found, err := s.resolveContainer(ctx, containerTable, container)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, "", fmt.Errorf("begin read tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	containerID, revision, found, err := resolveContainer(ctx, tx, containerTable, container)
 	if err != nil {
 		return nil, "", err
 	}
@@ -756,6 +779,9 @@ LIMIT $1`, base, order)
 			return nil, "", fmt.Errorf("%w: cursor was issued for %s %s sorted %s, not %s %s sorted %s", store.ErrInvalidCursor,
 				cur.Kind, cur.Container, cur.Sort, kind, containerID, sort)
 		}
+		if !cur.Rev.Equal(revision) {
+			return nil, "", fmt.Errorf("%w: %s %s was replaced since the cursor was issued; restart from the first page", store.ErrInvalidCursor, kind, containerID)
+		}
 		args = []any{limit + 1, containerID, cur.Pos}
 		q = fmt.Sprintf(`%s
 AND m.position %s $3::int
@@ -763,7 +789,7 @@ ORDER BY m.position %s
 LIMIT $1`, base, cursorOp, order)
 	}
 
-	rows, err := s.pool.Query(ctx, q, args...)
+	rows, err := tx.Query(ctx, q, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("list playlists by membership: %w", err)
 	}
@@ -788,10 +814,15 @@ LIMIT $1`, base, cursorOp, order)
 		return nil, "", fmt.Errorf("list playlists by membership: %w", err)
 	}
 
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", fmt.Errorf("commit read tx: %w", err)
+	}
+
 	nextCursor := ""
 	if len(out) > limit {
 		out = out[:limit]
-		nextCursor = encodeMembershipCursor(kind, containerID, sort, positions[limit-1])
+		nextCursor = encodeMembershipCursor(kind, containerID, sort, revision, positions[limit-1])
 	}
 	return out, nextCursor, nil
 }
@@ -1656,6 +1687,7 @@ type membershipCursorPayload struct {
 	Kind      string    `json:"kind"`
 	Container uuid.UUID `json:"cid"`
 	Sort      string    `json:"sort"`
+	Rev       time.Time `json:"rev"` // container updated_at when the token was issued (membership revision)
 	Pos       int       `json:"pos"`
 }
 
@@ -1716,9 +1748,10 @@ func decodeCursor(s string) (time.Time, uuid.UUID, error) {
 }
 
 // encodeMembershipCursor builds the next-page token for a membership-ordered list:
-// base64url(JSON { kind, cid, sort, pos }).
-func encodeMembershipCursor(kind string, container uuid.UUID, sort store.SortOrder, pos int) string {
-	b, _ := json.Marshal(membershipCursorPayload{Kind: kind, Container: container, Sort: string(sort), Pos: pos})
+// base64url(JSON { kind, cid, sort, rev, pos }). rev round-trips through RFC 3339 with nanoseconds,
+// which preserves Postgres's microsecond updated_at exactly, so the decoder can compare it with Equal.
+func encodeMembershipCursor(kind string, container uuid.UUID, sort store.SortOrder, rev time.Time, pos int) string {
+	b, _ := json.Marshal(membershipCursorPayload{Kind: kind, Container: container, Sort: string(sort), Rev: rev, Pos: pos})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
@@ -1741,7 +1774,7 @@ func decodeMembershipCursor(s string) (membershipCursorPayload, error) {
 	if _, ok := raw["t"]; ok {
 		return p, fmt.Errorf("cursor belongs to an unfiltered list")
 	}
-	if err := requireCursorFields(raw, "kind", "cid", "sort", "pos"); err != nil {
+	if err := requireCursorFields(raw, "kind", "cid", "sort", "rev", "pos"); err != nil {
 		return p, err
 	}
 	if err := json.Unmarshal(b, &p); err != nil {
@@ -1755,6 +1788,9 @@ func decodeMembershipCursor(s string) (membershipCursorPayload, error) {
 	}
 	if _, err := store.ParseSortOrder(p.Sort); err != nil || p.Sort == "" {
 		return p, fmt.Errorf("cursor carries an invalid sort direction %q", p.Sort)
+	}
+	if p.Rev.IsZero() {
+		return p, fmt.Errorf("cursor carries a zero membership revision")
 	}
 	if p.Pos < 0 || p.Pos > math.MaxInt32 {
 		return p, fmt.Errorf("cursor carries an out-of-range position %d", p.Pos)

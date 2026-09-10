@@ -2677,3 +2677,60 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 		t.Fatalf("group cursor presented against a channel: want ErrInvalidCursor, got %v", err)
 	}
 }
+
+// A membership cursor is bound to the container's membership revision. A replace of the channel
+// deletes and rebuilds its membership rows under the same id, so a position issued before the replace
+// is a boundary in an order that no longer exists: `[A,B,C,D]` paged at 2 issues "position 1"; after
+// the replace to `[D,C,B,A]` that token would serve `[B,A]`, repeating B and dropping D and C. The
+// token must be refused so the client restarts from the first page.
+func TestIntegration_ListPlaylists_membershipCursorRefusedAfterReplace(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	ids := make([]uuid.UUID, 4)
+	members := make([]store.IngestedPlaylist, 4)
+	for i := range ids {
+		ids[i] = uuid.MustParse(fmt.Sprintf("0b000000-0000-4000-8000-00000000000%d", i+1))
+		slug := fmt.Sprintf("rev-pl-%d", i+1)
+		pl := playlist.Playlist{DPVersion: "1.1.0", Title: slug, Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://" + slug}}}
+		if err := st.CreatePlaylist(ctx, ids[i], slug, rawDoc(t, &pl)); err != nil {
+			t.Fatal(err)
+		}
+		members[i] = store.IngestedPlaylist{ID: ids[i], Slug: slug, Raw: rawDoc(t, &pl)}
+	}
+	chID := uuid.MustParse("0c000000-0000-4000-8000-0000000000aa")
+	body := func(order []store.IngestedPlaylist) channels.Channel {
+		slugs := make([]string, len(order))
+		for i, m := range order {
+			slugs[i] = m.Slug
+		}
+		return channels.Channel{ID: chID.String(), Slug: "rev-channel", Title: "Revision Channel", Version: "1.0.0", Playlists: slugs}
+	}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(members)), Playlists: members}); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	page1, cur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || cur == "" || len(page1) != 2 || page1[0].ID != ids[0] || page1[1].ID != ids[1] {
+		t.Fatalf("page 1: %d rows, cursor %q, err %v", len(page1), cur, err)
+	}
+
+	// Replace the channel with the reversed order; the trigger bumps updated_at and membership is rebuilt.
+	reversed := []store.IngestedPlaylist{members[3], members[2], members[1], members[0]}
+	if err := st.UpdateChannel(ctx, chID.String(), &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(reversed)), Playlists: reversed}, chUpdatedAt(t, ctx, st, chID.String())); err != nil {
+		t.Fatalf("UpdateChannel: %v", err)
+	}
+
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: cur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("pre-replace cursor after replace: want ErrInvalidCursor, got %v", err)
+	}
+	// Restarting from the first page pages the new order cleanly.
+	np1, ncur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || ncur == "" || len(np1) != 2 || np1[0].ID != ids[3] || np1[1].ID != ids[2] {
+		t.Fatalf("new page 1: %d rows, cursor %q, err %v", len(np1), ncur, err)
+	}
+	np2, ncur2, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: ncur, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || ncur2 != "" || len(np2) != 2 || np2[0].ID != ids[1] || np2[1].ID != ids[0] {
+		t.Fatalf("new page 2: %d rows, cursor %q, err %v", len(np2), ncur2, err)
+	}
+}

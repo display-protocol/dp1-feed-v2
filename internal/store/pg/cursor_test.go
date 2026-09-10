@@ -12,10 +12,13 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
 
-var testContainer = uuid.MustParse("0c000000-0000-4000-8000-000000000001")
+var (
+	testContainer = uuid.MustParse("0c000000-0000-4000-8000-000000000001")
+	testRev       = time.Date(2026, 9, 10, 5, 0, 0, 123456000, time.UTC) // microsecond precision, as Postgres stores it
+)
 
 func memberTok(pos int) string {
-	return encodeMembershipCursor(membershipKindChannel, testContainer, store.SortAsc, pos)
+	return encodeMembershipCursor(membershipKindChannel, testContainer, store.SortAsc, testRev, pos)
 }
 
 // The two list orderings issue tokens with disjoint key sets, and each decoder must refuse the other's
@@ -42,8 +45,8 @@ func TestCursorDecoders_roundTrip(t *testing.T) {
 	if err != nil || !gotT.Equal(wantT) || gotID != wantID {
 		t.Fatalf("created_at cursor round trip: got (%v, %v, %v)", gotT, gotID, err)
 	}
-	m, err := decodeMembershipCursor(encodeMembershipCursor(membershipKindPlaylistGroup, testContainer, store.SortDesc, 38))
-	if err != nil || m.Pos != 38 || m.Kind != membershipKindPlaylistGroup || m.Container != testContainer || m.Sort != "desc" {
+	m, err := decodeMembershipCursor(encodeMembershipCursor(membershipKindPlaylistGroup, testContainer, store.SortDesc, testRev, 38))
+	if err != nil || m.Pos != 38 || m.Kind != membershipKindPlaylistGroup || m.Container != testContainer || m.Sort != "desc" || !m.Rev.Equal(testRev) {
 		t.Fatalf("membership cursor round trip: got (%+v, %v)", m, err)
 	}
 }
@@ -70,21 +73,25 @@ func TestCursorDecoders_rejectIncompleteFields(t *testing.T) {
 			t.Errorf("decodeCursor(%s): want error", name)
 		}
 	}
-	const goodHead = `"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc"`
+	const goodHead = `"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"2026-09-10T05:00:00.123456Z"`
 	for name, j := range map[string]string{
 		"null pos":      `{` + goodHead + `,"pos":null}`,
 		"missing pos":   `{` + goodHead + `}`,
 		"negative pos":  `{` + goodHead + `,"pos":-1}`,
 		"bad pos type":  `{` + goodHead + `,"pos":"3"}`,
 		"pos above INT": `{` + goodHead + `,"pos":2147483648}`,
-		"missing kind":  `{"cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","pos":1}`,
-		"unknown kind":  `{"kind":"playlist","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","pos":1}`,
-		"missing cid":   `{"kind":"channel","sort":"asc","pos":1}`,
-		"null cid":      `{"kind":"channel","cid":null,"sort":"asc","pos":1}`,
-		"nil cid":       `{"kind":"channel","cid":"00000000-0000-0000-0000-000000000000","sort":"asc","pos":1}`,
-		"missing sort":  `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","pos":1}`,
-		"bad sort":      `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"up","pos":1}`,
-		"empty sort":    `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"","pos":1}`,
+		"missing rev":   `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","pos":1}`,
+		"null rev":      `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":null,"pos":1}`,
+		"zero rev":      `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"0001-01-01T00:00:00Z","pos":1}`,
+		"bad rev type":  `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":5,"pos":1}`,
+		"missing kind":  `{"cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"unknown kind":  `{"kind":"playlist","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"missing cid":   `{"kind":"channel","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"null cid":      `{"kind":"channel","cid":null,"sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"nil cid":       `{"kind":"channel","cid":"00000000-0000-0000-0000-000000000000","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"missing sort":  `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"bad sort":      `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"up","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"empty sort":    `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
 		"empty object":  `{}`,
 		"position only": `{"pos":1}`,
 	} {

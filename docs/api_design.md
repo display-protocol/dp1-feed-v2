@@ -323,7 +323,10 @@ missing, null or out of range, is refused — all **`400` `bad_request`** — ra
 the list from the wrong place. A membership token is additionally bound to the **container** (kind and
 id) and the **`sort` direction** it was issued for, because a position is only a page boundary relative
 to those: presenting it with another existing `channel` / `playlist-group`, or the other `sort`, is
-**`400`**. An unknown container stays the empty page with or without a well-formed token — a client
+**`400`**. It is also bound to the container's **membership revision**: a replace of the channel or group
+rebuilds its positions under the same id, so a token issued before the replace is refused (**`400`**)
+and the client restarts from the first page, rather than assembling an order that matches neither
+signed document. An unknown container stays the empty page with or without a well-formed token — a client
 still paging a container deleted in the meantime sees an empty terminal page, not an error. A
 `created_at` token binds the ordering key only; its `(created_at, id)` boundary is the same row under
 either direction, so it may be presented with either `sort`.
