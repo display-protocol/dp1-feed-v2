@@ -2546,9 +2546,31 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 		t.Fatalf("garbage cursor: want ErrInvalidCursor, got %v", err)
 	}
 
-	// An unknown channel is an empty page, not ErrNotFound (a filter, not a lookup).
+	// An unknown channel is an empty page, not ErrNotFound (a filter, not a lookup) — but only for a
+	// cursor-less request. A cursor is validated first: a malformed one is a 400 whatever it is
+	// presented against, and a valid one can only have been issued for a container that exists, so
+	// presenting it against an unknown one is a container mismatch, not an empty page.
 	if empty, next := got(store.SortAsc, 10, "", "no-such-channel"); len(empty) != 0 || next != "" {
 		t.Fatalf("unknown channel: got %v (next %q), want empty", empty, next)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("unknown channel with garbage cursor: want ErrInvalidCursor, got %v", err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: cur1, Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("unknown channel with another container's cursor: want ErrInvalidCursor, got %v", err)
+	}
+
+	// The zero SortOrder is ascending for every store list; a filtered caller relying on that must be
+	// able to page, so the cursor it is issued must carry the canonical direction and be accepted on
+	// the next request whether that request says "" or "asc".
+	zeroPage1, zeroCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, ChannelFilter: chID.String()})
+	if err != nil || zeroCur == "" || len(zeroPage1) != 3 {
+		t.Fatalf("zero sort first page: %d rows, cursor %q, err %v", len(zeroPage1), zeroCur, err)
+	}
+	for _, sort := range []store.SortOrder{"", store.SortAsc} {
+		if page2, _ := got(sort, 3, zeroCur, chID.String()); !reflect.DeepEqual(page2, wantOrder[3:]) {
+			t.Fatalf("zero-sort cursor presented with sort=%q: got %v, want %v", sort, page2, wantOrder[3:])
+		}
 	}
 
 	// Container resolution is by UUID or by slug, never both: a second channel whose slug is the first

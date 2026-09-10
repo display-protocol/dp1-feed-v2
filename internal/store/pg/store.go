@@ -669,11 +669,33 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 		container = chF
 	}
 
+	// The zero SortOrder orders ascending everywhere else in this store (SQLOrder / TupleAfterCursorOp
+	// treat it as ASC), so it must be canonicalized before it is written into a cursor or compared
+	// against one: encoding "" would issue a token the decoder refuses on the very next page.
+	sort := p.Sort
+	if sort == "" {
+		sort = store.SortAsc
+	}
+
+	// Decode the cursor before resolving the container: a malformed token is a 400 regardless of what
+	// it is presented against, and a valid token presented against a container that does not exist is
+	// a container mismatch (it was issued for one that did), not an empty page.
+	var cur membershipCursorPayload
+	if p.Cursor != "" {
+		var derr error
+		if cur, derr = decodeMembershipCursor(p.Cursor); derr != nil {
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
+		}
+	}
+
 	// Table names come from the literals above, never from input; the only parameter is the slug.
 	containerID, err := uuid.Parse(container)
 	if err != nil {
 		err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE slug = $1`, containerTable), container).Scan(&containerID)
 		if errors.Is(err, pgx.ErrNoRows) {
+			if p.Cursor != "" {
+				return nil, "", fmt.Errorf("%w: cursor was issued for %s %s, but %s %q does not exist", store.ErrInvalidCursor, cur.Kind, cur.Container, kind, container)
+			}
 			return nil, "", nil
 		}
 		if err != nil {
@@ -681,8 +703,8 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 		}
 	}
 
-	order := p.Sort.SQLOrder()
-	cursorOp := p.Sort.TupleAfterCursorOp()
+	order := sort.SQLOrder()
+	cursorOp := sort.TupleAfterCursorOp()
 	base := fmt.Sprintf(`
 SELECT p.id, p.slug, p.body, p.created_at, p.updated_at, m.position
 FROM %s m
@@ -697,13 +719,9 @@ WHERE m.%s = $2::uuid`, memberTable, containerColumn)
 ORDER BY m.position %s
 LIMIT $1`, base, order)
 	} else {
-		cur, derr := decodeMembershipCursor(p.Cursor)
-		if derr != nil {
-			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
-		}
-		if cur.Kind != kind || cur.Container != containerID || cur.Sort != string(p.Sort) {
+		if cur.Kind != kind || cur.Container != containerID || cur.Sort != string(sort) {
 			return nil, "", fmt.Errorf("%w: cursor was issued for %s %s sorted %s, not %s %s sorted %s", store.ErrInvalidCursor,
-				cur.Kind, cur.Container, cur.Sort, kind, containerID, p.Sort)
+				cur.Kind, cur.Container, cur.Sort, kind, containerID, sort)
 		}
 		args = []any{limit + 1, containerID, cur.Pos}
 		q = fmt.Sprintf(`%s
@@ -740,7 +758,7 @@ LIMIT $1`, base, cursorOp, order)
 	nextCursor := ""
 	if len(out) > limit {
 		out = out[:limit]
-		nextCursor = encodeMembershipCursor(kind, containerID, p.Sort, positions[limit-1])
+		nextCursor = encodeMembershipCursor(kind, containerID, sort, positions[limit-1])
 	}
 	return out, nextCursor, nil
 }
