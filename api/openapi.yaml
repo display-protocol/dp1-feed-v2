@@ -359,6 +359,8 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/PlaylistGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
     post:
       tags: [playlist-groups]
@@ -513,6 +515,8 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/ExtensionsDisabled'
 
@@ -1574,7 +1578,7 @@ components:
 
   responses:
     BadRequest:
-      description: Bad request (validation error, or signature verification failure)
+      description: Bad request (validation error, malformed limit or cursor, or signature verification failure)
       content:
         application/json:
           schema:

@@ -1591,6 +1591,21 @@ func encodeCursor(t time.Time, id uuid.UUID) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// requireCursorFields checks that every key a cursor shape owns is present and non-null in the raw
+// token. encoding/json leaves an absent or null field at its zero value, and a zero created_at, Nil
+// uuid or zero position is a legal-looking keyset that silently restarts, skips or repeats the list;
+// the client would see a 200 page and never learn its token was broken. The semantic checks (non-zero
+// time, non-Nil id, non-negative position) follow in each decoder.
+func requireCursorFields(raw map[string]json.RawMessage, keys ...string) error {
+	for _, k := range keys {
+		v, ok := raw[k]
+		if !ok || string(v) == "null" {
+			return fmt.Errorf("cursor is missing its %q field", k)
+		}
+	}
+	return nil
+}
+
 // decodeCursor parses a created_at-ordered token. A membership token (carrying "pos") is refused
 // rather than decoded to zero values: a zero (created_at, id) tuple would quietly restart the list
 // from the beginning under ASC, or return nothing under DESC, and the client would never learn that
@@ -1607,12 +1622,15 @@ func decodeCursor(s string) (time.Time, uuid.UUID, error) {
 	if _, ok := raw["pos"]; ok {
 		return time.Time{}, uuid.Nil, fmt.Errorf("cursor belongs to a channel- or playlist-group-filtered list")
 	}
-	if _, ok := raw["t"]; !ok {
-		return time.Time{}, uuid.Nil, fmt.Errorf("cursor is missing its created_at key")
+	if err := requireCursorFields(raw, "t", "id"); err != nil {
+		return time.Time{}, uuid.Nil, err
 	}
 	var p cursorPayload
 	if err := json.Unmarshal(b, &p); err != nil {
 		return time.Time{}, uuid.Nil, err
+	}
+	if p.CreatedAt.IsZero() || p.ID == uuid.Nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor carries a zero created_at or id")
 	}
 	return p.CreatedAt, p.ID, nil
 }
@@ -1624,7 +1642,8 @@ func encodeMembershipCursor(pos int) string {
 }
 
 // decodeMembershipCursor parses a membership token; a created_at token (carrying "t") is refused for
-// the reason given on decodeCursor.
+// the reason given on decodeCursor. Position 0 is a valid keyset value (the first member), so only a
+// negative position is refused.
 func decodeMembershipCursor(s string) (int, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
@@ -1637,12 +1656,15 @@ func decodeMembershipCursor(s string) (int, error) {
 	if _, ok := raw["t"]; ok {
 		return 0, fmt.Errorf("cursor belongs to an unfiltered list")
 	}
-	if _, ok := raw["pos"]; !ok {
-		return 0, fmt.Errorf("cursor is missing its position key")
+	if err := requireCursorFields(raw, "pos"); err != nil {
+		return 0, err
 	}
 	var p membershipCursorPayload
 	if err := json.Unmarshal(b, &p); err != nil {
 		return 0, err
+	}
+	if p.Pos < 0 {
+		return 0, fmt.Errorf("cursor carries a negative position")
 	}
 	return p.Pos, nil
 }
@@ -1674,11 +1696,14 @@ func decodePlaylistItemCursor(s string) (plCreated time.Time, pos int, itemID uu
 	if _, ok := raw["pid"]; ok {
 		return time.Time{}, 0, uuid.Nil, fmt.Errorf("stale playlist-item cursor")
 	}
+	if err := requireCursorFields(raw, "t", "pos", "iid"); err != nil {
+		return time.Time{}, 0, uuid.Nil, err
+	}
 	var wire playlistItemCursorPayload
 	if err := json.Unmarshal(b, &wire); err != nil {
 		return time.Time{}, 0, uuid.Nil, err
 	}
-	if wire.IID == uuid.Nil {
+	if wire.T.IsZero() || wire.Pos < 0 || wire.IID == uuid.Nil {
 		return time.Time{}, 0, uuid.Nil, fmt.Errorf("invalid playlist-item cursor")
 	}
 	return wire.T, wire.Pos, wire.IID, nil
