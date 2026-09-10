@@ -39,3 +39,6 @@ config.yaml
 
 # Local-only GHCR workflow.
 .github/workflows/build-local-image.yaml
+
+# Locally built server binary (go build ./cmd/server)
+/server

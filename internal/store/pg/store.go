@@ -479,7 +479,7 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 	if p.Cursor != "" {
 		plCreated, pos, iid, derr := decodePlaylistItemCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		n := len(args) + 1
 		cursorSQL = fmt.Sprintf(
@@ -564,8 +564,26 @@ WHERE item_id = $1`
 
 // ListPlaylists implements store.Store.
 //
-// Ordering: created_at then id, direction from p.Sort. Pagination: fetch limit+1 rows; if extra row exists,
-// trim to limit and return next_cursor built from the last kept row (see encodeCursor).
+// Two orderings, chosen by the filter:
+//
+//   - Unfiltered: created_at then id, direction from p.Sort. Cursor is (created_at, id) of the last row.
+//   - Filtered by channel or playlist-group: membership position (the order the signed document lists
+//     its playlists), direction from p.Sort. Cursor is the last row's position. A document that
+//     repeats a playlist URI stores one membership row per position, and this list mirrors that — the
+//     playlist appears at every position it holds — because the endpoint answers "what does this
+//     channel play, in order", and the channel document is the authority on that order.
+//
+// The filtered list used to reuse the created_at ordering with an EXISTS-on-membership predicate. That
+// made the order depend on when each member was published rather than on the channel, so a playlist
+// republished under a new id jumped to the end of every channel that carried it. Position is what a
+// player rendering a channel needs, and it is already how ListPlaylistsInChannel/InGroup answer.
+//
+// The two cursor shapes are deliberately distinct (see decodeCursor / decodeMembershipCursor): a token
+// from one ordering means nothing under the other, and decoding it as zero values would silently start
+// the page from the wrong place instead of failing with ErrInvalidCursor.
+//
+// Pagination: fetch limit+1 rows; if the extra row exists, trim to limit and build the next cursor from
+// the last kept row.
 func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams) ([]store.PlaylistRecord, string, error) {
 	if p == nil {
 		return nil, "", fmt.Errorf("nil list params")
@@ -574,93 +592,42 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 	if err != nil {
 		return nil, "", err
 	}
-	order := p.Sort.SQLOrder()
-	tupleOp := p.Sort.TupleAfterCursorOp()
 
 	chF := strings.TrimSpace(p.ChannelFilter)
 	pgF := strings.TrimSpace(p.PlaylistGroupFilter)
+	if chF != "" || pgF != "" {
+		return s.listPlaylistsByMembership(ctx, p, limit, chF, pgF)
+	}
 
-	var filterSQL string
+	order := p.Sort.SQLOrder()
+	tupleOp := p.Sort.TupleAfterCursorOp()
+
+	var q string
 	var args []any
 	if p.Cursor == "" {
 		args = []any{limit + 1}
-		if chF != "" {
-			const n = 2
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM channel_members cm
-			WHERE cm.playlist_id = playlists.id
-			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, chF)
-		} else if pgF != "" {
-			const n = 2
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM playlist_group_members pgm
-			WHERE pgm.playlist_id = playlists.id
-			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, pgF)
-		}
+		q = fmt.Sprintf(`
+SELECT id, slug, body, created_at, updated_at
+FROM playlists
+ORDER BY created_at %s, id %s
+LIMIT $1`, order, order)
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		args = []any{limit + 1, created, id}
-		if chF != "" {
-			const n = 4
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM channel_members cm
-			WHERE cm.playlist_id = playlists.id
-			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, chF)
-		} else if pgF != "" {
-			const n = 4
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM playlist_group_members pgm
-			WHERE pgm.playlist_id = playlists.id
-			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, pgF)
-		}
-	}
-
-	var q string
-	if p.Cursor == "" {
 		q = fmt.Sprintf(`
 SELECT id, slug, body, created_at, updated_at
 FROM playlists
-WHERE 1=1%s
+WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)
 ORDER BY created_at %s, id %s
-LIMIT $1`, filterSQL, order, order)
-	} else {
-		q = fmt.Sprintf(`
-SELECT id, slug, body, created_at, updated_at
-FROM playlists
-WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)%s
-ORDER BY created_at %s, id %s
-LIMIT $1`, tupleOp, filterSQL, order, order)
+LIMIT $1`, tupleOp, order, order)
 	}
 
-	var rows pgx.Rows
-	rows, err = s.pool.Query(ctx, q, args...)
+	out, err := s.queryPlaylistRecords(ctx, q, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("list playlists: %w", err)
-	}
-	defer rows.Close()
-
-	var out []store.PlaylistRecord
-	for rows.Next() {
-		var rec store.PlaylistRecord
-		var raw []byte
-		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
-			return nil, "", fmt.Errorf("scan: %w", err)
-		}
-		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
-			return nil, "", err
-		}
-		out = append(out, rec)
+		return nil, "", err
 	}
 
 	nextCursor := ""
@@ -669,7 +636,127 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 		out = out[:limit]
 		nextCursor = encodeCursor(last.CreatedAt, last.ID)
 	}
-	return out, nextCursor, rows.Err()
+	return out, nextCursor, nil
+}
+
+// listPlaylistsByMembership is ListPlaylists for a channel or playlist-group filter: one row per
+// membership position, ordered by position. Exactly one of chF / pgF is non-empty (the HTTP layer
+// rejects both; the channel filter wins here if a caller passes both). An unknown container yields an
+// empty page, not ErrNotFound, matching the previous EXISTS-based behavior — the list endpoint is a
+// filter, not a lookup, and GET /channels/{id} is the place that distinguishes "no such channel" from
+// "no members".
+//
+// The container is resolved the way GetChannel / ListPlaylistsInChannel resolve it: a value that
+// parses as a UUID matches by id only, anything else matches by slug only. It must be one or the
+// other, never `id::text = $2 OR slug = $2`: create is open and slugs are client-chosen, so a second
+// container whose slug equals the first one's UUID string is creatable, and matching both would
+// interleave two containers' membership rows. position is unique only WITHIN a container (it is half
+// of the membership primary key), so with a single container it is a complete keyset — no id
+// tie-break, the cursor carries just the position — but across two it has ties, and LIMIT plus a
+// position-only cursor would then skip or repeat rows nondeterministically.
+func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlaylistsParams, limit int, chF, pgF string) ([]store.PlaylistRecord, string, error) {
+	memberTable, containerColumn, containerTable := "playlist_group_members", "playlist_group_id", "playlist_groups"
+	container := pgF
+	if chF != "" {
+		memberTable, containerColumn, containerTable = "channel_members", "channel_id", "channels"
+		container = chF
+	}
+
+	order := p.Sort.SQLOrder()
+	cursorOp := p.Sort.TupleAfterCursorOp()
+
+	// The table and column names come from the literals above, never from input; the only parameter
+	// is the container key. A scalar subquery on slug yields NULL for an unknown slug, and
+	// `m.x = NULL` is no rows, which is the documented empty page.
+	containerMatch := fmt.Sprintf(`m.%s = (SELECT id FROM %s WHERE slug = $2)`, containerColumn, containerTable)
+	var containerArg any = container
+	if id, perr := uuid.Parse(container); perr == nil {
+		containerMatch = fmt.Sprintf(`m.%s = $2::uuid`, containerColumn)
+		containerArg = id
+	}
+	base := fmt.Sprintf(`
+SELECT p.id, p.slug, p.body, p.created_at, p.updated_at, m.position
+FROM %s m
+JOIN playlists p ON p.id = m.playlist_id
+WHERE %s`, memberTable, containerMatch)
+
+	var q string
+	var args []any
+	if p.Cursor == "" {
+		args = []any{limit + 1, containerArg}
+		q = fmt.Sprintf(`%s
+ORDER BY m.position %s
+LIMIT $1`, base, order)
+	} else {
+		pos, derr := decodeMembershipCursor(p.Cursor)
+		if derr != nil {
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
+		}
+		args = []any{limit + 1, containerArg, pos}
+		q = fmt.Sprintf(`%s
+AND m.position %s $3::int
+ORDER BY m.position %s
+LIMIT $1`, base, cursorOp, order)
+	}
+
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("list playlists by membership: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.PlaylistRecord
+	var positions []int
+	for rows.Next() {
+		var rec store.PlaylistRecord
+		var raw []byte
+		var pos int
+		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt, &pos); err != nil {
+			return nil, "", fmt.Errorf("scan: %w", err)
+		}
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
+			return nil, "", err
+		}
+		out = append(out, rec)
+		positions = append(positions, pos)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("list playlists by membership: %w", err)
+	}
+
+	nextCursor := ""
+	if len(out) > limit {
+		out = out[:limit]
+		nextCursor = encodeMembershipCursor(positions[limit-1])
+	}
+	return out, nextCursor, nil
+}
+
+// queryPlaylistRecords runs a query whose columns are (id, slug, body, created_at, updated_at) and
+// decodes every row into a PlaylistRecord.
+func (s *Store) queryPlaylistRecords(ctx context.Context, q string, args ...any) ([]store.PlaylistRecord, error) {
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list playlists: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.PlaylistRecord
+	for rows.Next() {
+		var rec store.PlaylistRecord
+		var raw []byte
+		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list playlists: %w", err)
+	}
+	return out, nil
 }
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
@@ -1024,7 +1111,7 @@ LIMIT $1`
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
 		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
@@ -1324,7 +1411,7 @@ LIMIT $1`
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
 		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
@@ -1490,6 +1577,13 @@ type cursorPayload struct {
 	ID        uuid.UUID `json:"id"`
 }
 
+// membershipCursorPayload is the token for a membership-ordered playlist list (channel or
+// playlist-group filter): the position of the last row served. Its key set is disjoint from
+// cursorPayload's on purpose so the two decoders can tell the shapes apart (see decodeCursor).
+type membershipCursorPayload struct {
+	Pos int `json:"pos"`
+}
+
 // encodeCursor builds the next-page token: base64url(JSON { t: created_at, id }).
 func encodeCursor(t time.Time, id uuid.UUID) string {
 	p := cursorPayload{CreatedAt: t, ID: id}
@@ -1497,16 +1591,60 @@ func encodeCursor(t time.Time, id uuid.UUID) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// decodeCursor parses a created_at-ordered token. A membership token (carrying "pos") is refused
+// rather than decoded to zero values: a zero (created_at, id) tuple would quietly restart the list
+// from the beginning under ASC, or return nothing under DESC, and the client would never learn that
+// it reused a cursor across two different orderings.
 func decodeCursor(s string) (time.Time, uuid.UUID, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return time.Time{}, uuid.Nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return time.Time{}, uuid.Nil, err
+	}
+	if _, ok := raw["pos"]; ok {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor belongs to a channel- or playlist-group-filtered list")
+	}
+	if _, ok := raw["t"]; !ok {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor is missing its created_at key")
 	}
 	var p cursorPayload
 	if err := json.Unmarshal(b, &p); err != nil {
 		return time.Time{}, uuid.Nil, err
 	}
 	return p.CreatedAt, p.ID, nil
+}
+
+// encodeMembershipCursor builds the next-page token for a membership-ordered list: base64url(JSON { pos }).
+func encodeMembershipCursor(pos int) string {
+	b, _ := json.Marshal(membershipCursorPayload{Pos: pos})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// decodeMembershipCursor parses a membership token; a created_at token (carrying "t") is refused for
+// the reason given on decodeCursor.
+func decodeMembershipCursor(s string) (int, error) {
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return 0, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return 0, err
+	}
+	if _, ok := raw["t"]; ok {
+		return 0, fmt.Errorf("cursor belongs to an unfiltered list")
+	}
+	if _, ok := raw["pos"]; !ok {
+		return 0, fmt.Errorf("cursor is missing its position key")
+	}
+	var p membershipCursorPayload
+	if err := json.Unmarshal(b, &p); err != nil {
+		return 0, err
+	}
+	return p.Pos, nil
 }
 
 type playlistItemCursorPayload struct {

@@ -300,7 +300,20 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 | ----------- | ------- |
 | **`limit`** | Page size, integer **1–100**, default **100**. |
 | **`cursor`** | Opaque cursor from the previous response’s `cursor` field. |
-| **`sort`** | **`asc`** or **`desc`** by `created_at`; default **`asc`**. |
+| **`sort`** | **`asc`** or **`desc`**; default **`asc`**. Direction only — the key it applies to is below. |
+
+**Ordering key.** Every list orders by `created_at`, with one exception: `GET /api/v1/playlists` with a
+`channel` or `playlist-group` filter orders by **membership position** — the order the signed channel or
+group document lists its playlists — because that is what a player rendering the container needs, and
+`created_at` order would move a playlist to the end of every container the moment it is republished under
+a new id. A playlist the document lists at several positions is returned once per position. An unknown
+container id or slug yields an empty page, not **`404`** (the filter is a filter, not a lookup; use
+`GET /channels/{id}` to tell "no such channel" from "no members"). `GET /api/v1/playlist-items` keeps
+`created_at` order under the same filters (its index is keyed on the playlist's `created_at`).
+
+**Cursors are bound to the ordering that issued them.** A token from a membership-ordered page cannot be
+used on a `created_at`-ordered list or vice versa, and a token that cannot be decoded is refused — both
+**`400` `bad_request`** — rather than silently restarting the list from the wrong place.
 
 **Envelope:** `items` (array), `hasMore` (boolean), `cursor` (string, omitted when no next page). See `ListResponse` in OpenAPI and `internal/httpserver/dto.go`.
 

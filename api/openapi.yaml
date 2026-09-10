@@ -153,19 +153,27 @@ paths:
     get:
       tags: [playlists]
       summary: List playlists
-      description: Returns paginated list of playlists ordered by created_at
+      description: >-
+        Returns a paginated list of playlists. Unfiltered, the list is ordered by created_at. With a
+        channel or playlist-group filter it is ordered by membership position, i.e. the order the signed
+        channel/group document lists its playlists (a playlist listed at several positions appears once
+        per position). Cursors are specific to the ordering that issued them.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Sort'
         - name: channel
           in: query
-          description: Filter by channel UUID or slug (membership). Requires extensions when used.
+          description: >-
+            Filter by channel UUID or slug (membership), ordered by position in the channel. Unknown
+            channel yields an empty list. Requires extensions when used.
           schema:
             type: string
         - name: playlist-group
           in: query
-          description: Filter by playlist-group UUID or slug (mutually exclusive with channel)
+          description: >-
+            Filter by playlist-group UUID or slug (mutually exclusive with channel), ordered by position
+            in the group. Unknown group yields an empty list.
           schema:
             type: string
       responses:
@@ -743,7 +751,9 @@ components:
     Sort:
       name: sort
       in: query
-      description: Sort order by created_at
+      description: >-
+        Sort direction. Applies to created_at, except on GET /api/v1/playlists filtered by channel or
+        playlist-group, where it applies to membership position.
       schema:
         type: string
         enum: [asc, desc]
