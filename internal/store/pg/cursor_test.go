@@ -2,12 +2,21 @@ package pg
 
 import (
 	"encoding/base64"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
+
+var testContainer = uuid.MustParse("0c000000-0000-4000-8000-000000000001")
+
+func memberTok(pos int) string {
+	return encodeMembershipCursor(membershipKindChannel, testContainer, store.SortAsc, pos)
+}
 
 // The two list orderings issue tokens with disjoint key sets, and each decoder must refuse the other's
 // token: decoding a membership token as a (created_at, id) tuple would yield zero values and quietly
@@ -15,7 +24,7 @@ import (
 func TestCursorDecoders_rejectEachOthersTokens(t *testing.T) {
 	t.Parallel()
 	createdTok := encodeCursor(time.Date(2026, 9, 9, 10, 0, 0, 0, time.UTC), uuid.MustParse("11111111-1111-1111-1111-111111111111"))
-	memberTok := encodeMembershipCursor(38)
+	memberTok := memberTok(38)
 
 	if _, _, err := decodeCursor(memberTok); err == nil || !strings.Contains(err.Error(), "filtered") {
 		t.Fatalf("decodeCursor(membership token): want refusal naming the filtered list, got %v", err)
@@ -33,9 +42,9 @@ func TestCursorDecoders_roundTrip(t *testing.T) {
 	if err != nil || !gotT.Equal(wantT) || gotID != wantID {
 		t.Fatalf("created_at cursor round trip: got (%v, %v, %v)", gotT, gotID, err)
 	}
-	pos, err := decodeMembershipCursor(encodeMembershipCursor(38))
-	if err != nil || pos != 38 {
-		t.Fatalf("membership cursor round trip: got (%d, %v)", pos, err)
+	m, err := decodeMembershipCursor(encodeMembershipCursor(membershipKindPlaylistGroup, testContainer, store.SortDesc, 38))
+	if err != nil || m.Pos != 38 || m.Kind != membershipKindPlaylistGroup || m.Container != testContainer || m.Sort != "desc" {
+		t.Fatalf("membership cursor round trip: got (%+v, %v)", m, err)
 	}
 }
 
@@ -61,29 +70,45 @@ func TestCursorDecoders_rejectIncompleteFields(t *testing.T) {
 			t.Errorf("decodeCursor(%s): want error", name)
 		}
 	}
+	const goodHead = `"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc"`
 	for name, j := range map[string]string{
-		"null pos":     `{"pos":null}`,
-		"negative pos": `{"pos":-1}`,
-		"bad pos type": `{"pos":"3"}`,
-		"empty object": `{}`,
+		"null pos":      `{` + goodHead + `,"pos":null}`,
+		"missing pos":   `{` + goodHead + `}`,
+		"negative pos":  `{` + goodHead + `,"pos":-1}`,
+		"bad pos type":  `{` + goodHead + `,"pos":"3"}`,
+		"pos above INT": `{` + goodHead + `,"pos":2147483648}`,
+		"missing kind":  `{"cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","pos":1}`,
+		"unknown kind":  `{"kind":"playlist","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","pos":1}`,
+		"missing cid":   `{"kind":"channel","sort":"asc","pos":1}`,
+		"null cid":      `{"kind":"channel","cid":null,"sort":"asc","pos":1}`,
+		"nil cid":       `{"kind":"channel","cid":"00000000-0000-0000-0000-000000000000","sort":"asc","pos":1}`,
+		"missing sort":  `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","pos":1}`,
+		"bad sort":      `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"up","pos":1}`,
+		"empty sort":    `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"","pos":1}`,
+		"empty object":  `{}`,
+		"position only": `{"pos":1}`,
 	} {
 		if _, err := decodeMembershipCursor(tok(j)); err == nil {
 			t.Errorf("decodeMembershipCursor(%s): want error", name)
 		}
 	}
-	if pos, err := decodeMembershipCursor(tok(`{"pos":0}`)); err != nil || pos != 0 {
-		t.Errorf("decodeMembershipCursor(pos 0): position 0 is the first member and must be accepted, got (%d, %v)", pos, err)
+	if m, err := decodeMembershipCursor(tok(`{` + goodHead + `,"pos":0}`)); err != nil || m.Pos != 0 {
+		t.Errorf("decodeMembershipCursor(pos 0): position 0 is the first member and must be accepted, got (%+v, %v)", m, err)
+	}
+	if m, err := decodeMembershipCursor(tok(`{` + goodHead + `,"pos":2147483647}`)); err != nil || m.Pos != math.MaxInt32 {
+		t.Errorf("decodeMembershipCursor(pos MaxInt32): the top of INT range is valid, got (%+v, %v)", m, err)
 	}
 	for name, j := range map[string]string{
-		"missing t":    `{"pos":1,"iid":` + goodID + `}`,
-		"null t":       `{"t":null,"pos":1,"iid":` + goodID + `}`,
-		"zero t":       `{"t":"0001-01-01T00:00:00Z","pos":1,"iid":` + goodID + `}`,
-		"missing pos":  `{"t":` + goodT + `,"iid":` + goodID + `}`,
-		"null pos":     `{"t":` + goodT + `,"pos":null,"iid":` + goodID + `}`,
-		"negative pos": `{"t":` + goodT + `,"pos":-1,"iid":` + goodID + `}`,
-		"missing iid":  `{"t":` + goodT + `,"pos":1}`,
-		"null iid":     `{"t":` + goodT + `,"pos":1,"iid":null}`,
-		"nil iid":      `{"t":` + goodT + `,"pos":1,"iid":"00000000-0000-0000-0000-000000000000"}`,
+		"missing t":     `{"pos":1,"iid":` + goodID + `}`,
+		"null t":        `{"t":null,"pos":1,"iid":` + goodID + `}`,
+		"zero t":        `{"t":"0001-01-01T00:00:00Z","pos":1,"iid":` + goodID + `}`,
+		"missing pos":   `{"t":` + goodT + `,"iid":` + goodID + `}`,
+		"null pos":      `{"t":` + goodT + `,"pos":null,"iid":` + goodID + `}`,
+		"negative pos":  `{"t":` + goodT + `,"pos":-1,"iid":` + goodID + `}`,
+		"pos above INT": `{"t":` + goodT + `,"pos":2147483648,"iid":` + goodID + `}`,
+		"missing iid":   `{"t":` + goodT + `,"pos":1}`,
+		"null iid":      `{"t":` + goodT + `,"pos":1,"iid":null}`,
+		"nil iid":       `{"t":` + goodT + `,"pos":1,"iid":"00000000-0000-0000-0000-000000000000"}`,
 	} {
 		if _, _, _, err := decodePlaylistItemCursor(tok(j)); err == nil {
 			t.Errorf("decodePlaylistItemCursor(%s): want error", name)

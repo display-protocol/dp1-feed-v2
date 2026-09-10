@@ -2516,6 +2516,20 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 		t.Fatalf("desc pages: got %v + %v (next %q), want %v", d1, d2, dc2, wantDesc)
 	}
 
+	// A membership cursor is bound to the container and direction that issued it. Under the opposite
+	// direction the same position would flip the comparison and repeat or skip rows; under another
+	// container the same position is a different row. Both are refused, not served.
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: cur1, Sort: store.SortDesc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("asc cursor presented with sort=desc: want ErrInvalidCursor, got %v", err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: dc1, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("desc cursor presented with sort=asc: want ErrInvalidCursor, got %v", err)
+	}
+	// Same container reached by slug instead of uuid is still the same container, so the cursor is valid.
+	if bySlugPage2, _ := got(store.SortAsc, 3, cur1, "pos-channel"); !reflect.DeepEqual(bySlugPage2, wantOrder[3:]) {
+		t.Fatalf("cursor issued for the uuid, presented with the slug: got %v, want %v", bySlugPage2, wantOrder[3:])
+	}
+
 	// A membership cursor on the unfiltered list, and an unfiltered cursor on the filtered list, are
 	// both refused as ErrInvalidCursor rather than decoded to zero values.
 	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: cur1, Sort: store.SortAsc}); !errors.Is(err, store.ErrInvalidCursor) {
@@ -2548,6 +2562,10 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	if byUUID, _ := got(store.SortAsc, 10, "", chID.String()); !reflect.DeepEqual(byUUID, wantOrder) {
 		t.Fatalf("channel by uuid with a slug decoy present: got %v, want %v", byUUID, wantOrder)
 	}
+	// The real channel's cursor presented against the decoy (another container of the same kind).
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: cur1, Sort: store.SortAsc, ChannelFilter: decoyID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("channel cursor presented against another channel: want ErrInvalidCursor, got %v", err)
+	}
 
 	// The playlist-group filter follows the same rule.
 	gID := uuid.MustParse("09000000-0000-4000-8000-000000000001")
@@ -2561,5 +2579,17 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	}
 	if len(rows) != 2 || rows[0].ID != ids[2] || rows[1].ID != ids[0] {
 		t.Fatalf("group filter order: got %v, want [%v %v]", rows, ids[2], ids[0])
+	}
+	// A channel cursor presented against a group (other container kind), and a group cursor against the
+	// channel, are both refused.
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: cur1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("channel cursor presented against a group: want ErrInvalidCursor, got %v", err)
+	}
+	_, gCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()})
+	if err != nil || gCur == "" {
+		t.Fatalf("group first page: cursor %q, err %v", gCur, err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("group cursor presented against a channel: want ErrInvalidCursor, got %v", err)
 	}
 }

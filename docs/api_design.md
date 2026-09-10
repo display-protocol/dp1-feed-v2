@@ -312,8 +312,13 @@ container id or slug yields an empty page, not **`404`** (the filter is a filter
 `created_at` order under the same filters (its index is keyed on the playlist's `created_at`).
 
 **Cursors are bound to the ordering that issued them.** A token from a membership-ordered page cannot be
-used on a `created_at`-ordered list or vice versa, and a token that cannot be decoded is refused — both
-**`400` `bad_request`** — rather than silently restarting the list from the wrong place.
+used on a `created_at`-ordered list or vice versa, and a token that cannot be decoded, or whose fields are
+missing, null or out of range, is refused — all **`400` `bad_request`** — rather than silently restarting
+the list from the wrong place. A membership token is additionally bound to the **container** (kind and
+id) and the **`sort` direction** it was issued for, because a position is only a page boundary relative
+to those: presenting it with another `channel` / `playlist-group`, or the other `sort`, is **`400`**. A
+`created_at` token binds the ordering key only; its `(created_at, id)` boundary is the same row under
+either direction, so it may be presented with either `sort`.
 
 **Envelope:** `items` (array), `hasMore` (boolean), `cursor` (string, omitted when no next page). See `ListResponse` in OpenAPI and `internal/httpserver/dto.go`.
 

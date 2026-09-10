@@ -214,7 +214,8 @@ type Store interface {
 	GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*PlaylistItemRecord, error)
 	// ListPlaylists returns a page of playlists: ordered by created_at when unfiltered, by membership
 	// position when filtered by channel or playlist-group (direction from Sort). Cursors are specific to
-	// the ordering that issued them (ErrInvalidCursor otherwise).
+	// the ordering that issued them, and a membership cursor also to its container and sort direction
+	// (ErrInvalidCursor otherwise).
 	ListPlaylists(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistRecord, string, error)
 	// UpdatePlaylist replaces the stored document bytes and rebuilds playlist_item_index from its items (same transaction).
 	// The slug column follows the document's "slug" when present (a row must be addressable by the slug it serves);
