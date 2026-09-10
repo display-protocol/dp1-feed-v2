@@ -664,7 +664,8 @@ paths:
         - name: channel
           in: query
           description: >-
-            Filter by channel UUID or slug. Unknown channel yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
+            Filter by channel UUID or slug. Requires extensions: when they are disabled the response is
+            404 extensions_disabled. With extensions enabled, an unknown channel yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
         - name: playlist-group
@@ -690,6 +691,8 @@ paths:
                           $ref: '#/components/schemas/PlaylistItem'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/ExtensionsDisabled'
 
   /api/v1/playlist-items/{id}:
     get:
