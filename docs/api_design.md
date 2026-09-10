@@ -21,6 +21,12 @@
 - **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for groups and channels).
 
 Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two separate path params.
+**Feed-wide resolution rule:** a value that parses as a UUID is an id and is looked up by id only;
+anything else is a slug. There is no fallback from a missing id to a slug of the same text, on
+lookups or on list filters, so a slug that is itself a UUID string is reachable only through the
+resource's id. The alternative — try the id, then the slug — would make the meaning of one request
+change the moment a resource with that id is created (create is open and ids are client-chosen), and
+would let a lookup resolve a value a filter could not, or vice versa.
 
 ---
 
@@ -324,7 +330,8 @@ either direction, so it may be presented with either `sort`.
 
 **Container filters resolve by id or by slug, never both.** On both `GET /api/v1/playlists` and
 `GET /api/v1/playlist-items`, a `channel` / `playlist-group` value that parses as a UUID is the id and
-anything else is a slug. Slugs are client-chosen and create is open, so a container whose slug equals
+anything else is a slug — the feed-wide rule above, so a filter resolves exactly what
+`GET /api/v1/channels/{id}` would. Slugs are client-chosen and create is open, so a container whose slug equals
 another container's UUID string is creatable; matching both would merge the two, interleaving a
 position-ordered list and leaking the decoy's items into a UUID-filtered item list.
 
