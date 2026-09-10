@@ -316,9 +316,17 @@ used on a `created_at`-ordered list or vice versa, and a token that cannot be de
 missing, null or out of range, is refused — all **`400` `bad_request`** — rather than silently restarting
 the list from the wrong place. A membership token is additionally bound to the **container** (kind and
 id) and the **`sort` direction** it was issued for, because a position is only a page boundary relative
-to those: presenting it with another `channel` / `playlist-group`, or the other `sort`, is **`400`**. A
+to those: presenting it with another existing `channel` / `playlist-group`, or the other `sort`, is
+**`400`**. An unknown container stays the empty page with or without a well-formed token — a client
+still paging a container deleted in the meantime sees an empty terminal page, not an error. A
 `created_at` token binds the ordering key only; its `(created_at, id)` boundary is the same row under
 either direction, so it may be presented with either `sort`.
+
+**Container filters resolve by id or by slug, never both.** On both `GET /api/v1/playlists` and
+`GET /api/v1/playlist-items`, a `channel` / `playlist-group` value that parses as a UUID is the id and
+anything else is a slug. Slugs are client-chosen and create is open, so a container whose slug equals
+another container's UUID string is creatable; matching both would merge the two, interleaving a
+position-ordered list and leaking the decoy's items into a UUID-filtered item list.
 
 **Envelope:** `items` (array), `hasMore` (boolean), `cursor` (string, omitted when no next page). See `ListResponse` in OpenAPI and `internal/httpserver/dto.go`.
 

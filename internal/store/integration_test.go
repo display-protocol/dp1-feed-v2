@@ -2556,8 +2556,13 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
 		t.Fatalf("unknown channel with garbage cursor: want ErrInvalidCursor, got %v", err)
 	}
-	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: cur1, Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
-		t.Fatalf("unknown channel with another container's cursor: want ErrInvalidCursor, got %v", err)
+	// A well-formed cursor against an unknown container is the empty page, not a 400: that is what a
+	// client continuing to page a channel deleted in the meantime must see.
+	if empty, next := got(store.SortAsc, 10, cur1, "no-such-channel"); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel with a well-formed cursor: got %v (next %q), want empty page", empty, next)
+	}
+	if _, _, err := st.ListPlaylistItems(ctx, &store.ListPlaylistItemsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("items: unknown channel with garbage cursor: want ErrInvalidCursor, got %v", err)
 	}
 
 	// The zero SortOrder is ascending for every store list; a filtered caller relying on that must be
@@ -2576,13 +2581,42 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	// Container resolution is by UUID or by slug, never both: a second channel whose slug is the first
 	// channel's UUID string must not have its members interleaved into the `?channel=<uuid>` list
 	// (position is only unique within one container, so a union would break the keyset).
+	decoyPlID := uuid.MustParse("0a000000-0000-4000-8000-00000000000d")
+	decoyPl := playlist.Playlist{DPVersion: "1.1.0", Title: "decoy-pl", Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://decoy-pl"}}}
+	if err := st.CreatePlaylist(ctx, decoyPlID, "decoy-pl", rawDoc(t, &decoyPl)); err != nil {
+		t.Fatal(err)
+	}
+	decoyMember := store.IngestedPlaylist{ID: decoyPlID, Slug: "decoy-pl", Raw: rawDoc(t, &decoyPl)}
 	decoyID := uuid.MustParse("0c000000-0000-4000-8000-000000000002")
-	decoyBody := channels.Channel{ID: decoyID.String(), Slug: chID.String(), Title: "Decoy", Version: "1.0.0", Playlists: []string{slugs[1]}}
-	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: decoyID, Slug: chID.String(), Raw: rawDoc(t, decoyBody), Playlists: []store.IngestedPlaylist{members[1]}}); err != nil {
+	decoyBody := channels.Channel{ID: decoyID.String(), Slug: chID.String(), Title: "Decoy", Version: "1.0.0", Playlists: []string{"decoy-pl"}}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: decoyID, Slug: chID.String(), Raw: rawDoc(t, decoyBody), Playlists: []store.IngestedPlaylist{decoyMember}}); err != nil {
 		t.Fatalf("CreateChannel(decoy): %v", err)
 	}
 	if byUUID, _ := got(store.SortAsc, 10, "", chID.String()); !reflect.DeepEqual(byUUID, wantOrder) {
 		t.Fatalf("channel by uuid with a slug decoy present: got %v, want %v", byUUID, wantOrder)
+	}
+	// The item list resolves the container the same way, so the decoy's items must not leak into a
+	// UUID-filtered item list (they used to, through `id::text = $n OR slug = $n`).
+	itemPlaylists := func(params *store.ListPlaylistItemsParams) map[uuid.UUID]bool {
+		t.Helper()
+		items, _, err := st.ListPlaylistItems(ctx, params)
+		if err != nil {
+			t.Fatalf("ListPlaylistItems(%+v): %v", params, err)
+		}
+		seen := map[uuid.UUID]bool{}
+		for _, it := range items {
+			seen[it.PlaylistID] = true
+		}
+		return seen
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, ChannelFilter: chID.String()}); seen[decoyPlID] || len(seen) != 3 {
+		t.Fatalf("items by channel uuid with a slug decoy present: playlists %v, want exactly the 3 real members", seen)
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, ChannelFilter: "pos-channel"}); seen[decoyPlID] || len(seen) != 3 {
+		t.Fatalf("items by channel slug: playlists %v, want exactly the 3 real members", seen)
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); len(seen) != 0 {
+		t.Fatalf("items by unknown channel: playlists %v, want none", seen)
 	}
 	// The real channel's cursor presented against the decoy (another container of the same kind).
 	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: cur1, Sort: store.SortAsc, ChannelFilter: decoyID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
@@ -2602,6 +2636,19 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	if len(rows) != 2 || rows[0].ID != ids[2] || rows[1].ID != ids[0] {
 		t.Fatalf("group filter order: got %v, want [%v %v]", rows, ids[2], ids[0])
 	}
+	// Same decoy rule for groups on the item list: a group whose slug is the real group's UUID.
+	decoyGID := uuid.MustParse("09000000-0000-4000-8000-000000000002")
+	decoyG := playlistgroup.Group{ID: decoyGID.String(), Slug: gID.String(), Title: "Decoy Group", Playlists: []string{"decoy-pl"}}
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: decoyGID, Slug: gID.String(), Raw: rawDoc(t, decoyG), Playlists: []store.IngestedPlaylist{decoyMember}}); err != nil {
+		t.Fatalf("CreatePlaylistGroup(decoy): %v", err)
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); seen[decoyPlID] || len(seen) != 2 {
+		t.Fatalf("items by group uuid with a slug decoy present: playlists %v, want exactly the 2 real members", seen)
+	}
+	if rows, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); err != nil || len(rows) != 2 {
+		t.Fatalf("playlists by group uuid with a slug decoy present: %d rows, err %v, want 2", len(rows), err)
+	}
+
 	// A channel cursor presented against a group (other container kind), and a group cursor against the
 	// channel, are both refused.
 	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: cur1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); !errors.Is(err, store.ErrInvalidCursor) {

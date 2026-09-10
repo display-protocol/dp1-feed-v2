@@ -455,33 +455,49 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 	order := p.Sort.SQLOrder()
 	tupleOp := p.Sort.TupleAfterCursorOp()
 
+	// A malformed cursor is a 400 whatever it is presented against, so it is decoded before the
+	// container filter can short-circuit to an empty page.
+	var plCreated time.Time
+	var pos int
+	var iid uuid.UUID
+	if p.Cursor != "" {
+		var derr error
+		if plCreated, pos, iid, derr = decodePlaylistItemCursor(p.Cursor); derr != nil {
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
+		}
+	}
+
 	args := []any{limit + 1}
 
+	// The container filter resolves to exactly one container (resolveContainer), and an unknown one is
+	// the documented empty page. The filter itself stays an EXISTS on membership rather than a join so
+	// a playlist the container lists at several positions contributes its items once: this list is
+	// ordered by the playlist's created_at, not by position, and stays that way (documented).
 	var filterSQL string
-	if chF != "" {
-		n := len(args) + 1
+	if chF != "" || pgF != "" {
+		containerTable, memberTable, containerColumn := "channels", "channel_members", "channel_id"
+		key := chF
+		if chF == "" {
+			containerTable, memberTable, containerColumn = "playlist_groups", "playlist_group_members", "playlist_group_id"
+			key = pgF
+		}
+		containerID, found, err := s.resolveContainer(ctx, containerTable, key)
+		if err != nil {
+			return nil, "", err
+		}
+		if !found {
+			return nil, "", nil
+		}
 		filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM channel_members cm
-			WHERE cm.playlist_id = i.playlist_id
-			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-		args = append(args, chF)
-	} else if pgF != "" {
-		n := len(args) + 1
-		filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM playlist_group_members pgm
-			WHERE pgm.playlist_id = i.playlist_id
-			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-		args = append(args, pgF)
+			SELECT 1 FROM %s m
+			WHERE m.playlist_id = i.playlist_id
+			AND m.%s = $%d::uuid
+		)`, memberTable, containerColumn, len(args)+1)
+		args = append(args, containerID)
 	}
 
 	var cursorSQL string
 	if p.Cursor != "" {
-		plCreated, pos, iid, derr := decodePlaylistItemCursor(p.Cursor)
-		if derr != nil {
-			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
-		}
 		n := len(args) + 1
 		cursorSQL = fmt.Sprintf(
 			` AND (i.playlist_created_at, i.position, i.item_id) %s ($%d::timestamptz, $%d::int, $%d::uuid)`,
@@ -640,6 +656,28 @@ LIMIT $1`, tupleOp, order, order)
 	return out, nextCursor, nil
 }
 
+// resolveContainer turns a channel / playlist-group filter value into the container's id, the way
+// GetChannel and ListPlaylistsInChannel do: a value that parses as a UUID is the id, anything else is
+// looked up by slug. found is false when no such container exists. It must be one or the other,
+// never `id::text = $n OR slug = $n`: create is open and slugs are client-chosen, so a second container
+// whose slug equals the first one's UUID string is creatable, and matching both would merge two
+// containers' membership — interleaving rows in a position-ordered list, and leaking a decoy's items
+// into a UUID-filtered item list. containerTable is one of the two table-name literals the callers
+// own; the only parameter is the slug.
+func (s *Store) resolveContainer(ctx context.Context, containerTable, key string) (id uuid.UUID, found bool, err error) {
+	if id, perr := uuid.Parse(key); perr == nil {
+		return id, true, nil
+	}
+	err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE slug = $1`, containerTable), key).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("resolve %s %q: %w", containerTable, key, err)
+	}
+	return id, true, nil
+}
+
 // listPlaylistsByMembership is ListPlaylists for a channel or playlist-group filter: one row per
 // membership position, ordered by position. Exactly one of chF / pgF is non-empty (the HTTP layer
 // rejects both; the channel filter wins here if a caller passes both). An unknown container yields an
@@ -647,13 +685,10 @@ LIMIT $1`, tupleOp, order, order)
 // filter, not a lookup, and GET /channels/{id} is the place that distinguishes "no such channel" from
 // "no members".
 //
-// The container is resolved up front, the way GetChannel / ListPlaylistsInChannel resolve it: a value
-// that parses as a UUID is the id, anything else is looked up by slug. It must be one or the other,
-// never `id::text = $2 OR slug = $2`: create is open and slugs are client-chosen, so a second container
-// whose slug equals the first one's UUID string is creatable, and matching both would interleave two
-// containers' membership rows. position is unique only WITHIN a container (it is half of the
-// membership primary key), so with a single container it is a complete keyset — no id tie-break —
-// but across two it has ties, and LIMIT plus a position cursor would then skip or repeat rows.
+// The container is resolved up front (resolveContainer) so that exactly one container feeds the
+// query. position is unique only WITHIN a container (it is half of the membership primary key), so
+// with a single container it is a complete keyset — no id tie-break — but across two it has ties,
+// and LIMIT plus a position cursor would then skip or repeat rows.
 //
 // The cursor carries the container kind, the resolved container id, the sort direction and the last
 // position, and a request must present the same kind, container and direction to use it. The
@@ -678,8 +713,11 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 	}
 
 	// Decode the cursor before resolving the container: a malformed token is a 400 regardless of what
-	// it is presented against, and a valid token presented against a container that does not exist is
-	// a container mismatch (it was issued for one that did), not an empty page.
+	// it is presented against. A well-formed token presented against a container that no longer
+	// resolves is NOT an error: the documented answer for an unknown container is the empty page, and
+	// the ordinary way to get here is a client continuing to page a channel that was deleted
+	// meanwhile — an empty terminal page is what that continuation should see. Kind/container/
+	// direction mismatch is checked only once the container is known to exist.
 	var cur membershipCursorPayload
 	if p.Cursor != "" {
 		var derr error
@@ -687,20 +725,12 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 	}
-
-	// Table names come from the literals above, never from input; the only parameter is the slug.
-	containerID, err := uuid.Parse(container)
+	containerID, found, err := s.resolveContainer(ctx, containerTable, container)
 	if err != nil {
-		err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE slug = $1`, containerTable), container).Scan(&containerID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			if p.Cursor != "" {
-				return nil, "", fmt.Errorf("%w: cursor was issued for %s %s, but %s %q does not exist", store.ErrInvalidCursor, cur.Kind, cur.Container, kind, container)
-			}
-			return nil, "", nil
-		}
-		if err != nil {
-			return nil, "", fmt.Errorf("resolve %s %q: %w", kind, container, err)
-		}
+		return nil, "", err
+	}
+	if !found {
+		return nil, "", nil
 	}
 
 	order := sort.SQLOrder()
