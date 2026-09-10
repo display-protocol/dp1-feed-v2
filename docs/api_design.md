@@ -308,7 +308,7 @@ group document lists its playlists — because that is what a player rendering t
 `created_at` order would move a playlist to the end of every container the moment it is republished under
 a new id. A playlist the document lists at several positions is returned once per position. An unknown
 container id or slug yields an empty page, not **`404`** (the filter is a filter, not a lookup; use
-`GET /channels/{id}` to tell "no such channel" from "no members"). `GET /api/v1/playlist-items` keeps
+`GET /api/v1/channels/{id}` to tell "no such channel" from "no members"). `GET /api/v1/playlist-items` keeps
 `created_at` order under the same filters (its index is keyed on the playlist's `created_at`).
 
 **Cursors are bound to the ordering that issued them.** A token from a membership-ordered page cannot be

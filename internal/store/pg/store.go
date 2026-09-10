@@ -685,7 +685,7 @@ func (s *Store) resolveContainer(ctx context.Context, containerTable, key string
 // membership position, ordered by position. Exactly one of chF / pgF is non-empty (the HTTP layer
 // rejects both; the channel filter wins here if a caller passes both). An unknown container yields an
 // empty page, not ErrNotFound, matching the previous EXISTS-based behavior — the list endpoint is a
-// filter, not a lookup, and GET /channels/{id} is the place that distinguishes "no such channel" from
+// filter, not a lookup, and GET /api/v1/channels/{id} is the place that distinguishes "no such channel" from
 // "no members".
 //
 // The container is resolved up front (resolveContainer) so that exactly one container feeds the
