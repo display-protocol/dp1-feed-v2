@@ -315,7 +315,10 @@ group document lists its playlists — because that is what a player rendering t
 a new id. A playlist the document lists at several positions is returned once per position. An unknown
 container id or slug yields an empty page, not **`404`** (the filter is a filter, not a lookup; use
 `GET /api/v1/channels/{id}` to tell "no such channel" from "no members"). `GET /api/v1/playlist-items` keeps
-`created_at` order under the same filters (its index is keyed on the playlist's `created_at`).
+`created_at` order under the same filters (its index is keyed on the playlist's `created_at`). On both
+lists the `channel` filter requires **extensions**: with extensions disabled the response is **`404`**
+`extensions_disabled` before any filtering, so the empty page for an unknown channel is a guarantee only on
+deployments with extensions enabled (the `playlist-group` filter has no such gate).
 
 **Cursors are bound to the ordering that issued them.** A token from a membership-ordered page cannot be
 used on a `created_at`-ordered list or vice versa, and a token that cannot be decoded, or whose fields are
