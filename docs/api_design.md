@@ -21,6 +21,12 @@
 - **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for groups and channels).
 
 Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two separate path params.
+**Feed-wide resolution rule:** a value that parses as a UUID is an id and is looked up by id only;
+anything else is a slug. There is no fallback from a missing id to a slug of the same text, on
+lookups or on list filters, so a slug that is itself a UUID string is reachable only through the
+resource's id. The alternative — try the id, then the slug — would make the meaning of one request
+change the moment a resource with that id is created (create is open and ids are client-chosen), and
+would let a lookup resolve a value a filter could not, or vice versa.
 
 ---
 
@@ -300,13 +306,47 @@ Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding 
 | ----------- | ------- |
 | **`limit`** | Page size, integer **1–100**, default **100**. |
 | **`cursor`** | Opaque cursor from the previous response’s `cursor` field. |
-| **`sort`** | **`asc`** or **`desc`** by `created_at`; default **`asc`**. |
+| **`sort`** | **`asc`** or **`desc`**; default **`asc`**. Direction only — the key it applies to is below. |
+
+**Ordering key.** Every list orders by `created_at`, with one exception: `GET /api/v1/playlists` with a
+`channel` or `playlist-group` filter orders by **membership position** — the order the signed channel or
+group document lists its playlists — because that is what a player rendering the container needs, and
+`created_at` order would move a playlist to the end of every container the moment it is republished under
+a new id. A playlist the document lists at several positions is returned once per position. An unknown
+container id or slug yields an empty page, not **`404`** (the filter is a filter, not a lookup; use
+`GET /api/v1/channels/{id}` to tell "no such channel" from "no members"). `GET /api/v1/playlist-items` keeps
+`created_at` order under the same filters (its index is keyed on the playlist's `created_at`). On both
+lists the `channel` filter requires **extensions**: with extensions disabled the response is **`404`**
+`extensions_disabled` before any filtering, so the empty page for an unknown channel is a guarantee only on
+deployments with extensions enabled (the `playlist-group` filter has no such gate).
+
+**Cursors are bound to the ordering that issued them.** A token from a membership-ordered page cannot be
+used on a `created_at`-ordered list or vice versa, and a token that cannot be decoded, or whose fields are
+missing, null or out of range, is refused — all **`400` `bad_request`** — rather than silently restarting
+the list from the wrong place. A membership token is additionally bound to the **container** (kind and
+id) and the **`sort` direction** it was issued for, because a position is only a page boundary relative
+to those: presenting it with another existing `channel` / `playlist-group`, or the other `sort`, is
+**`400`**. It is also bound to the container's **membership revision** (its `updated_at`, which the
+schema keeps strictly increasing across every write to a row): a replace of the channel or group
+rebuilds its positions under the same id, so a token issued before the replace is refused (**`400`**)
+and the client restarts from the first page, rather than assembling an order that matches neither
+signed document. An unknown container stays the empty page with or without a well-formed token — a client
+still paging a container deleted in the meantime sees an empty terminal page, not an error. A
+`created_at` token binds the ordering key only; its `(created_at, id)` boundary is the same row under
+either direction, so it may be presented with either `sort`.
+
+**Container filters resolve by id or by slug, never both.** On both `GET /api/v1/playlists` and
+`GET /api/v1/playlist-items`, a `channel` / `playlist-group` value that parses as a UUID is the id and
+anything else is a slug — the feed-wide rule above, so a filter resolves exactly what
+`GET /api/v1/channels/{id}` would. Slugs are client-chosen and create is open, so a container whose slug equals
+another container's UUID string is creatable; matching both would merge the two, interleaving a
+position-ordered list and leaking the decoy's items into a UUID-filtered item list.
 
 **Envelope:** `items` (array), `hasMore` (boolean), `cursor` (string, omitted when no next page). See `ListResponse` in OpenAPI and `internal/httpserver/dto.go`.
 
 **Filtering (`playlist-items` and `playlists` lists):**
 
-- **`channel`** — restrict to playlists that belong to that channel (UUID or slug). On `GET /api/v1/playlists`, requires **extensions**; if extensions are off, the response is **`404`** `extensions_disabled` (same as other channel features).
+- **`channel`** — restrict to playlists (or, on `GET /api/v1/playlist-items`, items) that belong to that channel (UUID or slug). On both lists it requires **extensions**; if extensions are off, the response is **`404`** `extensions_disabled` (same as other channel features). The empty page for an unknown channel applies only when extensions are enabled.
 - **`playlist-group`** — restrict to playlists that belong to that group (UUID or slug).
 - These two query params are **mutually exclusive** where the implementation enforces it; sending both may yield **400**.
 

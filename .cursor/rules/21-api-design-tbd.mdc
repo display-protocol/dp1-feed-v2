@@ -51,7 +51,7 @@ alwaysApply: true
 
 ## Pagination, sort, filter
 
-- **`limit`:** 1–100, default 100. **`cursor`:** opaque. **`sort`:** `asc`|`desc` by `created_at`, default `asc`.
+- **`limit`:** 1–100, default 100. **`cursor`:** opaque, bound to the ordering that issued it (undecodable or mismatched → 400). **`sort`:** `asc`|`desc` by `created_at`, default `asc` — except `GET /api/v1/playlists` filtered by `channel`/`playlist-group`, which orders by membership position (the signed document's order).
 - **`playlist-items` and `playlists` lists:** query `channel` or `playlist-group` (UUID/slug); mutually exclusive where enforced. Channel filter on `GET /api/v1/playlists` follows extensions policy (404 `extensions_disabled` when extensions off).
 
 ## Error model

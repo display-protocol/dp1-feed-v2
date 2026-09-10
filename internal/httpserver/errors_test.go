@@ -124,6 +124,16 @@ func TestMapStoreError_listLimitExceeded(t *testing.T) {
 	}
 }
 
+// A cursor that cannot be decoded, or that was issued by a list with a different ordering, is the
+// client's mistake to fix, so it must be a 400 rather than the store fallback 500.
+func TestMapStoreError_invalidCursor(t *testing.T) {
+	t.Parallel()
+	st, code, _ := mapExecutorError(fmt.Errorf("%w: garbage", store.ErrInvalidCursor))
+	if st != http.StatusBadRequest || code != "bad_request" {
+		t.Fatalf("got status=%d code=%q", st, code)
+	}
+}
+
 // A write refused because the row changed since it was authorized is a client-retryable conflict, not a
 // 500: the caller should re-read and retry against the new generation.
 func TestMapStoreError_concurrentModification(t *testing.T) {

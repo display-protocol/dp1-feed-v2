@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -454,33 +455,49 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 	order := p.Sort.SQLOrder()
 	tupleOp := p.Sort.TupleAfterCursorOp()
 
+	// A malformed cursor is a 400 whatever it is presented against, so it is decoded before the
+	// container filter can short-circuit to an empty page.
+	var plCreated time.Time
+	var pos int
+	var iid uuid.UUID
+	if p.Cursor != "" {
+		var derr error
+		if plCreated, pos, iid, derr = decodePlaylistItemCursor(p.Cursor); derr != nil {
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
+		}
+	}
+
 	args := []any{limit + 1}
 
+	// The container filter resolves to exactly one container (resolveContainer), and an unknown one is
+	// the documented empty page. The filter itself stays an EXISTS on membership rather than a join so
+	// a playlist the container lists at several positions contributes its items once: this list is
+	// ordered by the playlist's created_at, not by position, and stays that way (documented).
 	var filterSQL string
-	if chF != "" {
-		n := len(args) + 1
+	if chF != "" || pgF != "" {
+		containerTable, memberTable, containerColumn := "channels", "channel_members", "channel_id"
+		key := chF
+		if chF == "" {
+			containerTable, memberTable, containerColumn = "playlist_groups", "playlist_group_members", "playlist_group_id"
+			key = pgF
+		}
+		containerID, _, found, err := resolveContainer(ctx, s.pool, containerTable, key)
+		if err != nil {
+			return nil, "", err
+		}
+		if !found {
+			return nil, "", nil
+		}
 		filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM channel_members cm
-			WHERE cm.playlist_id = i.playlist_id
-			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-		args = append(args, chF)
-	} else if pgF != "" {
-		n := len(args) + 1
-		filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM playlist_group_members pgm
-			WHERE pgm.playlist_id = i.playlist_id
-			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-		args = append(args, pgF)
+			SELECT 1 FROM %s m
+			WHERE m.playlist_id = i.playlist_id
+			AND m.%s = $%d::uuid
+		)`, memberTable, containerColumn, len(args)+1)
+		args = append(args, containerID)
 	}
 
 	var cursorSQL string
 	if p.Cursor != "" {
-		plCreated, pos, iid, derr := decodePlaylistItemCursor(p.Cursor)
-		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
-		}
 		n := len(args) + 1
 		cursorSQL = fmt.Sprintf(
 			` AND (i.playlist_created_at, i.position, i.item_id) %s ($%d::timestamptz, $%d::int, $%d::uuid)`,
@@ -564,8 +581,26 @@ WHERE item_id = $1`
 
 // ListPlaylists implements store.Store.
 //
-// Ordering: created_at then id, direction from p.Sort. Pagination: fetch limit+1 rows; if extra row exists,
-// trim to limit and return next_cursor built from the last kept row (see encodeCursor).
+// Two orderings, chosen by the filter:
+//
+//   - Unfiltered: created_at then id, direction from p.Sort. Cursor is (created_at, id) of the last row.
+//   - Filtered by channel or playlist-group: membership position (the order the signed document lists
+//     its playlists), direction from p.Sort. Cursor is the last row's position. A document that
+//     repeats a playlist URI stores one membership row per position, and this list mirrors that — the
+//     playlist appears at every position it holds — because the endpoint answers "what does this
+//     channel play, in order", and the channel document is the authority on that order.
+//
+// The filtered list used to reuse the created_at ordering with an EXISTS-on-membership predicate. That
+// made the order depend on when each member was published rather than on the channel, so a playlist
+// republished under a new id jumped to the end of every channel that carried it. Position is what a
+// player rendering a channel needs, and it is already how ListPlaylistsInChannel/InGroup answer.
+//
+// The two cursor shapes are deliberately distinct (see decodeCursor / decodeMembershipCursor): a token
+// from one ordering means nothing under the other, and decoding it as zero values would silently start
+// the page from the wrong place instead of failing with ErrInvalidCursor.
+//
+// Pagination: fetch limit+1 rows; if the extra row exists, trim to limit and build the next cursor from
+// the last kept row.
 func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams) ([]store.PlaylistRecord, string, error) {
 	if p == nil {
 		return nil, "", fmt.Errorf("nil list params")
@@ -574,93 +609,42 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 	if err != nil {
 		return nil, "", err
 	}
-	order := p.Sort.SQLOrder()
-	tupleOp := p.Sort.TupleAfterCursorOp()
 
 	chF := strings.TrimSpace(p.ChannelFilter)
 	pgF := strings.TrimSpace(p.PlaylistGroupFilter)
+	if chF != "" || pgF != "" {
+		return s.listPlaylistsByMembership(ctx, p, limit, chF, pgF)
+	}
 
-	var filterSQL string
+	order := p.Sort.SQLOrder()
+	tupleOp := p.Sort.TupleAfterCursorOp()
+
+	var q string
 	var args []any
 	if p.Cursor == "" {
 		args = []any{limit + 1}
-		if chF != "" {
-			const n = 2
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM channel_members cm
-			WHERE cm.playlist_id = playlists.id
-			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, chF)
-		} else if pgF != "" {
-			const n = 2
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM playlist_group_members pgm
-			WHERE pgm.playlist_id = playlists.id
-			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, pgF)
-		}
+		q = fmt.Sprintf(`
+SELECT id, slug, body, created_at, updated_at
+FROM playlists
+ORDER BY created_at %s, id %s
+LIMIT $1`, order, order)
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		args = []any{limit + 1, created, id}
-		if chF != "" {
-			const n = 4
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM channel_members cm
-			WHERE cm.playlist_id = playlists.id
-			AND cm.channel_id IN (SELECT id FROM channels WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, chF)
-		} else if pgF != "" {
-			const n = 4
-			filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM playlist_group_members pgm
-			WHERE pgm.playlist_id = playlists.id
-			AND pgm.playlist_group_id IN (SELECT id FROM playlist_groups WHERE id::text = $%d OR slug = $%d)
-		)`, n, n)
-			args = append(args, pgF)
-		}
-	}
-
-	var q string
-	if p.Cursor == "" {
 		q = fmt.Sprintf(`
 SELECT id, slug, body, created_at, updated_at
 FROM playlists
-WHERE 1=1%s
+WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)
 ORDER BY created_at %s, id %s
-LIMIT $1`, filterSQL, order, order)
-	} else {
-		q = fmt.Sprintf(`
-SELECT id, slug, body, created_at, updated_at
-FROM playlists
-WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)%s
-ORDER BY created_at %s, id %s
-LIMIT $1`, tupleOp, filterSQL, order, order)
+LIMIT $1`, tupleOp, order, order)
 	}
 
-	var rows pgx.Rows
-	rows, err = s.pool.Query(ctx, q, args...)
+	out, err := s.queryPlaylistRecords(ctx, q, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("list playlists: %w", err)
-	}
-	defer rows.Close()
-
-	var out []store.PlaylistRecord
-	for rows.Next() {
-		var rec store.PlaylistRecord
-		var raw []byte
-		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
-			return nil, "", fmt.Errorf("scan: %w", err)
-		}
-		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
-			return nil, "", err
-		}
-		out = append(out, rec)
+		return nil, "", err
 	}
 
 	nextCursor := ""
@@ -669,7 +653,207 @@ LIMIT $1`, tupleOp, filterSQL, order, order)
 		out = out[:limit]
 		nextCursor = encodeCursor(last.CreatedAt, last.ID)
 	}
-	return out, nextCursor, rows.Err()
+	return out, nextCursor, nil
+}
+
+// rowQuerier is the one method resolveContainer needs, satisfied by both the pool and a pgx.Tx so a
+// caller can resolve inside the same snapshot it reads membership from.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// resolveContainer turns a channel / playlist-group filter value into the container's id and its
+// updated_at, the way GetChannel and ListPlaylistsInChannel resolve it: a value that parses as a UUID
+// is looked up by id, anything else by slug. found is false when no such container exists — for a
+// UUID too, because callers decide "unknown container" (empty page, and no cursor binding check) from
+// found, and a parseable id that matches no row is exactly as unknown as a slug that matches none. It
+// must be one or the other, never `id::text = $n OR slug = $n`: create is open and slugs are
+// client-chosen, so a second container whose slug equals the first one's UUID string is creatable,
+// and matching both would merge two containers' membership — interleaving rows in a position-ordered
+// list, and leaking a decoy's items into a UUID-filtered item list. containerTable is one of the two
+// table-name literals the callers own; the only parameter is the key.
+//
+// updatedAt is the container row's updated_at, which listPlaylistsByMembership uses as the membership
+// revision a cursor is bound to. It is a sound generation because the trigger (migration 000008)
+// stores a value strictly greater than the previous one on every update, whatever the transactions'
+// timing — a plain now() could repeat across two rapid replaces, or go backwards when an earlier
+// transaction commits later, and a stale cursor would then pass the equality check.
+func resolveContainer(ctx context.Context, q rowQuerier, containerTable, key string) (id uuid.UUID, updatedAt time.Time, found bool, err error) {
+	if parsed, perr := uuid.Parse(key); perr == nil {
+		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE id = $1`, containerTable), parsed).Scan(&id, &updatedAt)
+	} else {
+		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE slug = $1`, containerTable), key).Scan(&id, &updatedAt)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, time.Time{}, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, time.Time{}, false, fmt.Errorf("resolve %s %q: %w", containerTable, key, err)
+	}
+	return id, updatedAt, true, nil
+}
+
+// listPlaylistsByMembership is ListPlaylists for a channel or playlist-group filter: one row per
+// membership position, ordered by position. Exactly one of chF / pgF is non-empty (the HTTP layer
+// rejects both; the channel filter wins here if a caller passes both). An unknown container yields an
+// empty page, not ErrNotFound, matching the previous EXISTS-based behavior — the list endpoint is a
+// filter, not a lookup, and GET /api/v1/channels/{id} is the place that distinguishes "no such channel" from
+// "no members".
+//
+// The container is resolved up front (resolveContainer) so that exactly one container feeds the
+// query. position is unique only WITHIN a container (it is half of the membership primary key), so
+// with a single container it is a complete keyset — no id tie-break — but across two it has ties,
+// and LIMIT plus a position cursor would then skip or repeat rows.
+//
+// The cursor carries the container kind, the resolved container id, the sort direction, the
+// container's membership revision (its updated_at) and the last position, and a request must present
+// the same kind, container and direction, against an unchanged revision, to use it. The position
+// alone is not a page boundary: the same number means a different row in another container; under
+// the opposite direction the comparison flips; and a replace of the container deletes and rebuilds
+// its membership rows under the same id, so after `[A,B,C,D]` becomes `[D,C,B,A]` a "position > 1"
+// token would serve `[B,A]` — repeating B, dropping D and C — an order that matches neither signed
+// document. Binding all of those to the token turns each case into the documented 400, and the
+// client restarts from the first page.
+//
+// The revision is read in the same REPEATABLE READ snapshot as the membership rows, so a replace that
+// commits between the two statements cannot pass the check with the old revision and then page the
+// new rows.
+func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlaylistsParams, limit int, chF, pgF string) ([]store.PlaylistRecord, string, error) {
+	kind, memberTable, containerColumn, containerTable := membershipKindPlaylistGroup, "playlist_group_members", "playlist_group_id", "playlist_groups"
+	container := pgF
+	if chF != "" {
+		kind, memberTable, containerColumn, containerTable = membershipKindChannel, "channel_members", "channel_id", "channels"
+		container = chF
+	}
+
+	// The zero SortOrder orders ascending everywhere else in this store (SQLOrder / TupleAfterCursorOp
+	// treat it as ASC), so it must be canonicalized before it is written into a cursor or compared
+	// against one: encoding "" would issue a token the decoder refuses on the very next page.
+	sort := p.Sort
+	if sort == "" {
+		sort = store.SortAsc
+	}
+
+	// Decode the cursor before resolving the container: a malformed token is a 400 regardless of what
+	// it is presented against. A well-formed token presented against a container that no longer
+	// resolves is NOT an error: the documented answer for an unknown container is the empty page, and
+	// the ordinary way to get here is a client continuing to page a channel that was deleted
+	// meanwhile — an empty terminal page is what that continuation should see. Kind/container/
+	// direction mismatch is checked only once the container is known to exist.
+	var cur membershipCursorPayload
+	if p.Cursor != "" {
+		var derr error
+		if cur, derr = decodeMembershipCursor(p.Cursor); derr != nil {
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
+		}
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, "", fmt.Errorf("begin read tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	containerID, revision, found, err := resolveContainer(ctx, tx, containerTable, container)
+	if err != nil {
+		return nil, "", err
+	}
+	if !found {
+		return nil, "", nil
+	}
+
+	order := sort.SQLOrder()
+	cursorOp := sort.TupleAfterCursorOp()
+	base := fmt.Sprintf(`
+SELECT p.id, p.slug, p.body, p.created_at, p.updated_at, m.position
+FROM %s m
+JOIN playlists p ON p.id = m.playlist_id
+WHERE m.%s = $2::uuid`, memberTable, containerColumn)
+
+	var q string
+	var args []any
+	if p.Cursor == "" {
+		args = []any{limit + 1, containerID}
+		q = fmt.Sprintf(`%s
+ORDER BY m.position %s
+LIMIT $1`, base, order)
+	} else {
+		if cur.Kind != kind || cur.Container != containerID || cur.Sort != string(sort) {
+			return nil, "", fmt.Errorf("%w: cursor was issued for %s %s sorted %s, not %s %s sorted %s", store.ErrInvalidCursor,
+				cur.Kind, cur.Container, cur.Sort, kind, containerID, sort)
+		}
+		if !cur.Rev.Equal(revision) {
+			return nil, "", fmt.Errorf("%w: %s %s was replaced since the cursor was issued; restart from the first page", store.ErrInvalidCursor, kind, containerID)
+		}
+		args = []any{limit + 1, containerID, cur.Pos}
+		q = fmt.Sprintf(`%s
+AND m.position %s $3::int
+ORDER BY m.position %s
+LIMIT $1`, base, cursorOp, order)
+	}
+
+	rows, err := tx.Query(ctx, q, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("list playlists by membership: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.PlaylistRecord
+	var positions []int
+	for rows.Next() {
+		var rec store.PlaylistRecord
+		var raw []byte
+		var pos int
+		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt, &pos); err != nil {
+			return nil, "", fmt.Errorf("scan: %w", err)
+		}
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
+			return nil, "", err
+		}
+		out = append(out, rec)
+		positions = append(positions, pos)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("list playlists by membership: %w", err)
+	}
+
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", fmt.Errorf("commit read tx: %w", err)
+	}
+
+	nextCursor := ""
+	if len(out) > limit {
+		out = out[:limit]
+		nextCursor = encodeMembershipCursor(kind, containerID, sort, revision, positions[limit-1])
+	}
+	return out, nextCursor, nil
+}
+
+// queryPlaylistRecords runs a query whose columns are (id, slug, body, created_at, updated_at) and
+// decodes every row into a PlaylistRecord.
+func (s *Store) queryPlaylistRecords(ctx context.Context, q string, args ...any) ([]store.PlaylistRecord, error) {
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list playlists: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.PlaylistRecord
+	for rows.Next() {
+		var rec store.PlaylistRecord
+		var raw []byte
+		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list playlists: %w", err)
+	}
+	return out, nil
 }
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
@@ -1024,7 +1208,7 @@ LIMIT $1`
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
 		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
@@ -1324,7 +1508,7 @@ LIMIT $1`
 	} else {
 		created, id, derr := decodeCursor(p.Cursor)
 		if derr != nil {
-			return nil, "", fmt.Errorf("cursor: %w", derr)
+			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
 		}
 		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
 		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
@@ -1490,6 +1674,25 @@ type cursorPayload struct {
 	ID        uuid.UUID `json:"id"`
 }
 
+// Membership container kinds, carried in a membership cursor so a channel token cannot page a group.
+const (
+	membershipKindChannel       = "channel"
+	membershipKindPlaylistGroup = "playlist-group"
+)
+
+// membershipCursorPayload is the token for a membership-ordered playlist list (channel or
+// playlist-group filter): the container it was issued for, the sort direction, and the position of
+// the last row served. Its key set is disjoint from cursorPayload's on purpose so the two decoders can
+// tell the shapes apart (see decodeCursor). Kind, container and direction are carried because
+// position is meaningful only relative to all three (see listPlaylistsByMembership).
+type membershipCursorPayload struct {
+	Kind      string    `json:"kind"`
+	Container uuid.UUID `json:"cid"`
+	Sort      string    `json:"sort"`
+	Rev       time.Time `json:"rev"` // container updated_at when the token was issued (membership revision)
+	Pos       int       `json:"pos"`
+}
+
 // encodeCursor builds the next-page token: base64url(JSON { t: created_at, id }).
 func encodeCursor(t time.Time, id uuid.UUID) string {
 	p := cursorPayload{CreatedAt: t, ID: id}
@@ -1497,16 +1700,104 @@ func encodeCursor(t time.Time, id uuid.UUID) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// requireCursorFields checks that every key a cursor shape owns is present and non-null in the raw
+// token. encoding/json leaves an absent or null field at its zero value, and a zero created_at, Nil
+// uuid or zero position is a legal-looking keyset that silently restarts, skips or repeats the list;
+// the client would see a 200 page and never learn its token was broken. The semantic checks (non-zero
+// time, non-Nil id, non-negative position) follow in each decoder.
+func requireCursorFields(raw map[string]json.RawMessage, keys ...string) error {
+	for _, k := range keys {
+		v, ok := raw[k]
+		if !ok || string(v) == "null" {
+			return fmt.Errorf("cursor is missing its %q field", k)
+		}
+	}
+	return nil
+}
+
+// decodeCursor parses a created_at-ordered token. A membership token (carrying "pos") is refused
+// rather than decoded to zero values: a zero (created_at, id) tuple would quietly restart the list
+// from the beginning under ASC, or return nothing under DESC, and the client would never learn that
+// it reused a cursor across two different orderings.
+//
+// This token binds the ordering key only. Unlike a membership token it does not carry the sort
+// direction: a (created_at, id) boundary is the same row under either direction, so reusing it with
+// the other `sort` yields a well-defined page (the rows on the other side of that row), and the token
+// shape predates this feed's cursor validation, so widening it is a separate contract change.
 func decodeCursor(s string) (time.Time, uuid.UUID, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
+		return time.Time{}, uuid.Nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return time.Time{}, uuid.Nil, err
+	}
+	if _, ok := raw["pos"]; ok {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor belongs to a channel- or playlist-group-filtered list")
+	}
+	if err := requireCursorFields(raw, "t", "id"); err != nil {
 		return time.Time{}, uuid.Nil, err
 	}
 	var p cursorPayload
 	if err := json.Unmarshal(b, &p); err != nil {
 		return time.Time{}, uuid.Nil, err
 	}
+	if p.CreatedAt.IsZero() || p.ID == uuid.Nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor carries a zero created_at or id")
+	}
 	return p.CreatedAt, p.ID, nil
+}
+
+// encodeMembershipCursor builds the next-page token for a membership-ordered list:
+// base64url(JSON { kind, cid, sort, rev, pos }). rev round-trips through RFC 3339 with nanoseconds,
+// which preserves Postgres's microsecond updated_at exactly, so the decoder can compare it with Equal.
+func encodeMembershipCursor(kind string, container uuid.UUID, sort store.SortOrder, rev time.Time, pos int) string {
+	b, _ := json.Marshal(membershipCursorPayload{Kind: kind, Container: container, Sort: string(sort), Rev: rev, Pos: pos})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// decodeMembershipCursor parses and validates a membership token; a created_at token (carrying "t")
+// is refused for the reason given on decodeCursor. Every field must be present and well-formed:
+// position 0 is a valid keyset value (the first member), so only a negative position is refused, and
+// a position above INT range is refused here rather than left for Postgres to reject the `$::int`
+// bind (which would surface as a 500, not the documented 400). Matching the token's kind, container
+// and direction against the request is the caller's job.
+func decodeMembershipCursor(s string) (membershipCursorPayload, error) {
+	var p membershipCursorPayload
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return p, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return p, err
+	}
+	if _, ok := raw["t"]; ok {
+		return p, fmt.Errorf("cursor belongs to an unfiltered list")
+	}
+	if err := requireCursorFields(raw, "kind", "cid", "sort", "rev", "pos"); err != nil {
+		return p, err
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return p, err
+	}
+	if p.Kind != membershipKindChannel && p.Kind != membershipKindPlaylistGroup {
+		return p, fmt.Errorf("cursor names an unknown container kind %q", p.Kind)
+	}
+	if p.Container == uuid.Nil {
+		return p, fmt.Errorf("cursor carries a nil container id")
+	}
+	if _, err := store.ParseSortOrder(p.Sort); err != nil || p.Sort == "" {
+		return p, fmt.Errorf("cursor carries an invalid sort direction %q", p.Sort)
+	}
+	if p.Rev.IsZero() {
+		return p, fmt.Errorf("cursor carries a zero membership revision")
+	}
+	if p.Pos < 0 || p.Pos > math.MaxInt32 {
+		return p, fmt.Errorf("cursor carries an out-of-range position %d", p.Pos)
+	}
+	return p, nil
 }
 
 type playlistItemCursorPayload struct {
@@ -1536,11 +1827,15 @@ func decodePlaylistItemCursor(s string) (plCreated time.Time, pos int, itemID uu
 	if _, ok := raw["pid"]; ok {
 		return time.Time{}, 0, uuid.Nil, fmt.Errorf("stale playlist-item cursor")
 	}
+	if err := requireCursorFields(raw, "t", "pos", "iid"); err != nil {
+		return time.Time{}, 0, uuid.Nil, err
+	}
 	var wire playlistItemCursorPayload
 	if err := json.Unmarshal(b, &wire); err != nil {
 		return time.Time{}, 0, uuid.Nil, err
 	}
-	if wire.IID == uuid.Nil {
+	// Position must fit the INT column it is bound against; see decodeMembershipCursor.
+	if wire.T.IsZero() || wire.Pos < 0 || wire.Pos > math.MaxInt32 || wire.IID == uuid.Nil {
 		return time.Time{}, 0, uuid.Nil, fmt.Errorf("invalid playlist-item cursor")
 	}
 	return wire.T, wire.Pos, wire.IID, nil

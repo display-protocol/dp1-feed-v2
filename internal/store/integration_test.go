@@ -2428,3 +2428,325 @@ func assertAlreadyExists(t *testing.T, err error, wantMention string) {
 		t.Fatalf("error should mention %q, got %q", wantMention, err)
 	}
 }
+
+// A channel-filtered playlist list must follow the channel document's own order, not the members'
+// created_at. This is the production case that motivated it: a Feral File channel whose playlists were
+// republished one by one, so their created_at order no longer matched the channel's positions and the
+// filtered list showed the last-republished playlist at the end.
+func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	// Create in an order that is the REVERSE of the channel order, so created_at and position disagree.
+	ids := []uuid.UUID{
+		uuid.MustParse("0a000000-0000-4000-8000-000000000001"),
+		uuid.MustParse("0a000000-0000-4000-8000-000000000002"),
+		uuid.MustParse("0a000000-0000-4000-8000-000000000003"),
+	}
+	slugs := []string{"pos-pl-1", "pos-pl-2", "pos-pl-3"}
+	members := make([]store.IngestedPlaylist, 0, len(ids))
+	for i := len(ids) - 1; i >= 0; i-- {
+		pl := playlist.Playlist{
+			DPVersion: "1.1.0",
+			Title:     slugs[i],
+			Items:     []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://" + slugs[i]}},
+		}
+		if err := st.CreatePlaylist(ctx, ids[i], slugs[i], rawDoc(t, &pl)); err != nil {
+			t.Fatal(err)
+		}
+		members = append([]store.IngestedPlaylist{{ID: ids[i], Slug: slugs[i], Raw: rawDoc(t, &pl)}}, members...)
+	}
+	// The document repeats its first playlist at the end: membership stores one row per position, and the
+	// filtered list must mirror the document, so that playlist is expected twice.
+	members = append(members, members[0])
+	wantOrder := []uuid.UUID{ids[0], ids[1], ids[2], ids[0]}
+
+	chID := uuid.MustParse("0c000000-0000-4000-8000-000000000001")
+	chBody := channels.Channel{
+		ID:        chID.String(),
+		Slug:      "pos-channel",
+		Title:     "Position Channel",
+		Version:   "1.0.0",
+		Playlists: []string{slugs[0], slugs[1], slugs[2], slugs[0]},
+	}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: chID, Slug: "pos-channel", Raw: rawDoc(t, chBody), Playlists: members}); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	got := func(sort store.SortOrder, limit int, cursor, filter string) ([]uuid.UUID, string) {
+		t.Helper()
+		rows, next, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: limit, Cursor: cursor, Sort: sort, ChannelFilter: filter})
+		if err != nil {
+			t.Fatalf("ListPlaylists(%s, limit=%d, cursor=%q): %v", sort, limit, cursor, err)
+		}
+		out := make([]uuid.UUID, len(rows))
+		for i, r := range rows {
+			out[i] = r.ID
+		}
+		return out, next
+	}
+
+	for _, filter := range []string{"pos-channel", chID.String()} {
+		asc, next := got(store.SortAsc, 10, "", filter)
+		if !reflect.DeepEqual(asc, wantOrder) || next != "" {
+			t.Fatalf("asc by %q: got %v (next %q), want %v", filter, asc, next, wantOrder)
+		}
+	}
+
+	desc, _ := got(store.SortDesc, 10, "", chID.String())
+	wantDesc := []uuid.UUID{ids[0], ids[2], ids[1], ids[0]}
+	if !reflect.DeepEqual(desc, wantDesc) {
+		t.Fatalf("desc: got %v, want %v", desc, wantDesc)
+	}
+
+	// Keyset pagination across positions: 4 rows, pages of 3 then 1, and the cursor must not skip or
+	// repeat the boundary row.
+	page1, cur1 := got(store.SortAsc, 3, "", chID.String())
+	if !reflect.DeepEqual(page1, wantOrder[:3]) || cur1 == "" {
+		t.Fatalf("page 1: got %v (next %q)", page1, cur1)
+	}
+	page2, cur2 := got(store.SortAsc, 3, cur1, chID.String())
+	if !reflect.DeepEqual(page2, wantOrder[3:]) || cur2 != "" {
+		t.Fatalf("page 2: got %v (next %q), want %v", page2, cur2, wantOrder[3:])
+	}
+	// Same walk descending.
+	d1, dc1 := got(store.SortDesc, 3, "", chID.String())
+	d2, dc2 := got(store.SortDesc, 3, dc1, chID.String())
+	if !reflect.DeepEqual(append(d1, d2...), wantDesc) || dc2 != "" {
+		t.Fatalf("desc pages: got %v + %v (next %q), want %v", d1, d2, dc2, wantDesc)
+	}
+
+	// A membership cursor is bound to the container and direction that issued it. Under the opposite
+	// direction the same position would flip the comparison and repeat or skip rows; under another
+	// container the same position is a different row. Both are refused, not served.
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: cur1, Sort: store.SortDesc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("asc cursor presented with sort=desc: want ErrInvalidCursor, got %v", err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: dc1, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("desc cursor presented with sort=asc: want ErrInvalidCursor, got %v", err)
+	}
+	// Same container reached by slug instead of uuid is still the same container, so the cursor is valid.
+	if bySlugPage2, _ := got(store.SortAsc, 3, cur1, "pos-channel"); !reflect.DeepEqual(bySlugPage2, wantOrder[3:]) {
+		t.Fatalf("cursor issued for the uuid, presented with the slug: got %v, want %v", bySlugPage2, wantOrder[3:])
+	}
+
+	// A membership cursor on the unfiltered list, and an unfiltered cursor on the filtered list, are
+	// both refused as ErrInvalidCursor rather than decoded to zero values.
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: cur1, Sort: store.SortAsc}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("membership cursor on unfiltered list: want ErrInvalidCursor, got %v", err)
+	}
+	_, unfilteredCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Sort: store.SortAsc})
+	if err != nil || unfilteredCur == "" {
+		t.Fatalf("unfiltered first page: cursor %q, err %v", unfilteredCur, err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: unfilteredCur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("unfiltered cursor on channel list: want ErrInvalidCursor, got %v", err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("garbage cursor: want ErrInvalidCursor, got %v", err)
+	}
+
+	// An unknown channel is an empty page, not ErrNotFound (a filter, not a lookup) — but only for a
+	// cursor-less request. A cursor is validated first: a malformed one is a 400 whatever it is
+	// presented against, and a valid one can only have been issued for a container that exists, so
+	// presenting it against an unknown one is a container mismatch, not an empty page.
+	if empty, next := got(store.SortAsc, 10, "", "no-such-channel"); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel: got %v (next %q), want empty", empty, next)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("unknown channel with garbage cursor: want ErrInvalidCursor, got %v", err)
+	}
+	// A well-formed cursor against an unknown container is the empty page, not a 400: that is what a
+	// client continuing to page a channel deleted in the meantime must see.
+	if empty, next := got(store.SortAsc, 10, cur1, "no-such-channel"); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel with a well-formed cursor: got %v (next %q), want empty page", empty, next)
+	}
+	if _, _, err := st.ListPlaylistItems(ctx, &store.ListPlaylistItemsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("items: unknown channel with garbage cursor: want ErrInvalidCursor, got %v", err)
+	}
+	// The same holds when the unknown container is named by a well-formed UUID: parseable is not the
+	// same as existing, and the cursor binding check must not run against a container that is not there.
+	unknownUUID := uuid.MustParse("0c000000-0000-4000-8000-0000000000ff")
+	if empty, next := got(store.SortAsc, 10, "", unknownUUID.String()); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel uuid: got %v (next %q), want empty", empty, next)
+	}
+	if empty, next := got(store.SortAsc, 10, cur1, unknownUUID.String()); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel uuid with a well-formed cursor: got %v (next %q), want empty page", empty, next)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: unknownUUID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("unknown channel uuid with garbage cursor: want ErrInvalidCursor, got %v", err)
+	}
+
+	// The zero SortOrder is ascending for every store list; a filtered caller relying on that must be
+	// able to page, so the cursor it is issued must carry the canonical direction and be accepted on
+	// the next request whether that request says "" or "asc".
+	zeroPage1, zeroCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, ChannelFilter: chID.String()})
+	if err != nil || zeroCur == "" || len(zeroPage1) != 3 {
+		t.Fatalf("zero sort first page: %d rows, cursor %q, err %v", len(zeroPage1), zeroCur, err)
+	}
+	for _, sort := range []store.SortOrder{"", store.SortAsc} {
+		if page2, _ := got(sort, 3, zeroCur, chID.String()); !reflect.DeepEqual(page2, wantOrder[3:]) {
+			t.Fatalf("zero-sort cursor presented with sort=%q: got %v, want %v", sort, page2, wantOrder[3:])
+		}
+	}
+
+	// Container resolution is by UUID or by slug, never both: a second channel whose slug is the first
+	// channel's UUID string must not have its members interleaved into the `?channel=<uuid>` list
+	// (position is only unique within one container, so a union would break the keyset).
+	decoyPlID := uuid.MustParse("0a000000-0000-4000-8000-00000000000d")
+	decoyPl := playlist.Playlist{DPVersion: "1.1.0", Title: "decoy-pl", Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://decoy-pl"}}}
+	if err := st.CreatePlaylist(ctx, decoyPlID, "decoy-pl", rawDoc(t, &decoyPl)); err != nil {
+		t.Fatal(err)
+	}
+	decoyMember := store.IngestedPlaylist{ID: decoyPlID, Slug: "decoy-pl", Raw: rawDoc(t, &decoyPl)}
+	decoyID := uuid.MustParse("0c000000-0000-4000-8000-000000000002")
+	decoyBody := channels.Channel{ID: decoyID.String(), Slug: chID.String(), Title: "Decoy", Version: "1.0.0", Playlists: []string{"decoy-pl"}}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: decoyID, Slug: chID.String(), Raw: rawDoc(t, decoyBody), Playlists: []store.IngestedPlaylist{decoyMember}}); err != nil {
+		t.Fatalf("CreateChannel(decoy): %v", err)
+	}
+	if byUUID, _ := got(store.SortAsc, 10, "", chID.String()); !reflect.DeepEqual(byUUID, wantOrder) {
+		t.Fatalf("channel by uuid with a slug decoy present: got %v, want %v", byUUID, wantOrder)
+	}
+	// The item list resolves the container the same way, so the decoy's items must not leak into a
+	// UUID-filtered item list (they used to, through `id::text = $n OR slug = $n`).
+	itemPlaylists := func(params *store.ListPlaylistItemsParams) map[uuid.UUID]bool {
+		t.Helper()
+		items, _, err := st.ListPlaylistItems(ctx, params)
+		if err != nil {
+			t.Fatalf("ListPlaylistItems(%+v): %v", params, err)
+		}
+		seen := map[uuid.UUID]bool{}
+		for _, it := range items {
+			seen[it.PlaylistID] = true
+		}
+		return seen
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, ChannelFilter: chID.String()}); seen[decoyPlID] || len(seen) != 3 {
+		t.Fatalf("items by channel uuid with a slug decoy present: playlists %v, want exactly the 3 real members", seen)
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, ChannelFilter: "pos-channel"}); seen[decoyPlID] || len(seen) != 3 {
+		t.Fatalf("items by channel slug: playlists %v, want exactly the 3 real members", seen)
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); len(seen) != 0 {
+		t.Fatalf("items by unknown channel: playlists %v, want none", seen)
+	}
+	// The real channel's cursor presented against the decoy (another container of the same kind).
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 3, Cursor: cur1, Sort: store.SortAsc, ChannelFilter: decoyID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("channel cursor presented against another channel: want ErrInvalidCursor, got %v", err)
+	}
+
+	// The playlist-group filter follows the same rule.
+	gID := uuid.MustParse("09000000-0000-4000-8000-000000000001")
+	gBody := playlistgroup.Group{ID: gID.String(), Slug: "pos-group", Title: "Position Group", Playlists: []string{slugs[2], slugs[0]}}
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: gID, Slug: "pos-group", Raw: rawDoc(t, gBody), Playlists: []store.IngestedPlaylist{members[2], members[0]}}); err != nil {
+		t.Fatalf("CreatePlaylistGroup: %v", err)
+	}
+	rows, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, PlaylistGroupFilter: "pos-group"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].ID != ids[2] || rows[1].ID != ids[0] {
+		t.Fatalf("group filter order: got %v, want [%v %v]", rows, ids[2], ids[0])
+	}
+	// Same decoy rule for groups on the item list: a group whose slug is the real group's UUID.
+	decoyGID := uuid.MustParse("09000000-0000-4000-8000-000000000002")
+	decoyG := playlistgroup.Group{ID: decoyGID.String(), Slug: gID.String(), Title: "Decoy Group", Playlists: []string{"decoy-pl"}}
+	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: decoyGID, Slug: gID.String(), Raw: rawDoc(t, decoyG), Playlists: []store.IngestedPlaylist{decoyMember}}); err != nil {
+		t.Fatalf("CreatePlaylistGroup(decoy): %v", err)
+	}
+	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); seen[decoyPlID] || len(seen) != 2 {
+		t.Fatalf("items by group uuid with a slug decoy present: playlists %v, want exactly the 2 real members", seen)
+	}
+	if rows, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); err != nil || len(rows) != 2 {
+		t.Fatalf("playlists by group uuid with a slug decoy present: %d rows, err %v, want 2", len(rows), err)
+	}
+
+	// A channel cursor presented against a group (other container kind), and a group cursor against the
+	// channel, are both refused.
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: cur1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("channel cursor presented against a group: want ErrInvalidCursor, got %v", err)
+	}
+	_, gCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()})
+	if err != nil || gCur == "" {
+		t.Fatalf("group first page: cursor %q, err %v", gCur, err)
+	}
+	if rows, next, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, PlaylistGroupFilter: "09000000-0000-4000-8000-0000000000ff"}); err != nil || len(rows) != 0 || next != "" {
+		t.Fatalf("group cursor against an unknown group uuid: got %d rows (next %q, err %v), want empty page", len(rows), next, err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("group cursor presented against a channel: want ErrInvalidCursor, got %v", err)
+	}
+}
+
+// A membership cursor is bound to the container's membership revision. A replace of the channel
+// deletes and rebuilds its membership rows under the same id, so a position issued before the replace
+// is a boundary in an order that no longer exists: `[A,B,C,D]` paged at 2 issues "position 1"; after
+// the replace to `[D,C,B,A]` that token would serve `[B,A]`, repeating B and dropping D and C. The
+// token must be refused so the client restarts from the first page.
+func TestIntegration_ListPlaylists_membershipCursorRefusedAfterReplace(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	ids := make([]uuid.UUID, 4)
+	members := make([]store.IngestedPlaylist, 4)
+	for i := range ids {
+		ids[i] = uuid.MustParse(fmt.Sprintf("0b000000-0000-4000-8000-00000000000%d", i+1))
+		slug := fmt.Sprintf("rev-pl-%d", i+1)
+		pl := playlist.Playlist{DPVersion: "1.1.0", Title: slug, Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://" + slug}}}
+		if err := st.CreatePlaylist(ctx, ids[i], slug, rawDoc(t, &pl)); err != nil {
+			t.Fatal(err)
+		}
+		members[i] = store.IngestedPlaylist{ID: ids[i], Slug: slug, Raw: rawDoc(t, &pl)}
+	}
+	chID := uuid.MustParse("0c000000-0000-4000-8000-0000000000aa")
+	body := func(order []store.IngestedPlaylist) channels.Channel {
+		slugs := make([]string, len(order))
+		for i, m := range order {
+			slugs[i] = m.Slug
+		}
+		return channels.Channel{ID: chID.String(), Slug: "rev-channel", Title: "Revision Channel", Version: "1.0.0", Playlists: slugs}
+	}
+	if err := st.CreateChannel(ctx, &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(members)), Playlists: members}); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	page1, cur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || cur == "" || len(page1) != 2 || page1[0].ID != ids[0] || page1[1].ID != ids[1] {
+		t.Fatalf("page 1: %d rows, cursor %q, err %v", len(page1), cur, err)
+	}
+
+	// Replace the channel with the reversed order; the trigger bumps updated_at and membership is rebuilt.
+	reversed := []store.IngestedPlaylist{members[3], members[2], members[1], members[0]}
+	if err := st.UpdateChannel(ctx, chID.String(), &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(reversed)), Playlists: reversed}, chUpdatedAt(t, ctx, st, chID.String())); err != nil {
+		t.Fatalf("UpdateChannel: %v", err)
+	}
+
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: cur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("pre-replace cursor after replace: want ErrInvalidCursor, got %v", err)
+	}
+	// Two more replacements back to back, with no delay: a cursor issued between them must be refused
+	// after the second, which is only guaranteed because updated_at strictly increases on every replace
+	// (migration 000008) rather than being a transaction timestamp that consecutive writes can share.
+	_, between, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || between == "" {
+		t.Fatalf("cursor between replacements: %q, err %v", between, err)
+	}
+	if err := st.UpdateChannel(ctx, chID.String(), &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(members)), Playlists: members}, chUpdatedAt(t, ctx, st, chID.String())); err != nil {
+		t.Fatalf("UpdateChannel (2nd): %v", err)
+	}
+	if err := st.UpdateChannel(ctx, chID.String(), &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(reversed)), Playlists: reversed}, chUpdatedAt(t, ctx, st, chID.String())); err != nil {
+		t.Fatalf("UpdateChannel (3rd): %v", err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: between, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("cursor from between two rapid replacements: want ErrInvalidCursor, got %v", err)
+	}
+	// Restarting from the first page pages the new order cleanly.
+	np1, ncur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || ncur == "" || len(np1) != 2 || np1[0].ID != ids[3] || np1[1].ID != ids[2] {
+		t.Fatalf("new page 1: %d rows, cursor %q, err %v", len(np1), ncur, err)
+	}
+	np2, ncur2, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: ncur, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || ncur2 != "" || len(np2) != 2 || np2[0].ID != ids[1] || np2[1].ID != ids[0] {
+		t.Fatalf("new page 2: %d rows, cursor %q, err %v", len(np2), ncur2, err)
+	}
+}

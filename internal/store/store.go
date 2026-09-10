@@ -130,11 +130,15 @@ type ListPlaylistsParams struct {
 	Limit int
 	// Cursor is an opaque pagination token from a previous response (empty = first page).
 	Cursor string
-	// Sort orders by created_at (see SortAsc / SortDesc).
+	// Sort is the direction (see SortAsc / SortDesc). Unfiltered lists order by created_at; lists with
+	// ChannelFilter or PlaylistGroupFilter order by membership position, i.e. the order the signed
+	// channel/group document lists its playlists.
 	Sort SortOrder
-	// ChannelFilter, if non-empty, restricts to playlists that are members of that channel (UUID or slug).
+	// ChannelFilter, if non-empty, restricts to playlists that are members of that channel (UUID or slug),
+	// ordered by their position in it. A playlist the channel lists more than once appears once per position.
 	ChannelFilter string
-	// PlaylistGroupFilter, if non-empty, restricts to playlists that are members of that group (UUID or slug).
+	// PlaylistGroupFilter, if non-empty, restricts to playlists that are members of that group (UUID or slug),
+	// ordered by their position in it, as for ChannelFilter.
 	PlaylistGroupFilter string
 }
 
@@ -208,7 +212,10 @@ type Store interface {
 	ListPlaylistItems(ctx context.Context, p *ListPlaylistItemsParams) ([]PlaylistItemRecord, string, error)
 	// GetPlaylistItem returns one indexed item by its item UUID.
 	GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*PlaylistItemRecord, error)
-	// ListPlaylists returns a page of playlists ordered by created_at and Sort.
+	// ListPlaylists returns a page of playlists: ordered by created_at when unfiltered, by membership
+	// position when filtered by channel or playlist-group (direction from Sort). Cursors are specific to
+	// the ordering that issued them, and a membership cursor also to its container and sort direction
+	// (ErrInvalidCursor otherwise).
 	ListPlaylists(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistRecord, string, error)
 	// UpdatePlaylist replaces the stored document bytes and rebuilds playlist_item_index from its items (same transaction).
 	// The slug column follows the document's "slug" when present (a row must be addressable by the slug it serves);

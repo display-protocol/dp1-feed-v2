@@ -8,6 +8,11 @@ import (
 // ErrListLimitExceeded is returned when a list query uses a limit above StoreMaxListLimit.
 var ErrListLimitExceeded = errors.New("list limit exceeds store maximum")
 
+// ErrInvalidCursor is returned when a list query's cursor cannot be decoded, or was issued by a list
+// with a different ordering (a channel-filtered playlist list pages by membership position, an
+// unfiltered one by created_at; their tokens are not interchangeable). Maps to HTTP 400.
+var ErrInvalidCursor = errors.New("invalid cursor")
+
 // Store-side list limits: default when the caller passes zero; hard cap above typical API max to catch bugs or abuse.
 const (
 	StoreDefaultListLimit = 100

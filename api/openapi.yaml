@@ -153,19 +153,27 @@ paths:
     get:
       tags: [playlists]
       summary: List playlists
-      description: Returns paginated list of playlists ordered by created_at
+      description: >-
+        Returns a paginated list of playlists. Unfiltered, the list is ordered by created_at. With a
+        channel or playlist-group filter it is ordered by membership position, i.e. the order the signed
+        channel/group document lists its playlists (a playlist listed at several positions appears once
+        per position). Cursors are specific to the ordering that issued them.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Sort'
         - name: channel
           in: query
-          description: Filter by channel UUID or slug (membership). Requires extensions when used.
+          description: >-
+            Filter by channel UUID or slug (membership), ordered by position in the channel. Unknown
+            channel yields an empty list. Requires extensions when used. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
         - name: playlist-group
           in: query
-          description: Filter by playlist-group UUID or slug (mutually exclusive with channel)
+          description: >-
+            Filter by playlist-group UUID or slug (mutually exclusive with channel), ordered by position
+            in the group. Unknown group yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
       responses:
@@ -351,6 +359,8 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/PlaylistGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
     post:
       tags: [playlist-groups]
@@ -505,6 +515,8 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/ExtensionsDisabled'
 
@@ -651,12 +663,16 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - name: channel
           in: query
-          description: Filter by channel UUID or slug
+          description: >-
+            Filter by channel UUID or slug. Requires extensions: when they are disabled the response is
+            404 extensions_disabled. With extensions enabled, an unknown channel yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
         - name: playlist-group
           in: query
-          description: Filter by playlist-group UUID or slug (mutually exclusive with channel)
+          description: >-
+            Filter by playlist-group UUID or slug (mutually exclusive with channel). Unknown group
+            yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
       responses:
@@ -675,6 +691,8 @@ paths:
                           $ref: '#/components/schemas/PlaylistItem'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/ExtensionsDisabled'
 
   /api/v1/playlist-items/{id}:
     get:
@@ -719,7 +737,8 @@ components:
       name: id
       in: path
       required: true
-      description: Resource UUID or slug
+      description: >-
+        Resource UUID or slug. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
       schema:
         type: string
 
@@ -743,7 +762,9 @@ components:
     Sort:
       name: sort
       in: query
-      description: Sort order by created_at
+      description: >-
+        Sort direction. Applies to created_at, except on GET /api/v1/playlists filtered by channel or
+        playlist-group, where it applies to membership position.
       schema:
         type: string
         enum: [asc, desc]
@@ -1564,7 +1585,7 @@ components:
 
   responses:
     BadRequest:
-      description: Bad request (validation error, or signature verification failure)
+      description: Bad request (validation error, malformed limit or cursor, or signature verification failure)
       content:
         application/json:
           schema:
