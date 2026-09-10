@@ -166,14 +166,14 @@ paths:
           in: query
           description: >-
             Filter by channel UUID or slug (membership), ordered by position in the channel. Unknown
-            channel yields an empty list. Requires extensions when used.
+            channel yields an empty list. Requires extensions when used. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
         - name: playlist-group
           in: query
           description: >-
             Filter by playlist-group UUID or slug (mutually exclusive with channel), ordered by position
-            in the group. Unknown group yields an empty list.
+            in the group. Unknown group yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
       responses:
@@ -663,12 +663,15 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - name: channel
           in: query
-          description: Filter by channel UUID or slug
+          description: >-
+            Filter by channel UUID or slug. Unknown channel yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
         - name: playlist-group
           in: query
-          description: Filter by playlist-group UUID or slug (mutually exclusive with channel)
+          description: >-
+            Filter by playlist-group UUID or slug (mutually exclusive with channel). Unknown group
+            yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
       responses:
@@ -731,7 +734,8 @@ components:
       name: id
       in: path
       required: true
-      description: Resource UUID or slug
+      description: >-
+        Resource UUID or slug. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
       schema:
         type: string
 
