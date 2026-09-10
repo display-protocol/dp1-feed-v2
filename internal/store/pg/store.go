@@ -657,18 +657,21 @@ LIMIT $1`, tupleOp, order, order)
 }
 
 // resolveContainer turns a channel / playlist-group filter value into the container's id, the way
-// GetChannel and ListPlaylistsInChannel do: a value that parses as a UUID is the id, anything else is
-// looked up by slug. found is false when no such container exists. It must be one or the other,
+// GetChannel and ListPlaylistsInChannel do: a value that parses as a UUID is looked up by id, anything
+// else by slug. found is false when no such container exists — for a UUID too, because callers decide
+// "unknown container" (empty page, and no cursor binding check) from found, and a parseable id that
+// matches no row is exactly as unknown as a slug that matches none. It must be one or the other,
 // never `id::text = $n OR slug = $n`: create is open and slugs are client-chosen, so a second container
 // whose slug equals the first one's UUID string is creatable, and matching both would merge two
 // containers' membership — interleaving rows in a position-ordered list, and leaking a decoy's items
 // into a UUID-filtered item list. containerTable is one of the two table-name literals the callers
 // own; the only parameter is the slug.
 func (s *Store) resolveContainer(ctx context.Context, containerTable, key string) (id uuid.UUID, found bool, err error) {
-	if id, perr := uuid.Parse(key); perr == nil {
-		return id, true, nil
+	if parsed, perr := uuid.Parse(key); perr == nil {
+		err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE id = $1`, containerTable), parsed).Scan(&id)
+	} else {
+		err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE slug = $1`, containerTable), key).Scan(&id)
 	}
-	err = s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE slug = $1`, containerTable), key).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, nil
 	}

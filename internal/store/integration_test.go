@@ -2564,6 +2564,18 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	if _, _, err := st.ListPlaylistItems(ctx, &store.ListPlaylistItemsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: "no-such-channel"}); !errors.Is(err, store.ErrInvalidCursor) {
 		t.Fatalf("items: unknown channel with garbage cursor: want ErrInvalidCursor, got %v", err)
 	}
+	// The same holds when the unknown container is named by a well-formed UUID: parseable is not the
+	// same as existing, and the cursor binding check must not run against a container that is not there.
+	unknownUUID := uuid.MustParse("0c000000-0000-4000-8000-0000000000ff")
+	if empty, next := got(store.SortAsc, 10, "", unknownUUID.String()); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel uuid: got %v (next %q), want empty", empty, next)
+	}
+	if empty, next := got(store.SortAsc, 10, cur1, unknownUUID.String()); len(empty) != 0 || next != "" {
+		t.Fatalf("unknown channel uuid with a well-formed cursor: got %v (next %q), want empty page", empty, next)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Cursor: "not-a-cursor", Sort: store.SortAsc, ChannelFilter: unknownUUID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("unknown channel uuid with garbage cursor: want ErrInvalidCursor, got %v", err)
+	}
 
 	// The zero SortOrder is ascending for every store list; a filtered caller relying on that must be
 	// able to page, so the cursor it is issued must carry the canonical direction and be accepted on
@@ -2657,6 +2669,9 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 	_, gCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()})
 	if err != nil || gCur == "" {
 		t.Fatalf("group first page: cursor %q, err %v", gCur, err)
+	}
+	if rows, next, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, PlaylistGroupFilter: "09000000-0000-4000-8000-0000000000ff"}); err != nil || len(rows) != 0 || next != "" {
+		t.Fatalf("group cursor against an unknown group uuid: got %d rows (next %q, err %v), want empty page", len(rows), next, err)
 	}
 	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
 		t.Fatalf("group cursor presented against a channel: want ErrInvalidCursor, got %v", err)
