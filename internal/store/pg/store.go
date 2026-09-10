@@ -673,9 +673,11 @@ type rowQuerier interface {
 // list, and leaking a decoy's items into a UUID-filtered item list. containerTable is one of the two
 // table-name literals the callers own; the only parameter is the key.
 //
-// updatedAt is the container row's updated_at, bumped by trigger on every replace, which also
-// rebuilds the membership rows; listPlaylistsByMembership uses it as the membership revision a cursor
-// is bound to.
+// updatedAt is the container row's updated_at, which listPlaylistsByMembership uses as the membership
+// revision a cursor is bound to. It is a sound generation because the trigger (migration 000008)
+// stores a value strictly greater than the previous one on every update, whatever the transactions'
+// timing — a plain now() could repeat across two rapid replaces, or go backwards when an earlier
+// transaction commits later, and a stale cursor would then pass the equality check.
 func resolveContainer(ctx context.Context, q rowQuerier, containerTable, key string) (id uuid.UUID, updatedAt time.Time, found bool, err error) {
 	if parsed, perr := uuid.Parse(key); perr == nil {
 		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE id = $1`, containerTable), parsed).Scan(&id, &updatedAt)

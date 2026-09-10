@@ -2724,6 +2724,22 @@ func TestIntegration_ListPlaylists_membershipCursorRefusedAfterReplace(t *testin
 	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: cur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
 		t.Fatalf("pre-replace cursor after replace: want ErrInvalidCursor, got %v", err)
 	}
+	// Two more replacements back to back, with no delay: a cursor issued between them must be refused
+	// after the second, which is only guaranteed because updated_at strictly increases on every replace
+	// (migration 000008) rather than being a transaction timestamp that consecutive writes can share.
+	_, between, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
+	if err != nil || between == "" {
+		t.Fatalf("cursor between replacements: %q, err %v", between, err)
+	}
+	if err := st.UpdateChannel(ctx, chID.String(), &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(members)), Playlists: members}, chUpdatedAt(t, ctx, st, chID.String())); err != nil {
+		t.Fatalf("UpdateChannel (2nd): %v", err)
+	}
+	if err := st.UpdateChannel(ctx, chID.String(), &store.ChannelInput{ID: chID, Slug: "rev-channel", Raw: rawDoc(t, body(reversed)), Playlists: reversed}, chUpdatedAt(t, ctx, st, chID.String())); err != nil {
+		t.Fatalf("UpdateChannel (3rd): %v", err)
+	}
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: between, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("cursor from between two rapid replacements: want ErrInvalidCursor, got %v", err)
+	}
 	// Restarting from the first page pages the new order cleanly.
 	np1, ncur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Sort: store.SortAsc, ChannelFilter: chID.String()})
 	if err != nil || ncur == "" || len(np1) != 2 || np1[0].ID != ids[3] || np1[1].ID != ids[2] {
