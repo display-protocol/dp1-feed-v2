@@ -51,7 +51,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 ## Background job and transaction ownership
 
 - **Background jobs:** none by design. Request-path only; no workers or queues.
-- **Channel notifications:** configured clients are called concurrently under one aggregate timeout after channel commits. Failures are logged and do not fail the already-committed mutation; durable retry remains out of scope without an outbox/job owner.
+- **Channel notifications:** configured clients are called concurrently under one aggregate timeout after channel commits, and — because a member edit is observable at its channels — `channel.updated` is sent for every channel listing a playlist that was replaced or deleted (eight at a time within the route deadline every mutating route carries). Failures are logged and do not fail the already-committed mutation; durable retry remains out of scope without an outbox/job owner.
 - **Transactions:** multi-step writes (e.g. playlist-group/channel create with resolved playlists and membership) are owned by **`internal/executor`**, using the store’s transactional APIs so ingest + persist commit or roll back together. **HTTP does not start or own DB transactions.**
 
 ## Observability expectations

@@ -63,6 +63,13 @@ func newIntegrationServer(t *testing.T) *Server {
 // and only that branch re-validates and re-stores a document the feed did not author.
 func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Server {
 	t.Helper()
+	return newIntegrationServerWithOptions(t, fetch, nil)
+}
+
+// newIntegrationServerWithOptions additionally forwards executor options, which is how a test observes
+// side effects the HTTP surface does not expose — a recording notification client, for example.
+func newIntegrationServerWithOptions(t *testing.T, fetch fetcher.Fetcher, options []executor.Option) *Server {
+	t.Helper()
 	t.Cleanup(func() {
 		integrationTestProvider.Cleanup(t)
 	})
@@ -71,9 +78,10 @@ func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Serve
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			ReadTimeout:          30 * time.Second,
+			WriteTimeout:         30 * time.Second,
+			IdleTimeout:          120 * time.Second,
+			ResponseWriteReserve: time.Second,
 		},
 		Auth:       config.AuthConfig{IntentMaxClockSkew: 5 * time.Minute},
 		Logging:    config.LoggingConfig{Debug: true},
@@ -87,7 +95,7 @@ func newIntegrationServerWithFetcher(t *testing.T, fetch fetcher.Fetcher) *Serve
 	}
 
 	gin.SetMode(gin.TestMode)
-	exec := executor.New(integrationTestProvider.NewStore(), dp1Service, true, fetch, cfg.Playlist.PublicBaseURL)
+	exec := executor.New(integrationTestProvider.NewStore(), dp1Service, true, fetch, cfg.Playlist.PublicBaseURL, options...)
 	return New(cfg, zap.NewNop(), exec, "test")
 }
 

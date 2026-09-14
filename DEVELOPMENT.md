@@ -203,7 +203,9 @@ clients are configured.
 
 The feed signs `Webhook-Id + "." + Webhook-Timestamp + "." + exact_body`
 with P-256/SHA-256 and sends `channel.added`, `channel.updated`, or
-`channel.deleted`. Startup logs the derived public key as
+`channel.deleted`. `channel.updated` also fires when a playlist that a
+channel lists is replaced or deleted — once per listing channel, delivered
+eight at a time within the route deadline (paced, not capped). Startup logs the derived public key as
 `p256:<base64url-uncompressed-SEC1-key>`. Give that public value to each
 consumer's allowlist; never copy the private scalar. Requests attach the same
 value in `Webhook-Public-Key` and the 64-byte `R || S` signature in

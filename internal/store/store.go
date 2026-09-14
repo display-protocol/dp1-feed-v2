@@ -113,6 +113,21 @@ type ChannelRecord struct {
 	Body      channels.Channel
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// MembersDigest identifies the state of the channel's members at read time: a hex SHA-256 over every
+	// membership row's (playlist_id, playlists.updated_at) in position order, computed in the same
+	// statement as the document so both come from one snapshot. Empty when the channel has no membership
+	// rows.
+	//
+	// It exists so GET /channels/{id} can advertise a new ETag when a listed playlist is replaced or
+	// deleted. The channel's signed bytes cannot carry that (a channel lists its members by URL only, and
+	// the feed never edits a signed document), and channels.updated_at is the channel's own generation
+	// token — the conditional-write check and the membership-cursor revision — which member edits must
+	// not move. Deriving the digest on read rather than bumping a stored column means no write path can
+	// forget to maintain it and a deleted member (whose row cascades away) changes it for free.
+	//
+	// Opaque and never persisted. Populated by GetChannel only: ListChannels emits no ETag, and records
+	// returned by Create/Replace carry ID, Slug, Raw and Body only (as today).
+	MembersDigest string
 }
 
 // PlaylistItemRecord is a denormalized playlist item from playlist_item_index.
@@ -222,9 +237,18 @@ type Store interface {
 	// identity is pinned by the executor, so in practice this re-writes the same slug.
 	// Conditional on expectedUpdatedAt — the updated_at the caller read when it authorized the write.
 	// A mismatch returns ErrConcurrentModification (see that sentinel); a missing row returns ErrNotFound.
-	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error
+	//
+	// Returns the distinct ids (sorted) of every channel whose membership lists this playlist, read in the
+	// same transaction as the write, so the caller can notify them: a member edit is observable at each
+	// listing channel (see ChannelRecord.MembersDigest) even though no channel row changed. Membership is
+	// a derived index over channel documents and is not modified here. nil when the write did not apply.
+	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) (listingChannels []uuid.UUID, err error)
 	// DeletePlaylist removes a playlist row, conditional on expectedUpdatedAt (see UpdatePlaylist).
-	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error
+	//
+	// Returns the distinct channel ids that listed the playlist, captured BEFORE the delete in the same
+	// transaction: the FK cascade (migration 000005) removes the membership rows with the playlist, so
+	// nothing could recover them afterwards. nil when the delete did not apply.
+	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) (listingChannels []uuid.UUID, err error)
 
 	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
 	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error
@@ -242,7 +266,7 @@ type Store interface {
 
 	// CreateChannel upserts playlists and item indexes, inserts the channel row, and creates ordered membership (single transaction).
 	CreateChannel(ctx context.Context, in *ChannelInput) error
-	// GetChannel loads a channel by UUID or slug.
+	// GetChannel loads a channel by UUID or slug, including MembersDigest (see ChannelRecord).
 	GetChannel(ctx context.Context, idOrSlug string) (*ChannelRecord, error)
 	// ListChannels returns a page ordered by created_at and Sort.
 	ListChannels(ctx context.Context, p *ListPlaylistsParams) ([]ChannelRecord, string, error)

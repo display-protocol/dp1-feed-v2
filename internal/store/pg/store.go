@@ -856,69 +856,139 @@ func (s *Store) queryPlaylistRecords(ctx context.Context, q string, args ...any)
 	return out, nil
 }
 
+// channelsListingPlaylist returns the distinct channels whose membership lists playlistID, via
+// idx_channel_members_playlist_id. Sorted so callers and tests see a stable order regardless of plan.
+func channelsListingPlaylist(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, playlistID uuid.UUID) ([]uuid.UUID, error) {
+	const listing = `SELECT DISTINCT channel_id FROM channel_members WHERE playlist_id = $1 ORDER BY channel_id`
+	rows, err := q.Query(ctx, listing, playlistID)
+	if err != nil {
+		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
+	}
+	return ids, nil
+}
+
+// resolveDocumentID maps a route key onto a row id for one of the three document tables: a value that
+// parses as a UUID is the id (no slug fallback, see docs/api_design.md), anything else is a slug looked
+// up on table. ErrNotFound when a slug matches nothing.
+//
+// table is a fixed internal constant, never client input (see classifyConditionalWrite).
+func resolveDocumentID(ctx context.Context, q rowQuerier, table, idOrSlug string) (uuid.UUID, error) {
+	if id, err := uuid.Parse(idOrSlug); err == nil {
+		return id, nil
+	}
+	var rowID uuid.UUID
+	if err := q.QueryRow(ctx, "SELECT id FROM "+table+" WHERE slug = $1", idOrSlug).Scan(&rowID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf("%w", store.ErrNotFound)
+		}
+		return uuid.Nil, fmt.Errorf("lookup %s slug: %w", table, err)
+	}
+	return rowID, nil
+}
+
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
+//
+// The listing-channel read runs in the write transaction but without an advisory lock on the playlist,
+// so a channel ingest that adds this playlist can commit between that read and ours and be missing from
+// the result. That is harmless: the ingest is itself a channel write and emits its own channel event, and
+// a consumer that re-fetches on that event sees the body written here. Do not "fix" it with
+// lockDocumentID — that would serialize every playlist replace against every ingest that references it,
+// for a race whose only effect is one redundant notification the other writer already sends.
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	const (
 		updateByID = `UPDATE playlists
 SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
 WHERE id = $1 AND updated_at = $3 RETURNING created_at`
-		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
 
 	if err := requireDocument(raw, "playlist body"); err != nil {
-		return err
+		return nil, err
 	}
 	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var rowID uuid.UUID
-	if id, perr := uuid.Parse(idOrSlug); perr == nil {
-		rowID = id
-	} else {
-		if err := tx.QueryRow(ctx, selectIDBySlug, idOrSlug).Scan(&rowID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
-			}
-			return fmt.Errorf("lookup playlist slug: %w", err)
-		}
+	rowID, err := resolveDocumentID(ctx, tx, "playlists", idOrSlug)
+	if err != nil {
+		return nil, err
 	}
 
 	var playlistCreatedAt time.Time
 	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return classifyConditionalWrite(ctx, tx, "playlists", rowID)
+			return nil, classifyConditionalWrite(ctx, tx, "playlists", rowID)
 		}
-		return fmt.Errorf("update playlist: %w", err)
+		return nil, fmt.Errorf("update playlist: %w", err)
 	}
 	if _, err := tx.Exec(ctx, clearItemIndex, rowID); err != nil {
-		return fmt.Errorf("clear playlist_item_index: %w", err)
+		return nil, fmt.Errorf("clear playlist_item_index: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, rowID, bodyJSON, playlistCreatedAt); err != nil {
-		return fmt.Errorf("insert playlist_item_index: %w", err)
+		return nil, fmt.Errorf("insert playlist_item_index: %w", err)
+	}
+	listing, err := channelsListingPlaylist(ctx, tx, rowID)
+	if err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return listing, nil
 }
 
 // DeletePlaylist implements store.Store. The delete is conditional on expectedUpdatedAt so a decision
 // made on an earlier read cannot remove a row that has since changed or been re-created (see
 // store.ErrConcurrentModification).
-func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
-	return s.deleteDocumentRow(ctx, "playlists", idOrSlug, expectedUpdatedAt)
+//
+// Order inside the transaction is load-bearing: lock → read listing channels → delete. The listing read
+// must precede the delete because the membership rows cascade away with the playlist (migration 000005),
+// and it must follow lockDocumentID because a concurrent group/channel ingest that references this
+// playlist takes the same advisory lock before inserting membership (insertMissingPlaylistsBatch). Such
+// an ingest therefore either committed before our lock — and is in the list — or blocks until we commit
+// and then fails on the tombstone we wrote, so no channel that ever listed this playlist can be missed.
+func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rowID, err := resolveDocumentID(ctx, tx, "playlists", idOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockDocumentID(ctx, tx, "playlists", rowID); err != nil {
+		return nil, err
+	}
+	listing, err := channelsListingPlaylist(ctx, tx, rowID)
+	if err != nil {
+		return nil, err
+	}
+	if err := deleteLockedDocument(ctx, tx, "playlists", rowID, expectedUpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return listing, nil
 }
 
-// deleteDocumentRow is the shared conditional delete for the three document tables. It resolves the row
-// id (accepting a UUID or a slug), deletes only when updated_at still matches what the caller authorized
-// against, and classifies a zero-row delete as ErrConcurrentModification or ErrNotFound.
+// deleteDocumentRow is the shared conditional delete for playlist-groups and channels (playlists have
+// their own, see DeletePlaylist). It resolves the row id (accepting a UUID or a slug), deletes only when
+// updated_at still matches what the caller authorized against, and classifies a zero-row delete as
+// ErrConcurrentModification or ErrNotFound.
 //
 // table is a fixed internal constant, never client input (see classifyConditionalWrite).
 func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, expectedUpdatedAt time.Time) error {
@@ -928,24 +998,27 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var rowID uuid.UUID
-	if id, perr := uuid.Parse(idOrSlug); perr == nil {
-		rowID = id
-	} else {
-		if err := tx.QueryRow(ctx, "SELECT id FROM "+table+" WHERE slug = $1", idOrSlug).Scan(&rowID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
-			}
-			return fmt.Errorf("lookup %s slug: %w", table, err)
-		}
+	rowID, err := resolveDocumentID(ctx, tx, table, idOrSlug)
+	if err != nil {
+		return err
 	}
-
-	// Lock before deleting so a concurrent replaying create waits here rather than on the row key, and
-	// therefore re-reads the tombstone this transaction is about to write.
 	if err := lockDocumentID(ctx, tx, table, rowID); err != nil {
 		return err
 	}
+	if err := deleteLockedDocument(ctx, tx, table, rowID, expectedUpdatedAt); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
 
+// deleteLockedDocument runs the conditional DELETE, classifies a zero-row result, and writes the
+// tombstone in the caller's transaction. The caller must already hold lockDocumentID(table, rowID):
+// locking before deleting makes a concurrent replaying create wait here rather than on the row key, so it
+// re-reads the tombstone this transaction is about to write instead of resurrecting the id.
+func deleteLockedDocument(ctx context.Context, tx pgx.Tx, table string, rowID uuid.UUID, expectedUpdatedAt time.Time) error {
 	ct, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE id = $1 AND updated_at = $2", rowID, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", table, err)
@@ -956,9 +1029,6 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 	// Same transaction as the delete: a tombstone that could be lost would leave the id resurrectable.
 	if _, err := tx.Exec(ctx, tombstoneInsert, table, rowID); err != nil {
 		return fmt.Errorf("record %s tombstone: %w", table, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -1439,17 +1509,37 @@ VALUES ($1, $2, $3::jsonb)`
 }
 
 // GetChannel implements store.Store.
+//
+// The member digest is a correlated subquery in the same statement as the document, so the document and
+// the member state it is paired with come from one snapshot. Each member contributes
+// "<playlist_id>@<updated_at as epoch microseconds>" in position order; the string is hashed in SQL so the
+// column is a fixed 64 hex characters however many members the channel has (this record is also loaded by
+// the executor's channel replace/delete just to read UpdatedAt). Epoch microseconds rather than a text
+// cast: timestamptz::text depends on the session TimeZone/DateStyle, which would make the digest — and so
+// the ETag — vary by pool connection. ORDER BY position is total because (channel_id, position) is the
+// PK; a playlist listed twice appears twice, mirroring the rows. Membership ingest never touches an
+// existing playlist row, so re-ingesting a channel leaves the digest alone; a member replace bumps its
+// updated_at (strictly increasing, migration 000008) and a member delete cascades its row away, so both
+// change it.
 func (s *Store) GetChannel(ctx context.Context, idOrSlug string) (*store.ChannelRecord, error) {
 	const (
+		membersDigest = `COALESCE((
+	SELECT encode(sha256(convert_to(
+		string_agg(m.playlist_id::text || '@' || (extract(epoch FROM p.updated_at) * 1000000)::bigint::text,
+		           ',' ORDER BY m.position), 'UTF8')), 'hex')
+	FROM channel_members m
+	JOIN playlists p ON p.id = m.playlist_id
+	WHERE m.channel_id = c.id
+), '')`
 		byID = `
-SELECT id, slug, body, created_at, updated_at
-FROM channels
-WHERE id = $1`
+SELECT c.id, c.slug, c.body, c.created_at, c.updated_at, ` + membersDigest + `
+FROM channels c
+WHERE c.id = $1`
 
 		bySlug = `
-SELECT id, slug, body, created_at, updated_at
-FROM channels
-WHERE slug = $1`
+SELECT c.id, c.slug, c.body, c.created_at, c.updated_at, ` + membersDigest + `
+FROM channels c
+WHERE c.slug = $1`
 	)
 
 	id, err := uuid.Parse(idOrSlug)
@@ -1462,7 +1552,7 @@ WHERE slug = $1`
 
 	var rec store.ChannelRecord
 	var raw []byte
-	if err := row.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+	if err := row.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt, &rec.MembersDigest); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w", store.ErrNotFound)
 		}

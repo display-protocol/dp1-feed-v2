@@ -17,6 +17,7 @@ import (
 	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/display-protocol/dp1-go/sign"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/dp1svc"
 	"github.com/display-protocol/dp1-feed-v2/internal/fetcher"
@@ -111,7 +112,9 @@ type impl struct {
 // Option configures optional executor side-effect boundaries.
 type Option func(*impl)
 
-// WithNotificationClient registers the client notified after successful channel mutations.
+// WithNotificationClient registers the client notified after successful channel mutations and, with
+// extensions enabled, after playlist replaces/deletes (one channel.updated per channel listing the
+// playlist).
 func WithNotificationClient(client notification.Client) Option {
 	return func(e *impl) {
 		e.notificationClient = client
@@ -203,26 +206,68 @@ func (e *impl) runChannelMutation(ctx context.Context, mutate func(context.Conte
 	return mutate(mutationCtx)
 }
 
-func (e *impl) notifyChannel(ctx context.Context, eventType notification.EventType, id uuid.UUID) {
-	if e.notificationClient == nil {
-		return
-	}
-	// Persistence has already committed, so delivery must not disappear merely
-	// because the caller disconnected. Keep the request-scoped deadline so
-	// delivery consumes only the remaining end-to-end budget.
+// deliveryContext derives the context post-commit notification runs under. Persistence has already
+// committed, so delivery must not disappear merely because the caller disconnected; the request-scoped
+// deadline is kept so delivery consumes only the remaining end-to-end budget.
+func deliveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	deliveryCtx := context.WithoutCancel(ctx)
 	if deadline, ok := ctx.Deadline(); ok {
-		var cancel context.CancelFunc
-		deliveryCtx, cancel = context.WithDeadline(deliveryCtx, deadline)
-		defer cancel()
+		return context.WithDeadline(deliveryCtx, deadline)
 	}
-	_ = e.notificationClient.Notify(deliveryCtx, notification.Event{
+	return deliveryCtx, func() {}
+}
+
+// sendChannelEvent is one best-effort Notify for one channel; the client (a Dispatcher in production)
+// logs its own failures, so the error is intentionally dropped here.
+func (e *impl) sendChannelEvent(ctx context.Context, eventType notification.EventType, id uuid.UUID) {
+	_ = e.notificationClient.Notify(ctx, notification.Event{
 		Type: eventType,
 		Time: time.Now().UTC(),
 		Channel: notification.ChannelRef{
 			URL: strings.TrimRight(e.publicBase, "/") + "/api/v1/channels/" + id.String(),
 		},
 	})
+}
+
+// notifyChannel emits one event for the channel a channel mutation just committed.
+func (e *impl) notifyChannel(ctx context.Context, eventType notification.EventType, id uuid.UUID) {
+	if e.notificationClient == nil {
+		return
+	}
+	deliveryCtx, cancel := deliveryContext(ctx)
+	defer cancel()
+	e.sendChannelEvent(deliveryCtx, eventType, id)
+}
+
+// notifyConcurrency bounds how many channel notifications one request delivers at once. Eight matches
+// the reference-resolution fan-out. It paces delivery, it does not bound it: the number of channels that
+// list a playlist is unbounded (channel creation is open), and the route deadline is what caps the work.
+const notifyConcurrency = 8
+
+// notifyChannels emits eventType once per channel id after a playlist write, for every channel that
+// lists the playlist. Delivery runs notifyConcurrency at a time under one delivery context and stops
+// enqueueing once that context is done, so a slow consumer costs at most the remaining route budget;
+// channels not reached by then are simply not notified (best-effort, as for every channel event — the
+// Dispatcher logs each failed delivery). A hard cap on the count was rejected: it would turn "slow" into
+// "guaranteed stale" for the channels past the cap without any operator signal.
+func (e *impl) notifyChannels(ctx context.Context, eventType notification.EventType, ids []uuid.UUID) {
+	if e.notificationClient == nil || len(ids) == 0 {
+		return
+	}
+	deliveryCtx, cancel := deliveryContext(ctx)
+	defer cancel()
+	var g errgroup.Group
+	g.SetLimit(notifyConcurrency)
+	for _, id := range ids {
+		if deliveryCtx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			e.sendChannelEvent(deliveryCtx, eventType, id)
+			return nil
+		})
+	}
+	_ = g.Wait()
 }
 
 // ErrExtensionsDisabled is returned for channel APIs when the deployment has extensions disabled.
@@ -406,10 +451,41 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	// the ownership decision above was made about that exact row generation, so if anything committed in
 	// between (including a delete and re-create under the same client-chosen id) the write must fail
 	// rather than apply to a different document.
-	if err := e.store.UpdatePlaylist(ctx, rec.ID.String(), signed, rec.UpdatedAt); err != nil {
+	var listing []uuid.UUID
+	write := func(mutationCtx context.Context) error {
+		var err error
+		listing, err = e.store.UpdatePlaylist(mutationCtx, rec.ID.String(), signed, rec.UpdatedAt)
+		return err
+	}
+	if err := e.runPlaylistMutation(ctx, write); err != nil {
 		return nil, err
 	}
+	e.notifyListingChannels(ctx, listing)
 	return &store.PlaylistRecord{ID: rec.ID, Slug: rec.Slug, Raw: signed, Body: *pl}, nil
+}
+
+// runPlaylistMutation runs a playlist write that, with extensions enabled, is observable at every channel
+// listing the playlist (its ETag and a channel.updated event) and is therefore treated exactly like a
+// channel write: mutation-owned once it begins, and requiring the route deadline when notification is
+// configured (see runChannelMutation). With extensions disabled channels are unreachable — the routes
+// answer 404 extensions_disabled — so there is nothing to notify even if membership rows exist from an
+// earlier configuration, and the write runs plainly under the request context.
+func (e *impl) runPlaylistMutation(ctx context.Context, mutate func(context.Context) error) error {
+	if !e.extensionsEnabled {
+		return mutate(ctx)
+	}
+	return e.runChannelMutation(ctx, mutate)
+}
+
+// notifyListingChannels emits channel.updated for every channel the store reported as listing a playlist
+// that was just replaced or deleted. Gated on extensions for the same reason runPlaylistMutation is: with
+// them disabled the channels cannot be read, so the store's list (rows left from an earlier configuration)
+// describes nothing a consumer can act on.
+func (e *impl) notifyListingChannels(ctx context.Context, listing []uuid.UUID) {
+	if !e.extensionsEnabled {
+		return
+	}
+	e.notifyChannels(ctx, notification.ChannelUpdated, listing)
 }
 
 // DeletePlaylist authorizes a signed delete-intent against the stored playlist's owner set, then removes
@@ -427,7 +503,19 @@ func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.
 	// Delete by stable UUID, not the caller-supplied slug, and conditional on the updated_at this
 	// authorization was made against: a slug reused after load cannot redirect the delete, and a row
 	// re-created under the same id after load is a different document, so the delete fails instead.
-	return e.store.DeletePlaylist(ctx, rec.ID.String(), rec.UpdatedAt)
+	var listing []uuid.UUID
+	remove := func(mutationCtx context.Context) error {
+		var err error
+		listing, err = e.store.DeletePlaylist(mutationCtx, rec.ID.String(), rec.UpdatedAt)
+		return err
+	}
+	if err := e.runPlaylistMutation(ctx, remove); err != nil {
+		return err
+	}
+	// The channel still exists; its member set shrank. Its document keeps listing the deleted URI (the
+	// feed never edits a signed document), which is the documented state for a deleted member.
+	e.notifyListingChannels(ctx, listing)
+	return nil
 }
 
 // ListPlaylistItems returns stored playlist items from playlist_item_index with optional channel or playlist-group scope.

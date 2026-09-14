@@ -37,32 +37,35 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 		v1.GET("", h.APIInfo)
 		v1.GET("/health", h.HealthAPI)
 
+		// Every mutation carries the same aggregate deadline. Group and channel writes need it to bound
+		// reference resolution (a document naming many slow-but-reachable hosts would otherwise hold the
+		// handler for the sum of every fetch); channel writes and playlist replace/delete need it because
+		// they notify — a playlist write emits channel.updated for every channel that lists the playlist,
+		// and the executor refuses a notified mutation without a deadline. Applying it uniformly, including
+		// to routes that today neither fetch nor notify, is deliberate: "which routes carry the deadline"
+		// used to be a per-route decision, and that is exactly how groups were missed once and playlists
+		// were missed again. The budget is write_timeout - response_write_reserve, so the deadline lands
+		// one reserve ahead of the socket write timeout it shadows.
+		mutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
+
 		v1.GET("/playlists", h.ListPlaylists)
 		v1.GET("/playlists/:id", h.GetPlaylist)
-		v1.POST("/playlists", RequireSignatures(log), h.CreatePlaylist)
-		v1.PUT("/playlists/:id", RequireSignatures(log), h.ReplacePlaylist)
-		v1.DELETE("/playlists/:id", RequireSignatures(log), h.DeletePlaylist)
-
-		// Reference-resolving mutations carry an aggregate deadline. Group and channel writes resolve every
-		// playlist URI the document names, so their work is bounded by that budget as well as by the
-		// per-fetch timeout and the reference cap: without it, a document naming many slow-but-reachable
-		// hosts holds the handler for the sum of every fetch. Channel routes needed this already because
-		// notification delivery requires a deadline; groups fan out the same way and were missing it.
-		referenceMutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
+		v1.POST("/playlists", mutationDeadline, RequireSignatures(log), h.CreatePlaylist)
+		v1.PUT("/playlists/:id", mutationDeadline, RequireSignatures(log), h.ReplacePlaylist)
+		v1.DELETE("/playlists/:id", mutationDeadline, RequireSignatures(log), h.DeletePlaylist)
 
 		v1.GET("/playlist-groups", h.ListPlaylistGroups)
 		v1.GET("/playlist-groups/:id", h.GetPlaylistGroup)
-		v1.POST("/playlist-groups", referenceMutationDeadline, RequireSignatures(log), h.CreatePlaylistGroup)
-		v1.PUT("/playlist-groups/:id", referenceMutationDeadline, RequireSignatures(log), h.ReplacePlaylistGroup)
-		v1.DELETE("/playlist-groups/:id", RequireSignatures(log), h.DeletePlaylistGroup)
+		v1.POST("/playlist-groups", mutationDeadline, RequireSignatures(log), h.CreatePlaylistGroup)
+		v1.PUT("/playlist-groups/:id", mutationDeadline, RequireSignatures(log), h.ReplacePlaylistGroup)
+		v1.DELETE("/playlist-groups/:id", mutationDeadline, RequireSignatures(log), h.DeletePlaylistGroup)
 
 		if cfg.Extensions.Enabled {
-			channelMutationDeadline := referenceMutationDeadline
 			v1.GET("/channels", h.ListChannels)
 			v1.GET("/channels/:id", h.GetChannel)
-			v1.POST("/channels", channelMutationDeadline, RequireSignatures(log), h.CreateChannel)
-			v1.PUT("/channels/:id", channelMutationDeadline, RequireSignatures(log), h.ReplaceChannel)
-			v1.DELETE("/channels/:id", channelMutationDeadline, RequireSignatures(log), h.DeleteChannel)
+			v1.POST("/channels", mutationDeadline, RequireSignatures(log), h.CreateChannel)
+			v1.PUT("/channels/:id", mutationDeadline, RequireSignatures(log), h.ReplaceChannel)
+			v1.DELETE("/channels/:id", mutationDeadline, RequireSignatures(log), h.DeleteChannel)
 		} else {
 			v1.GET("/channels", extensionsDisabled)
 			v1.GET("/channels/:id", extensionsDisabled)

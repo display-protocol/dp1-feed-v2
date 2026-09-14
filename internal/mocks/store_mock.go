@@ -102,11 +102,12 @@ func (mr *MockStoreMockRecorder) DeleteChannel(ctx, idOrSlug, expectedUpdatedAt 
 }
 
 // DeletePlaylist mocks base method.
-func (m *MockStore) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+func (m *MockStore) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeletePlaylist", ctx, idOrSlug, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].([]uuid.UUID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // DeletePlaylist indicates an expected call of DeletePlaylist.
@@ -342,11 +343,12 @@ func (mr *MockStoreMockRecorder) UpdateChannel(ctx, idOrSlug, in, expectedUpdate
 }
 
 // UpdatePlaylist mocks base method.
-func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
+func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, raw, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].([]uuid.UUID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdatePlaylist indicates an expected call of UpdatePlaylist.
