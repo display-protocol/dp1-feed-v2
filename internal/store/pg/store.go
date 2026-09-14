@@ -873,6 +873,29 @@ func channelsListingPlaylist(ctx context.Context, q interface {
 	return ids, nil
 }
 
+// listingChannelsBestEffort runs channelsListingPlaylist inside a savepoint on tx, so a statement error
+// in the read aborts only the savepoint and leaves tx usable; the caller then continues with a nil
+// listing. This is what lets a write transaction that must read its recipients before committing (see
+// DeletePlaylist) keep recipient discovery from vetoing the write. The store has no logger, so the error
+// is dropped here; the caller sees nil and notifies nobody, the documented best-effort outcome. A
+// failure to open or release the savepoint itself is treated the same way — if tx is already broken the
+// caller's next statement reports it.
+func listingChannelsBestEffort(ctx context.Context, tx pgx.Tx, playlistID uuid.UUID) []uuid.UUID {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return nil
+	}
+	ids, err := channelsListingPlaylist(ctx, sp, playlistID)
+	if err != nil {
+		_ = sp.Rollback(ctx)
+		return nil
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return nil
+	}
+	return ids
+}
+
 // resolveDocumentID maps a route key onto a row id for one of the three document tables: a value that
 // parses as a UUID is the id (no slug fallback, see docs/api_design.md), anything else is a slug looked
 // up on table. ErrNotFound when a slug matches nothing.
@@ -971,12 +994,17 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 // an ingest therefore either committed before our lock — and is in the list — or blocks until we commit
 // and then fails on the tombstone we wrote, so no channel that ever listed this playlist can be missed.
 //
-// Unlike UpdatePlaylist, the listing read stays inside the write transaction and its error does fail the
-// delete. It cannot move after commit (the rows are gone by then) and cannot be swallowed in place
-// (Postgres aborts the transaction on any statement error, and an expired context closes the
-// connection). This adds no failure mode the base did not already have: the ON DELETE CASCADE on
-// channel_members (migration 000005) makes the DELETE itself walk the same idx_channel_members_playlist_id
-// rows, so any deadline or load that would defeat the SELECT would defeat the cascade too.
+// Unlike UpdatePlaylist, the listing read cannot move after commit (the rows are gone by then), so it
+// stays inside the write transaction — but, as there, it must never decide whether the delete applies.
+// Recipient discovery is notification bookkeeping, and the set of listing channels is unbounded (channel
+// creation is open), so the read is fenced with a savepoint: a statement error inside it (the DISTINCT
+// and ORDER BY sort or hash work the FK cascade never does, which can spill past work_mem and be
+// canceled by a non-default temp_file_limit) rolls back to the savepoint and the delete proceeds with a
+// nil listing — nobody is notified, the documented best-effort outcome. What the savepoint cannot cover
+// is the route deadline expiring mid-read: pgx then closes the connection and the whole transaction is
+// lost, but the ON DELETE CASCADE on channel_members (migration 000005) makes the DELETE walk the same
+// idx_channel_members_playlist_id rows, so a budget that cannot afford the read could not afford the
+// delete either.
 func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -991,10 +1019,7 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpd
 	if err := lockDocumentID(ctx, tx, "playlists", rowID); err != nil {
 		return nil, err
 	}
-	listing, err := channelsListingPlaylist(ctx, tx, rowID)
-	if err != nil {
-		return nil, err
-	}
+	listing := listingChannelsBestEffort(ctx, tx, rowID)
 	if err := deleteLockedDocument(ctx, tx, "playlists", rowID, expectedUpdatedAt); err != nil {
 		return nil, err
 	}

@@ -249,9 +249,9 @@ type Store interface {
 	//
 	// Returns the distinct channel ids that listed the playlist, captured BEFORE the delete in the same
 	// transaction: the FK cascade (migration 000005) removes the membership rows with the playlist, so
-	// nothing could recover them afterwards. Here a failed read does fail the delete (it cannot run after
-	// commit, and the cascade walks the same rows, so it adds no failure mode of its own). nil when the
-	// delete did not apply.
+	// nothing could recover them afterwards. As for UpdatePlaylist the read is best-effort and never fails
+	// the delete: a listing that cannot be read is returned as nil with a nil error and the delete still
+	// applies. nil also when the delete did not apply.
 	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) (listingChannels []uuid.UUID, err error)
 
 	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
