@@ -894,12 +894,22 @@ func resolveDocumentID(ctx context.Context, q rowQuerier, table, idOrSlug string
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
 //
-// The listing-channel read runs in the write transaction but without an advisory lock on the playlist,
-// so a channel ingest that adds this playlist can commit between that read and ours and be missing from
-// the result. That is harmless: the ingest is itself a channel write and emits its own channel event, and
-// a consumer that re-fetches on that event sees the body written here. Do not "fix" it with
-// lockDocumentID — that would serialize every playlist replace against every ingest that references it,
-// for a race whose only effect is one redundant notification the other writer already sends.
+// The listing-channel read runs AFTER the write has committed, on its own connection, and its failure
+// is swallowed into a nil listing. Recipient discovery must never decide whether the replace succeeded:
+// the set of channels listing a playlist is unbounded (channel creation is open), so a read that is
+// inside the write transaction lets an expired deadline or a query error roll back a body update the
+// owner authorized — and, having committed, returning that error would report the write as failed when
+// it is not. Notification is best-effort at every other step (see executor.notifyChannels), and a read
+// failure here is the same posture: the channels are simply not notified. Nothing is lost by leaving the
+// transaction: READ COMMITTED gives each statement its own snapshot anyway, so "same transaction" never
+// tied the listing to the UPDATE's snapshot, and there is no advisory lock on the playlist either way.
+//
+// A channel ingest that adds this playlist can therefore commit after this read started and be missing
+// from the result. That is harmless: the ingest is itself a channel write and emits its own channel
+// event, and a consumer that re-fetches on that event sees the body written here.
+// Do not "fix" it with lockDocumentID — that would serialize every playlist replace against every ingest
+// that references it, for a race whose only effect is one redundant notification the other writer
+// already sends.
 func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	const (
 		updateByID = `UPDATE playlists
@@ -938,12 +948,14 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, rowID, bodyJSON, playlistCreatedAt); err != nil {
 		return nil, fmt.Errorf("insert playlist_item_index: %w", err)
 	}
-	listing, err := channelsListingPlaylist(ctx, tx, rowID)
-	if err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
+	}
+	// Post-commit, best-effort: the store has no logger, so the error is dropped here; the caller sees a
+	// nil listing and notifies nobody, which is the documented outcome for channels not reached in time.
+	listing, err := channelsListingPlaylist(ctx, s.pool, rowID)
+	if err != nil {
+		return nil, nil
 	}
 	return listing, nil
 }
@@ -958,6 +970,13 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 // playlist takes the same advisory lock before inserting membership (insertMissingPlaylistsBatch). Such
 // an ingest therefore either committed before our lock — and is in the list — or blocks until we commit
 // and then fails on the tombstone we wrote, so no channel that ever listed this playlist can be missed.
+//
+// Unlike UpdatePlaylist, the listing read stays inside the write transaction and its error does fail the
+// delete. It cannot move after commit (the rows are gone by then) and cannot be swallowed in place
+// (Postgres aborts the transaction on any statement error, and an expired context closes the
+// connection). This adds no failure mode the base did not already have: the ON DELETE CASCADE on
+// channel_members (migration 000005) makes the DELETE itself walk the same idx_channel_members_playlist_id
+// rows, so any deadline or load that would defeat the SELECT would defeat the cascade too.
 func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
