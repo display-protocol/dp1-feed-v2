@@ -873,24 +873,43 @@ func channelsListingPlaylist(ctx context.Context, q interface {
 	return ids, nil
 }
 
-// listingChannelsBestEffort runs channelsListingPlaylist inside a savepoint on tx, so a statement error
-// in the read aborts only the savepoint and leaves tx usable; the caller then continues with a nil
+// listingChannelsBestEffort runs channelsListingPlaylist inside a savepoint on tx, bounded to at most
+// half of the budget ctx has left, so neither a statement error nor a slow read can cost the caller its
+// write: either aborts only the savepoint and leaves tx usable, and the caller continues with a nil
 // listing. This is what lets a write transaction that must read its recipients before committing (see
-// DeletePlaylist) keep recipient discovery from vetoing the write. The store has no logger, so the error
-// is dropped here; the caller sees nil and notifies nobody, the documented best-effort outcome. A
-// failure to open or release the savepoint itself is treated the same way — if tx is already broken the
-// caller's next statement reports it.
+// DeletePlaylist) keep recipient discovery from vetoing the write.
+//
+// The time bound is a server-side statement_timeout, not a Go sub-deadline: pgx answers an expired
+// context by closing the connection, which would take the whole transaction with it, whereas
+// statement_timeout cancels just the statement (SQLSTATE 57014) — one more error the savepoint absorbs.
+// Half is not a tuning knob but the invariant the caller relies on: the write that follows keeps at
+// least as much budget as the read spent, and for the delete that write walks the same index rows the
+// read did (the FK cascade), so a budget that let the read finish lets the delete finish too. SET LOCAL
+// lives in the savepoint and the savepoint is always rolled back — a read-only subtransaction has
+// nothing to keep — so the timeout is gone before the caller's next statement, whatever happened.
+//
+// The store has no logger, so errors are dropped here; the caller sees nil and notifies nobody, the
+// documented best-effort outcome. If tx is already broken (connection gone), every step fails, nil is
+// returned, and the caller's next statement reports the real error. A ctx without a deadline gets no
+// timeout: every mutating route carries one, and a bare-context caller asked for an unbounded read.
+// Caveat: SET LOCAL replaces, for this one statement, any statement_timeout an operator set at role or
+// database level — a lower operator cap is not honored here (nothing in this repo sets one); the route
+// deadline still bounds the read regardless.
 func listingChannelsBestEffort(ctx context.Context, tx pgx.Tx, playlistID uuid.UUID) []uuid.UUID {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return nil
 	}
+	defer func() { _ = sp.Rollback(ctx) }()
+	if deadline, ok := ctx.Deadline(); ok {
+		// Never 0: statement_timeout = 0 means "no limit", the opposite of an exhausted budget.
+		budget := max(time.Until(deadline)/2, time.Millisecond)
+		if _, err := sp.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", budget.Milliseconds())); err != nil {
+			return nil
+		}
+	}
 	ids, err := channelsListingPlaylist(ctx, sp, playlistID)
 	if err != nil {
-		_ = sp.Rollback(ctx)
-		return nil
-	}
-	if err := sp.Commit(ctx); err != nil {
 		return nil
 	}
 	return ids
@@ -997,14 +1016,13 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 // Unlike UpdatePlaylist, the listing read cannot move after commit (the rows are gone by then), so it
 // stays inside the write transaction — but, as there, it must never decide whether the delete applies.
 // Recipient discovery is notification bookkeeping, and the set of listing channels is unbounded (channel
-// creation is open), so the read is fenced with a savepoint: a statement error inside it (the DISTINCT
-// and ORDER BY sort or hash work the FK cascade never does, which can spill past work_mem and be
-// canceled by a non-default temp_file_limit) rolls back to the savepoint and the delete proceeds with a
-// nil listing — nobody is notified, the documented best-effort outcome. What the savepoint cannot cover
-// is the route deadline expiring mid-read: pgx then closes the connection and the whole transaction is
-// lost, but the ON DELETE CASCADE on channel_members (migration 000005) makes the DELETE walk the same
-// idx_channel_members_playlist_id rows, so a budget that cannot afford the read could not afford the
-// delete either.
+// creation is open), so the read is fenced with a savepoint and a statement timeout of half the
+// remaining budget (listingChannelsBestEffort): a statement error inside it (the DISTINCT and ORDER BY
+// sort or hash work the FK cascade never does, which can spill past work_mem and be canceled by a
+// non-default temp_file_limit) or a read that outlives its share of the deadline rolls back to the
+// savepoint, and the delete proceeds with a nil listing — nobody is notified, the documented best-effort
+// outcome. The delete then still holds at least the budget the read spent, and the ON DELETE CASCADE on
+// channel_members (migration 000005) makes it walk the same idx_channel_members_playlist_id rows.
 func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
