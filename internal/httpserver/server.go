@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
@@ -25,17 +24,14 @@ type Server struct {
 	log *zap.Logger
 }
 
-// New builds a Gin engine — recovery, optional Sentry, Zap request logging, RegisterRoutes — wraps it in
-// the inbound body cap, and applies http.Server timeouts from cfg.
+// New builds a Gin engine with Zap recovery, request logging, and routes, wraps it in the inbound body
+// cap, and applies the configured HTTP timeouts.
 func New(cfg *config.Config, log *zap.Logger, exec executor.Executor, version string) *Server {
 	if !cfg.Logging.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
-	if cfg.Sentry.DSN != "" {
-		r.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
-	}
-	r.Use(gin.Recovery())
+	r.Use(ZapRecovery(log))
 	r.Use(newCORSMiddleware(cfg))
 	r.Use(ZapLogger(log))
 

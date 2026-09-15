@@ -23,7 +23,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 | **Outbound notifications** | `internal/notification` | Transport-neutral client contract, P-256 signed webhook delivery, and best-effort multi-client dispatch for channel lifecycle events. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL implementation, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
-| **Cross-cutting** | `internal/logger` | Zap logger construction; Sentry is wired with Gin in `httpserver` (see Observability). |
+| **Cross-cutting** | `internal/logger` | Zap logger construction, stdout output, and optional Cloudflare Pipeline Stream delivery. |
 | **Tests** | `internal/mocks`, `internal/store/pg/pgtest` | Generated mocks and Postgres test helpers. |
 | **Small utilities** | `internal/utils` | Shared non-domain helpers (e.g. JSON). |
 
@@ -49,7 +49,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 
 ## Background job and transaction ownership
 
-- **Background jobs:** none by design. Every operation completes in the request path; there are no workers or queues.
+- **Application background jobs:** none by design. Every feed operation completes in the request path; there are no domain workers or queues. The logger owns one bounded in-memory delivery goroutine when Cloudflare streaming is enabled; it flushes at process shutdown and has no durable retry semantics.
 - **Channel notifications:** every mutating route establishes one application deadline at request entry, before authentication and body parsing. The deadline is `server.write_timeout - server.response_write_reserve`; resolution, final persistence, and post-commit notification share its remaining budget, leaving the reserve for response encoding and socket writes. After a channel create, replace, or delete commits, the executor sends the canonical channel URL to configured clients in the same request path. After a **playlist replace or delete** commits, it sends `channel.updated` for **every channel that lists that playlist**. The executor asks the store for those channels only when it can act on the answer — extensions enabled and a notification client configured — so a deployment that delivers nothing pays nothing for recipient discovery. When asked, the store reports them with a best-effort read that never fails the write and never spends its budget — one the store cannot finish just notifies nobody: after the replace commits, on its own connection; for a delete, on its own connection *concurrently* with the write transaction: the delete begins its transaction as on main, then takes a spare connection for the read — waiting at most a small fixed bound (`listingReadBound`), so a busy or single-connection pool means capture is skipped, never that the delete waits for a second connection it does not need — and only then takes the playlist's advisory lock (so it never waits on the pool while holding the lock, which the transactions blocked on that lock would hold up); the query is issued once the lock is held (so no ingest that listed the playlist can be missed), and the delete waits only for the read to *start* — a round trip or two on that connection, independent of how many channels list the playlist, and again under the same bound — so the read's snapshot predates the cascade and keeps seeing the rows it removes; the listing is collected after commit, and the delete transaction itself is the same conditional delete every document uses. Delivery is eight at a time under the same deadline; channels not reached before it expires are not notified (best-effort, and the count of listing channels is unbounded because channel creation is open, so the deadline rather than a cap bounds the work). With extensions disabled, playlist writes neither notify nor require a deadline. Slug-targeted mutations resolve once and write by UUID so the committed row and notification identity cannot diverge if a slug is concurrently reused. Final persistence becomes mutation-owned once it begins: it preserves request values and the route deadline while ignoring later client cancellation. A request canceled before that boundary does not start persistence. Post-commit delivery preserves the same deadline while detaching cancellation, and notification fan-out applies its shorter aggregate timeout. Playlist fetch timeout remains per remote request; resolution runs eight fetches concurrently and may span multiple batches. Configuration enforces a minimum write budget for one fetch, notification delivery, and the response reserve, while operators must increase it for larger expected batches. Webhook endpoints are credential-free, query-free HTTP(S) URLs with a hostname, redirects are refused, and authentication comes only from the event signature. Public channel URLs also require a hostname and must not use loopback or unspecified bind addresses, including scoped IPv6 forms, when notification clients are enabled. Delivery is best-effort: failures are logged and do not change the successful mutation response. This avoids duplicate create retries caused by returning an error after commit. Guaranteed retry across process failure or the route deadline would require a durable outbox and an explicit background-job owner.
 - **Transactions:** multi-step writes (e.g. playlist-group or channel create with resolved playlists and membership) are owned by **`internal/executor`**, which uses the store’s transactional APIs so ingest + persist commit or roll back together. The HTTP layer does not start or manage database transactions.
 
@@ -57,9 +57,8 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 
 ## Observability expectations
 
-- **Logging:** structured logs via Zap (`internal/logger`); level follows config (debug vs production defaults).
+- **Logging:** Zap (`internal/logger`) always writes locally to stdout. When a Cloudflare Pipeline Stream URL and producer API key are configured, the same accepted entries are also converted to the immutable `service_logs_stream` schema and sent as bounded asynchronous JSON batches. Required remote dimensions are RFC 3339 timestamp, normalized level, stable service, environment, and message. Recognized tracing fields occupy their schema columns; other Zap fields stay under `structured`, and `zap.Error` is encoded under `exception`. The queue is memory-only: delivery failure, queue overflow, or process crash can lose the remote copy but never suppress stdout. Shutdown drains accepted entries under a deadline. No redaction is performed at this internal-service boundary.
 - **Errors:** HTTP mapping lives in `internal/httpserver/errors.go`; executor returns domain/store errors that handlers translate.
-- **Sentry:** optional error reporting is integrated with Gin in the HTTP server (see `internal/logger` package comment for lifecycle notes—not duplicated in the logger package itself).
 - **Metrics / tracing:** not prescribed in-repo beyond what Gin and the process expose; add deliberately if operational requirements grow.
 
 ---
@@ -111,7 +110,7 @@ Ownership is derived from each document itself — its declared `curators`/`publ
 
 ## Technology stack
 
-- Go, Gin, PostgreSQL, pgx, dp1-go, Zap (and optional Sentry via httpserver).
+- Go, Gin, PostgreSQL, pgx, dp1-go, Zap, and optional Cloudflare Pipeline Stream log delivery.
 
 ---
 

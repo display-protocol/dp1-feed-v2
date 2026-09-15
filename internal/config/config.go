@@ -29,7 +29,6 @@ type Config struct {
 	Server        ServerConfig       `yaml:"server"`
 	Database      DatabaseConfig     `yaml:"database"`
 	Auth          AuthConfig         `yaml:"auth"`
-	Sentry        SentryConfig       `yaml:"sentry"`
 	Logging       LoggingConfig      `yaml:"logging"`
 	Extensions    ExtensionsConfig   `yaml:"extensions"`
 	Playlist      PlaylistConfig     `yaml:"playlist"`
@@ -100,14 +99,18 @@ type AuthConfig struct {
 // DefaultIntentMaxClockSkew is the mutation-intent freshness window used when config leaves it unset.
 const DefaultIntentMaxClockSkew = 5 * time.Minute
 
-// SentryConfig is optional; empty DSN disables Sentry.
-type SentryConfig struct {
-	DSN string `yaml:"dsn"`
+// LoggingConfig controls stdout formatting and optional Cloudflare Stream delivery.
+type LoggingConfig struct {
+	Debug       bool                    `yaml:"debug"`
+	Service     string                  `yaml:"service"`
+	Environment string                  `yaml:"environment"`
+	Cloudflare  CloudflareLoggingConfig `yaml:"cloudflare"`
 }
 
-// LoggingConfig toggles development-style logs.
-type LoggingConfig struct {
-	Debug bool `yaml:"debug"`
+// CloudflareLoggingConfig holds the authenticated Pipeline Stream endpoint.
+type CloudflareLoggingConfig struct {
+	StreamURL string `yaml:"stream_url"`
+	APIKey    string `yaml:"api_key"`
 }
 
 // ExtensionsConfig gates the optional DP-1 surfaces: the playlists-extension validation overlay applied
@@ -213,7 +216,7 @@ func defaultConfig() *Config {
 			MinConns:        2,
 			MaxConnLifetime: time.Hour,
 		},
-		Logging:    LoggingConfig{Debug: false},
+		Logging:    LoggingConfig{Debug: false, Service: "dp1-feed-v2"},
 		Auth:       AuthConfig{IntentMaxClockSkew: DefaultIntentMaxClockSkew},
 		Extensions: ExtensionsConfig{Enabled: true},
 		Playlist: PlaylistConfig{
@@ -259,9 +262,6 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Playlist.MaxResolvedBytes = n
 	}
-	if v := os.Getenv(envPrefix + "SENTRY_DSN"); v != "" {
-		cfg.Sentry.DSN = v
-	}
 	if v := os.Getenv(envPrefix + "SERVER_HOST"); v != "" {
 		cfg.Server.Host = v
 	}
@@ -272,6 +272,18 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv(envPrefix + "LOG_DEBUG"); v != "" {
 		cfg.Logging.Debug = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv(envPrefix + "LOG_SERVICE"); v != "" {
+		cfg.Logging.Service = v
+	}
+	if v := os.Getenv(envPrefix + "LOG_ENVIRONMENT"); v != "" {
+		cfg.Logging.Environment = v
+	}
+	if v := os.Getenv(envPrefix + "CLOUDFLARE_STREAM_URL"); v != "" {
+		cfg.Logging.Cloudflare.StreamURL = v
+	}
+	if v := os.Getenv(envPrefix + "CLOUDFLARE_API_KEY"); v != "" {
+		cfg.Logging.Cloudflare.APIKey = v
 	}
 	if v := os.Getenv(envPrefix + "EXTENSIONS_ENABLED"); v != "" {
 		cfg.Extensions.Enabled = strings.EqualFold(v, "true") || v == "1"
@@ -321,6 +333,35 @@ func (c *Config) validate() error {
 	}
 	if c.Server.MaxRequestBytes < 0 {
 		return fmt.Errorf("server max request bytes must not be negative")
+	}
+	c.Logging.Service = strings.TrimSpace(c.Logging.Service)
+	c.Logging.Environment = strings.TrimSpace(c.Logging.Environment)
+	c.Logging.Cloudflare.StreamURL = strings.TrimSpace(c.Logging.Cloudflare.StreamURL)
+	c.Logging.Cloudflare.APIKey = strings.TrimSpace(c.Logging.Cloudflare.APIKey)
+	cloudflareConfigured := c.Logging.Cloudflare.StreamURL != "" || c.Logging.Cloudflare.APIKey != ""
+	if cloudflareConfigured {
+		if c.Logging.Cloudflare.StreamURL == "" {
+			return fmt.Errorf("cloudflare stream url is required when cloudflare logging is configured")
+		}
+		if c.Logging.Cloudflare.APIKey == "" {
+			return fmt.Errorf("cloudflare api key is required when cloudflare logging is configured")
+		}
+		if c.Logging.Service == "" {
+			return fmt.Errorf("logging service is required when cloudflare logging is configured")
+		}
+		if c.Logging.Environment == "" {
+			return fmt.Errorf("logging environment is required when cloudflare logging is configured")
+		}
+		streamURL, err := url.Parse(c.Logging.Cloudflare.StreamURL)
+		if err != nil || streamURL.Host == "" || streamURL.Hostname() == "" {
+			return fmt.Errorf("cloudflare stream url must be an absolute URL")
+		}
+		if !strings.EqualFold(streamURL.Scheme, "https") {
+			return fmt.Errorf("cloudflare stream url must use https")
+		}
+		if streamURL.User != nil || streamURL.RawQuery != "" || streamURL.ForceQuery || streamURL.Fragment != "" {
+			return fmt.Errorf("cloudflare stream url must not contain credentials, a query, or a fragment")
+		}
 	}
 	if strings.TrimSpace(c.Playlist.SigningKeyHex) == "" {
 		return fmt.Errorf("signing key is required (yaml playlist.signing_key_hex or DP1_FEED_SIGNING_KEY_HEX)")

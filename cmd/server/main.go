@@ -5,13 +5,13 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -40,21 +40,25 @@ func main() {
 		panic(err)
 	}
 
-	if cfg.Sentry.DSN != "" {
-		if err := sentry.Init(sentry.ClientOptions{
-			Dsn:   cfg.Sentry.DSN,
-			Debug: cfg.Logging.Debug,
-		}); err != nil {
-			panic(err)
-		}
-		defer sentry.Flush(2 * time.Second)
-	}
-
-	zlog, err := logger.New(logger.Config{Debug: cfg.Logging.Debug})
+	zlog, shutdownLogger, err := logger.New(logger.Config{
+		Debug: cfg.Logging.Debug,
+		Cloudflare: logger.StreamConfig{
+			URL:         cfg.Logging.Cloudflare.StreamURL,
+			APIKey:      cfg.Logging.Cloudflare.APIKey,
+			Service:     cfg.Logging.Service,
+			Environment: cfg.Logging.Environment,
+		},
+	})
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = zlog.Sync() }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		if err := shutdownLogger(ctx); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "logger shutdown failed: %v\n", err)
+		}
+	}()
 	if cfg.Notifications.PublicKey != "" {
 		zlog.Info("webhook signing public key", zap.String("public_key", cfg.Notifications.PublicKey))
 	}

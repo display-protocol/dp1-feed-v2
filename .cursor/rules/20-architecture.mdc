@@ -30,7 +30,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 | **Outbound notifications** | `internal/notification` | Client contract and best-effort channel lifecycle delivery after commits. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
-| **Cross-cutting** | `internal/logger` | Zap; Sentry wired with Gin in `httpserver` (see Observability). |
+| **Cross-cutting** | `internal/logger` | Zap, stdout output, optional Cloudflare Pipeline Stream delivery. |
 | **Tests** | `internal/mocks`, `internal/store/pg/pgtest` | Generated mocks and Postgres test helpers. |
 | **Small utilities** | `internal/utils` | Shared non-domain helpers (e.g. JSON). |
 
@@ -50,15 +50,14 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 
 ## Background job and transaction ownership
 
-- **Background jobs:** none by design. Request-path only; no workers or queues.
+- **Application background jobs:** none by design. Request-path only; no domain workers or queues. Cloudflare logging may own one bounded, memory-only delivery goroutine with explicit shutdown flush.
 - **Channel notifications:** configured clients are called concurrently under one aggregate timeout after channel commits, and — because a member edit is observable at its channels — `channel.updated` is sent for every channel listing a playlist that was replaced or deleted (eight at a time within the route deadline every mutating route carries). Failures are logged and do not fail the already-committed mutation; durable retry remains out of scope without an outbox/job owner.
 - **Transactions:** multi-step writes (e.g. playlist-group/channel create with resolved playlists and membership) are owned by **`internal/executor`**, using the store’s transactional APIs so ingest + persist commit or roll back together. **HTTP does not start or own DB transactions.**
 
 ## Observability expectations
 
-- **Logging:** Zap via `internal/logger`; level from config (debug vs production defaults).
+- **Logging:** Zap via `internal/logger`; every accepted entry goes to stdout. Optional Cloudflare delivery converts entries to the immutable shared service-log schema, batches them through a bounded memory queue, and flushes accepted entries at shutdown. Remote delivery is best-effort and never suppresses stdout; there is no file sink or redaction at this internal-service boundary.
 - **Errors:** HTTP mapping in `internal/httpserver/errors.go`; executor returns errors handlers translate.
-- **Sentry:** optional, integrated with Gin in the HTTP server (see `internal/logger` package comment for lifecycle).
 - **Metrics / tracing:** not prescribed in-repo; add only when requirements justify it.
 
 ## Persistence strategy
@@ -84,7 +83,7 @@ Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_grou
 
 ## Technology stack
 
-Go, Gin, PostgreSQL, pgx, dp1-go, Zap; optional Sentry via httpserver.
+Go, Gin, PostgreSQL, pgx, dp1-go, Zap; optional Cloudflare Pipeline Stream log delivery.
 
 ## Intentionally out of scope
 

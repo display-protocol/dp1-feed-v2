@@ -11,7 +11,7 @@ Keep this file and `AGENTS.md` in sync. When one changes, change the other.
 
 - Project: `dp1-feed-v2`
 - Purpose: Go API server implementing the DP-1 specification for blockchain-native digital art playlists.
-- Stack: Go, Gin, PostgreSQL (pgx), dp1-go, Zap; optional Sentry.
+- Stack: Go, Gin, PostgreSQL (pgx), dp1-go, Zap; optional Cloudflare Pipeline Stream log delivery.
 
 ## Non-negotiables
 

@@ -277,8 +277,11 @@ The `.env` file contains all necessary environment variables for Docker deployme
 - `DP1_FEED_MAX_PLAYLIST_REFERENCES` — Max playlist URIs one group/channel may reference (default 1000)
 - `DP1_FEED_MAX_RESOLVED_BYTES` — Total resolved-playlist bytes one group/channel write may hold (default 64 MiB)
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
-- `DP1_FEED_SENTRY_DSN` — Optional Sentry DSN for error tracking
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging
+- `DP1_FEED_LOG_SERVICE` — Stable service name in remote records (default `dp1-feed-v2`)
+- `DP1_FEED_LOG_ENVIRONMENT` — Stable deployment environment; required when Cloudflare streaming is enabled
+- `DP1_FEED_CLOUDFLARE_STREAM_URL` — Optional Cloudflare Pipeline Stream ingest URL
+- `DP1_FEED_CLOUDFLARE_API_KEY` — Producer-specific Cloudflare token with `Pipelines Send`; required with the Stream URL
 - `DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX` — P-256 private scalar used only to sign webhooks
 - `DP1_FEED_NOTIFICATION_CLIENTS` — Optional JSON destination list
 
@@ -334,14 +337,14 @@ The API contract lives in `api/openapi.yaml`. When adding or changing endpoints:
 ### Enable Debug Logging
 
 ```yaml
-log:
-  level: debug
+logging:
+  debug: true
 ```
 
 Or via environment:
 
 ```bash
-export DP1_FEED_LOG_LEVEL=debug
+export DP1_FEED_LOG_DEBUG=true
 ```
 
 ### Common Issues
