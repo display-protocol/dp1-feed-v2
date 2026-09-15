@@ -56,7 +56,7 @@ func memberChannel(t *testing.T, ctx context.Context, st store.Store, id uuid.UU
 func replacePlaylist(t *testing.T, ctx context.Context, st store.Store, id uuid.UUID, title string) []uuid.UUID {
 	t.Helper()
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: title, Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://" + title}}}
-	listing, err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), plUpdatedAt(t, ctx, st, id.String()))
+	listing, err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), plUpdatedAt(t, ctx, st, id.String()), true)
 	if err != nil {
 		t.Fatalf("UpdatePlaylist %s: %v", id, err)
 	}
@@ -110,7 +110,7 @@ func TestIntegration_GetChannel_membersDigestTracksMemberWrites(t *testing.T) {
 	}
 
 	// Deleting a member cascades its rows away, which also changes the digest and still not updated_at.
-	if _, err := st.DeletePlaylist(ctx, b.String(), plUpdatedAt(t, ctx, st, b.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, b.String(), plUpdatedAt(t, ctx, st, b.String()), true); err != nil {
 		t.Fatalf("DeletePlaylist: %v", err)
 	}
 	rev2 := channelDigest(t, ctx, st, chID.String())
@@ -140,7 +140,7 @@ func TestIntegration_GetChannel_membersDigestEmptyWithoutMembers(t *testing.T) {
 	_, members := memberFixture(t, ctx, st, "lonely", 1)
 	chID := uuid.New()
 	memberChannel(t, ctx, st, chID, "lonely-channel", members)
-	if _, err := st.DeletePlaylist(ctx, members[0].ID.String(), plUpdatedAt(t, ctx, st, members[0].ID.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, members[0].ID.String(), plUpdatedAt(t, ctx, st, members[0].ID.String()), true); err != nil {
 		t.Fatal(err)
 	}
 	// Every membership row is gone; the digest collapses to the documented empty value rather than a
@@ -164,7 +164,7 @@ func listingFixture(t *testing.T, ctx context.Context, st store.Store) (ids []uu
 	return ids, x, y, z
 }
 
-// sortedIDs orders ids the way channelsListingPlaylist does (ORDER BY channel_id: bytewise on the UUID).
+// sortedIDs orders ids the way the store reports them (bytewise on the UUID, PostgreSQL's uuid order).
 func sortedIDs(ids ...uuid.UUID) []uuid.UUID {
 	out := slices.Clone(ids)
 	slices.SortFunc(out, func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) })
@@ -191,7 +191,7 @@ func TestIntegration_UpdatePlaylist_returnsListingChannels(t *testing.T) {
 	// A refused write reports nothing: the caller must not notify for a change that did not happen.
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "stale", Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://stale"}}}
 	stale := plUpdatedAt(t, ctx, st, a.String()).Add(-time.Microsecond)
-	listing, err := st.UpdatePlaylist(ctx, a.String(), rawDoc(t, &pl), stale)
+	listing, err := st.UpdatePlaylist(ctx, a.String(), rawDoc(t, &pl), stale, true)
 	if !errors.Is(err, store.ErrConcurrentModification) || listing != nil {
 		t.Fatalf("stale UpdatePlaylist = (%v, %v), want (nil, ErrConcurrentModification)", listing, err)
 	}
@@ -205,7 +205,7 @@ func TestIntegration_DeletePlaylist_returnsListingChannels(t *testing.T) {
 
 	// A stale delete is refused, reports nothing, and leaves the row (and its membership) in place.
 	stale := plUpdatedAt(t, ctx, st, a.String()).Add(-time.Microsecond)
-	if listing, err := st.DeletePlaylist(ctx, a.String(), stale); !errors.Is(err, store.ErrConcurrentModification) || listing != nil {
+	if listing, err := st.DeletePlaylist(ctx, a.String(), stale, true); !errors.Is(err, store.ErrConcurrentModification) || listing != nil {
 		t.Fatalf("stale DeletePlaylist = (%v, %v), want (nil, ErrConcurrentModification)", listing, err)
 	}
 	if _, err := st.GetPlaylist(ctx, a.String()); err != nil {
@@ -213,7 +213,7 @@ func TestIntegration_DeletePlaylist_returnsListingChannels(t *testing.T) {
 	}
 
 	// The listing is captured before the cascade removes it: X and Y are reported, each once.
-	listing, err := st.DeletePlaylist(ctx, a.String(), plUpdatedAt(t, ctx, st, a.String()))
+	listing, err := st.DeletePlaylist(ctx, a.String(), plUpdatedAt(t, ctx, st, a.String()), true)
 	if err != nil {
 		t.Fatalf("DeletePlaylist: %v", err)
 	}
@@ -229,6 +229,41 @@ func TestIntegration_DeletePlaylist_returnsListingChannels(t *testing.T) {
 		if rec.ID == a {
 			t.Fatal("deleted playlist still listed under channel X")
 		}
+	}
+}
+
+// reportListing=false is the executor saying "nobody will act on the answer" (extensions off, or no
+// notification client): the store must skip recipient discovery entirely — no listing for either write —
+// while the writes themselves behave exactly as before, including the cascade that removes a deleted
+// playlist's membership rows.
+func TestIntegration_PlaylistWrites_reportListingFalse_skipsCapture(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	ids, x, _, _ := listingFixture(t, ctx, st)
+	a := ids[0]
+
+	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "a-v2", Items: []playlist.PlaylistItem{{ID: uuid.New().String(), Source: "https://a-v2"}}}
+	listing, err := st.UpdatePlaylist(ctx, a.String(), rawDoc(t, &pl), plUpdatedAt(t, ctx, st, a.String()), false)
+	if err != nil || listing != nil {
+		t.Fatalf("UpdatePlaylist without reportListing = (%v, %v), want (nil, nil)", listing, err)
+	}
+	if rec, err := st.GetPlaylist(ctx, a.String()); err != nil || rec.Body.Title != "a-v2" {
+		t.Fatalf("replace did not apply: %+v, %v", rec, err)
+	}
+
+	listing, err = st.DeletePlaylist(ctx, a.String(), plUpdatedAt(t, ctx, st, a.String()), false)
+	if err != nil || listing != nil {
+		t.Fatalf("DeletePlaylist without reportListing = (%v, %v), want (nil, nil)", listing, err)
+	}
+	if _, err := st.GetPlaylist(ctx, a.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetPlaylist after delete = %v, want ErrNotFound", err)
+	}
+	inX, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, ChannelFilter: x.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inX) != 0 {
+		t.Fatalf("channel X still lists %d playlists after its only member was deleted, want 0 (cascade)", len(inX))
 	}
 }
 
@@ -256,7 +291,7 @@ func TestIntegration_ListPlaylists_membershipCursorSurvivesMemberEdit(t *testing
 
 	// Deleting a member on a later page shortens the order but does not invalidate the token; the client
 	// simply sees the remaining rows.
-	if _, err := st.DeletePlaylist(ctx, ids[2].String(), plUpdatedAt(t, ctx, st, ids[2].String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, ids[2].String(), plUpdatedAt(t, ctx, st, ids[2].String()), true); err != nil {
 		t.Fatal(err)
 	}
 	page2b, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 2, Cursor: cur, Sort: store.SortAsc, ChannelFilter: chID.String()})

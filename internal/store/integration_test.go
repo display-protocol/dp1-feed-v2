@@ -171,7 +171,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 			{ID: updatedItemID.String(), Source: "https://y"},
 		},
 	}
-	if _, err := st.UpdatePlaylist(ctx, slug, rawDoc(t, &plUpdated), plUpdatedAt(t, ctx, st, slug)); err != nil {
+	if _, err := st.UpdatePlaylist(ctx, slug, rawDoc(t, &plUpdated), plUpdatedAt(t, ctx, st, slug), false); err != nil {
 		t.Fatalf("UpdatePlaylist: %v", err)
 	}
 	after, _ := st.GetPlaylist(ctx, id.String())
@@ -205,7 +205,7 @@ func TestIntegration_PlaylistCRUD_and_List(t *testing.T) {
 	}
 
 	// Delete removes row; subsequent get returns ErrNotFound.
-	if _, err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String()), false); err != nil {
 		t.Fatal(err)
 	}
 	_, err = st.GetPlaylist(ctx, id.String())
@@ -758,7 +758,7 @@ func TestIntegration_UpdatePlaylist_notFound(t *testing.T) {
 	st := newStore(t)
 	// Missing id/slug → ErrNotFound, no partial write.
 	empty := playlist.Playlist{}
-	_, err := st.UpdatePlaylist(context.Background(), uuid.New().String(), rawDoc(t, &empty), time.Time{})
+	_, err := st.UpdatePlaylist(context.Background(), uuid.New().String(), rawDoc(t, &empty), time.Time{}, false)
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -767,7 +767,7 @@ func TestIntegration_UpdatePlaylist_notFound(t *testing.T) {
 func TestIntegration_DeletePlaylist_notFound(t *testing.T) {
 	st := newStore(t)
 	// Unknown slug → ErrNotFound (same contract as get/update).
-	_, err := st.DeletePlaylist(context.Background(), "missing-slug", time.Time{})
+	_, err := st.DeletePlaylist(context.Background(), "missing-slug", time.Time{}, false)
 	if err == nil || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
@@ -1406,7 +1406,7 @@ func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
 	if err := st.CreatePlaylist(ctx, playlistID, doc.Slug, rawDoc(t, doc)); err != nil {
 		t.Fatalf("CreatePlaylist: %v", err)
 	}
-	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String()), false); err != nil {
 		t.Fatalf("DeletePlaylist: %v", err)
 	}
 
@@ -1516,7 +1516,7 @@ func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing
 	// relinking a retired id. Delete the playlist the row currently points at — after the re-point above
 	// that is repointID, not the original: asserting against the original would have passed only because
 	// the row it named no longer existed, which proves nothing about the cascade.
-	if _, err := st.DeletePlaylist(ctx, repointID.String(), plUpdatedAt(t, ctx, st, repointID.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, repointID.String(), plUpdatedAt(t, ctx, st, repointID.String()), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.GetPlaylistBySourceURI(ctx, remoteURI); !errors.Is(err, store.ErrNotFound) {
@@ -1565,7 +1565,7 @@ func TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership(
 		t.Fatal(err)
 	}
 
-	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String()), false); err != nil {
 		t.Fatalf("a playlist owner's delete must not be blocked by a third party's reference: %v", err)
 	}
 
@@ -2062,7 +2062,7 @@ func TestIntegration_Channel_deletingReferencedPlaylistCascadesMembership(t *tes
 		t.Fatal(err)
 	}
 
-	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String()), false); err != nil {
 		t.Fatalf("a playlist owner's delete must not be blocked by a third party's channel: %v", err)
 	}
 
@@ -2159,7 +2159,7 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 
 	// A concurrent write lands, moving updated_at forward.
 	pl.Title = "v2"
-	if _, err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), stale); err != nil {
+	if _, err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), stale, false); err != nil {
 		t.Fatalf("first UpdatePlaylist: %v", err)
 	}
 	fresh := plUpdatedAt(t, ctx, st, id.String())
@@ -2169,7 +2169,7 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 
 	// The stale-expectation update must be refused, and must not have modified the row.
 	pl.Title = "clobber"
-	_, err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), stale)
+	_, err := st.UpdatePlaylist(ctx, id.String(), rawDoc(t, &pl), stale, false)
 	if !errors.Is(err, store.ErrConcurrentModification) {
 		t.Fatalf("stale UpdatePlaylist: want ErrConcurrentModification, got %v", err)
 	}
@@ -2182,7 +2182,7 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 	}
 
 	// A stale-expectation delete must be refused too, and must leave the row in place.
-	if _, err := st.DeletePlaylist(ctx, id.String(), stale); !errors.Is(err, store.ErrConcurrentModification) {
+	if _, err := st.DeletePlaylist(ctx, id.String(), stale, false); !errors.Is(err, store.ErrConcurrentModification) {
 		t.Fatalf("stale DeletePlaylist: want ErrConcurrentModification, got %v", err)
 	}
 	if _, err := st.GetPlaylist(ctx, id.String()); err != nil {
@@ -2190,7 +2190,7 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 	}
 
 	// The current generation still succeeds.
-	if _, err := st.DeletePlaylist(ctx, id.String(), fresh); err != nil {
+	if _, err := st.DeletePlaylist(ctx, id.String(), fresh, false); err != nil {
 		t.Fatalf("fresh DeletePlaylist: %v", err)
 	}
 	if _, err := st.GetPlaylist(ctx, id.String()); !errors.Is(err, store.ErrNotFound) {
@@ -2198,7 +2198,7 @@ func TestIntegration_ConditionalWrite_staleUpdatedAt(t *testing.T) {
 	}
 
 	// A conditional write against a row that no longer exists is ErrNotFound, not a concurrency error.
-	if _, err := st.DeletePlaylist(ctx, id.String(), fresh); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.DeletePlaylist(ctx, id.String(), fresh, false); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("delete of missing row: want ErrNotFound, got %v", err)
 	}
 }
@@ -2237,7 +2237,7 @@ func TestIntegration_Tombstone_survivesConcurrentDelete(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, delErr = st.DeletePlaylist(ctx, id.String(), updatedAt)
+			_, delErr = st.DeletePlaylist(ctx, id.String(), updatedAt, false)
 		}()
 		go func() {
 			defer wg.Done()
@@ -2276,7 +2276,7 @@ func TestIntegration_Tombstone_blocksIDReuse(t *testing.T) {
 	if err := st.CreatePlaylist(ctx, id, "tombstone-playlist", rawDoc(t, &pl)); err != nil {
 		t.Fatalf("CreatePlaylist: %v", err)
 	}
-	if _, err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String())); err != nil {
+	if _, err := st.DeletePlaylist(ctx, id.String(), plUpdatedAt(t, ctx, st, id.String()), false); err != nil {
 		t.Fatalf("DeletePlaylist: %v", err)
 	}
 
@@ -2404,7 +2404,7 @@ func TestIntegration_Create_liveCollisions(t *testing.T) {
 		if err := st.CreatePlaylist(ctx, deadID, "doomed-playlist", rawDoc(t, &pl)); err != nil {
 			t.Fatalf("CreatePlaylist: %v", err)
 		}
-		if _, err := st.DeletePlaylist(ctx, deadID.String(), plUpdatedAt(t, ctx, st, deadID.String())); err != nil {
+		if _, err := st.DeletePlaylist(ctx, deadID.String(), plUpdatedAt(t, ctx, st, deadID.String()), false); err != nil {
 			t.Fatalf("DeletePlaylist: %v", err)
 		}
 		err := st.CreatePlaylist(ctx, deadID, "doomed-playlist-again", rawDoc(t, &pl))

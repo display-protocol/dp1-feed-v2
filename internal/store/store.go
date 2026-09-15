@@ -238,21 +238,26 @@ type Store interface {
 	// Conditional on expectedUpdatedAt — the updated_at the caller read when it authorized the write.
 	// A mismatch returns ErrConcurrentModification (see that sentinel); a missing row returns ErrNotFound.
 	//
-	// Returns the distinct ids (sorted) of every channel whose membership lists this playlist, read after
-	// the write has committed, so the caller can notify them: a member edit is observable at each listing
-	// channel (see ChannelRecord.MembersDigest) even though no channel row changed. The read is best-effort
-	// and must never fail the write: a listing that cannot be read (deadline expired, query error) is
-	// returned as nil with a nil error, and the caller notifies nobody. Membership is a derived index over
-	// channel documents and is not modified here. nil when the write did not apply.
-	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) (listingChannels []uuid.UUID, err error)
+	// With reportListing, returns the distinct ids (sorted) of every channel whose membership lists this
+	// playlist, read after the write has committed, so the caller can notify them: a member edit is
+	// observable at each listing channel (see ChannelRecord.MembersDigest) even though no channel row
+	// changed. The read is best-effort and must never fail the write: a listing that cannot be read
+	// (deadline expired, query error) is returned as nil with a nil error, and the caller notifies nobody.
+	// Without reportListing the read is skipped and nil is returned — the caller asks only when it can act
+	// on the answer, so a deployment that delivers no notifications pays nothing for recipient discovery.
+	// Membership is a derived index over channel documents and is not modified here. nil when the write
+	// did not apply.
+	UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time, reportListing bool) (listingChannels []uuid.UUID, err error)
 	// DeletePlaylist removes a playlist row, conditional on expectedUpdatedAt (see UpdatePlaylist).
 	//
-	// Returns the distinct channel ids that listed the playlist, captured BEFORE the delete in the same
-	// transaction: the FK cascade (migration 000005) removes the membership rows with the playlist, so
-	// nothing could recover them afterwards. As for UpdatePlaylist the read is best-effort and never fails
-	// the delete: a listing that cannot be read is returned as nil with a nil error and the delete still
-	// applies. nil also when the delete did not apply.
-	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) (listingChannels []uuid.UUID, err error)
+	// With reportListing, returns the distinct channel ids (sorted) that listed the playlist. They are
+	// captured BEFORE the playlist row goes, in the same transaction, because the FK cascade (migration
+	// 000005) removes the membership rows with the playlist and nothing could recover them afterwards —
+	// but not by a separate read: the delete removes the channel_members rows itself and keeps the channel
+	// ids that come back, so recipient capture is a by-product of work the delete performs on every path
+	// and never competes with it for the route budget. Without reportListing the cascade removes those rows
+	// and nil is returned. nil also when the delete did not apply.
+	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) (listingChannels []uuid.UUID, err error)
 
 	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
 	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error

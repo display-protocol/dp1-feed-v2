@@ -454,7 +454,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 	var listing []uuid.UUID
 	write := func(mutationCtx context.Context) error {
 		var err error
-		listing, err = e.store.UpdatePlaylist(mutationCtx, rec.ID.String(), signed, rec.UpdatedAt)
+		listing, err = e.store.UpdatePlaylist(mutationCtx, rec.ID.String(), signed, rec.UpdatedAt, e.wantsListingChannels())
 		return err
 	}
 	if err := e.runPlaylistMutation(ctx, write); err != nil {
@@ -475,6 +475,16 @@ func (e *impl) runPlaylistMutation(ctx context.Context, mutate func(context.Cont
 		return mutate(ctx)
 	}
 	return e.runChannelMutation(ctx, mutate)
+}
+
+// wantsListingChannels is the reportListing argument for store playlist writes: whether this executor can
+// act on the channels listing a playlist. Recipient discovery is a scan over an unbounded membership set
+// (channel creation is open), so the store is asked for it only when the answer feeds a delivery — with
+// extensions disabled the channels cannot even be read (routes answer 404), and without a notification
+// client there is nobody to deliver to. notifyListingChannels applies the same gate on the way out, so a
+// store that reports a listing nobody asked for still notifies no one.
+func (e *impl) wantsListingChannels() bool {
+	return e.extensionsEnabled && e.notificationClient != nil
 }
 
 // notifyListingChannels emits channel.updated for every channel the store reported as listing a playlist
@@ -506,7 +516,7 @@ func (e *impl) DeletePlaylist(ctx context.Context, idOrSlug string, req *models.
 	var listing []uuid.UUID
 	remove := func(mutationCtx context.Context) error {
 		var err error
-		listing, err = e.store.DeletePlaylist(mutationCtx, rec.ID.String(), rec.UpdatedAt)
+		listing, err = e.store.DeletePlaylist(mutationCtx, rec.ID.String(), rec.UpdatedAt, e.wantsListingChannels())
 		return err
 	}
 	if err := e.runPlaylistMutation(ctx, remove); err != nil {

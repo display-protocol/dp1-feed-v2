@@ -873,46 +873,47 @@ func channelsListingPlaylist(ctx context.Context, q interface {
 	return ids, nil
 }
 
-// listingChannelsBestEffort runs channelsListingPlaylist inside a savepoint on tx, bounded to at most
-// half of the budget ctx has left, so neither a statement error nor a slow read can cost the caller its
-// write: either aborts only the savepoint and leaves tx usable, and the caller continues with a nil
-// listing. This is what lets a write transaction that must read its recipients before committing (see
-// DeletePlaylist) keep recipient discovery from vetoing the write.
+// removeMembershipReturningChannels deletes every channel_members row that lists playlistID and returns
+// the distinct channel ids (sorted, same memcmp order as PostgreSQL's uuid type) those rows carried. It
+// is how DeletePlaylist captures its recipients: the rows have to go anyway — on any other path the FK
+// cascade (migration 000005) removes them with the playlist — so doing that removal here, with RETURNING,
+// makes recipient capture a by-product of the delete's own work rather than a second pass over the same
+// index that competes with the delete for the route budget. The cascade that follows then finds nothing.
 //
-// The time bound is a server-side statement_timeout, not a Go sub-deadline: pgx answers an expired
-// context by closing the connection, which would take the whole transaction with it, whereas
-// statement_timeout cancels just the statement (SQLSTATE 57014) — one more error the savepoint absorbs.
-// Half is not a tuning knob but the invariant the caller relies on: the write that follows keeps at
-// least as much budget as the read spent, and for the delete that write walks the same index rows the
-// read did (the FK cascade), so a budget that let the read finish lets the delete finish too. SET LOCAL
-// lives in the savepoint and the savepoint is always rolled back — a read-only subtransaction has
-// nothing to keep — so the timeout is gone before the caller's next statement, whatever happened.
+// Rejected alternative: a separate SELECT fenced in a savepoint under a statement timeout. Whatever share
+// of the remaining budget that read was allowed, the cascade — writes over a superset of the same rows —
+// needed more than the read did, so a delete that fit the deadline on main could time out behind its own
+// recipient discovery; and the SET LOCAL it needed overrode any statement_timeout an operator had set.
+// Here the only cost beyond the cascade is shipping one uuid per removed row to this process, which is a
+// fraction of removing the row, and there is no separate statement left to fence or time.
 //
-// The store has no logger, so errors are dropped here; the caller sees nil and notifies nobody, the
-// documented best-effort outcome. If tx is already broken (connection gone), every step fails, nil is
-// returned, and the caller's next statement reports the real error. A ctx without a deadline gets no
-// timeout: every mutating route carries one, and a bare-context caller asked for an unbounded read.
-// Caveat: SET LOCAL replaces, for this one statement, any statement_timeout an operator set at role or
-// database level — a lower operator cap is not honored here (nothing in this repo sets one); the route
-// deadline still bounds the read regardless.
-func listingChannelsBestEffort(ctx context.Context, tx pgx.Tx, playlistID uuid.UUID) []uuid.UUID {
-	sp, err := tx.Begin(ctx)
+// Distinct and sort happen here, not in SQL: a DISTINCT/ORDER BY over an adversarially large row set can
+// spill past work_mem and is exactly the kind of extra server-side work the delete should not carry;
+// deduplicating while streaming keeps memory proportional to the number of channels, not rows.
+func removeMembershipReturningChannels(ctx context.Context, tx pgx.Tx, playlistID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := tx.Query(ctx, `DELETE FROM channel_members WHERE playlist_id = $1 RETURNING channel_id`, playlistID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("remove channel membership of playlist: %w", err)
 	}
-	defer func() { _ = sp.Rollback(ctx) }()
-	if deadline, ok := ctx.Deadline(); ok {
-		// Never 0: statement_timeout = 0 means "no limit", the opposite of an exhausted budget.
-		budget := max(time.Until(deadline)/2, time.Millisecond)
-		if _, err := sp.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", budget.Milliseconds())); err != nil {
-			return nil
+	defer rows.Close()
+	seen := map[uuid.UUID]struct{}{}
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("remove channel membership of playlist: %w", err)
 		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
-	ids, err := channelsListingPlaylist(ctx, sp, playlistID)
-	if err != nil {
-		return nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("remove channel membership of playlist: %w", err)
 	}
-	return ids
+	slices.SortFunc(ids, func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) })
+	return ids, nil
 }
 
 // resolveDocumentID maps a route key onto a row id for one of the three document tables: a value that
@@ -936,8 +937,9 @@ func resolveDocumentID(ctx context.Context, q rowQuerier, table, idOrSlug string
 
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
 //
-// The listing-channel read runs AFTER the write has committed, on its own connection, and its failure
-// is swallowed into a nil listing. Recipient discovery must never decide whether the replace succeeded:
+// The listing-channel read runs only when asked for (reportListing — the caller can act on the answer)
+// and AFTER the write has committed, on its own connection, and its failure is swallowed into a nil
+// listing. Recipient discovery must never decide whether the replace succeeded:
 // the set of channels listing a playlist is unbounded (channel creation is open), so a read that is
 // inside the write transaction lets an expired deadline or a query error roll back a body update the
 // owner authorized — and, having committed, returning that error would report the write as failed when
@@ -952,7 +954,7 @@ func resolveDocumentID(ctx context.Context, q rowQuerier, table, idOrSlug string
 // Do not "fix" it with lockDocumentID — that would serialize every playlist replace against every ingest
 // that references it, for a race whose only effect is one redundant notification the other writer
 // already sends.
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
 	const (
 		updateByID = `UPDATE playlists
 SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
@@ -993,6 +995,9 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	if !reportListing {
+		return nil, nil
+	}
 	// Post-commit, best-effort: the store has no logger, so the error is dropped here; the caller sees a
 	// nil listing and notifies nobody, which is the documented outcome for channels not reached in time.
 	listing, err := channelsListingPlaylist(ctx, s.pool, rowID)
@@ -1006,24 +1011,21 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 // made on an earlier read cannot remove a row that has since changed or been re-created (see
 // store.ErrConcurrentModification).
 //
-// Order inside the transaction is load-bearing: lock → read listing channels → delete. The listing read
-// must precede the delete because the membership rows cascade away with the playlist (migration 000005),
-// and it must follow lockDocumentID because a concurrent group/channel ingest that references this
-// playlist takes the same advisory lock before inserting membership (insertMissingPlaylistsBatch). Such
-// an ingest therefore either committed before our lock — and is in the list — or blocks until we commit
-// and then fails on the tombstone we wrote, so no channel that ever listed this playlist can be missed.
+// Order inside the transaction is load-bearing: lock → remove channel membership (capturing the channel
+// ids) → delete the playlist row. Membership must be captured before the playlist row goes because the
+// rest of it cascades away with the row (migration 000005), and it must follow lockDocumentID because a
+// concurrent group/channel ingest that references this playlist takes the same advisory lock before
+// inserting membership (insertMissingPlaylistsBatch). Such an ingest therefore either committed before
+// our lock — and its rows are among those removed and reported — or blocks until we commit and then
+// fails on the tombstone we wrote, so no channel that ever listed this playlist can be missed.
 //
-// Unlike UpdatePlaylist, the listing read cannot move after commit (the rows are gone by then), so it
-// stays inside the write transaction — but, as there, it must never decide whether the delete applies.
-// Recipient discovery is notification bookkeeping, and the set of listing channels is unbounded (channel
-// creation is open), so the read is fenced with a savepoint and a statement timeout of half the
-// remaining budget (listingChannelsBestEffort): a statement error inside it (the DISTINCT and ORDER BY
-// sort or hash work the FK cascade never does, which can spill past work_mem and be canceled by a
-// non-default temp_file_limit) or a read that outlives its share of the deadline rolls back to the
-// savepoint, and the delete proceeds with a nil listing — nobody is notified, the documented best-effort
-// outcome. The delete then still holds at least the budget the read spent, and the ON DELETE CASCADE on
-// channel_members (migration 000005) makes it walk the same idx_channel_members_playlist_id rows.
-func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) ([]uuid.UUID, error) {
+// Recipient capture must never decide whether the delete applies, and must not cost it budget it did not
+// already need: the set of listing channels is unbounded (channel creation is open). That is why it is
+// not a read at all but the membership removal itself with RETURNING (removeMembershipReturningChannels):
+// the delete does that work on every path — explicitly here, through the cascade otherwise — so the only
+// addition is shipping the ids back, and a failure there is a failure of the delete's own work, exactly
+// as a cascade failure would be on main. Without reportListing the rows are left to the cascade.
+func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -1037,7 +1039,12 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpd
 	if err := lockDocumentID(ctx, tx, "playlists", rowID); err != nil {
 		return nil, err
 	}
-	listing := listingChannelsBestEffort(ctx, tx, rowID)
+	var listing []uuid.UUID
+	if reportListing {
+		if listing, err = removeMembershipReturningChannels(ctx, tx, rowID); err != nil {
+			return nil, err
+		}
+	}
 	if err := deleteLockedDocument(ctx, tx, "playlists", rowID, expectedUpdatedAt); err != nil {
 		return nil, err
 	}

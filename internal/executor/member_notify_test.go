@@ -109,7 +109,7 @@ func TestReplacePlaylist_notifiesEveryListingChannel(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	req, intent := expectPlaylistReplace(t, mockStore, mockDP1)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any()).Return(listingChannels, nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), true).Return(listingChannels, nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -127,7 +127,7 @@ func TestDeletePlaylist_notifiesEveryListingChannel(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	req := expectPlaylistDelete(mockStore, mockDP1)
-	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any()).Return(listingChannels, nil)
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), true).Return(listingChannels, nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -147,8 +147,8 @@ func TestPlaylistWrites_noListingChannels_noNotification(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	req, intent := expectPlaylistReplace(t, mockStore, mockDP1)
 	del := expectPlaylistDelete(mockStore, mockDP1)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any()).Return(nil, nil)
-	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any()).Return(nil, nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), true).Return(nil, nil)
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), true).Return(nil, nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -172,8 +172,8 @@ func TestPlaylistWrites_storeError_noNotification(t *testing.T) {
 	del := expectPlaylistDelete(mockStore, mockDP1)
 	// A store that returns ids alongside an error models a bug, not a contract; the executor must trust
 	// the error and never notify for a write that did not commit.
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any()).Return(listingChannels, errors.New("db down"))
-	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any()).Return(listingChannels, store.ErrConcurrentModification)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), true).Return(listingChannels, errors.New("db down"))
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), true).Return(listingChannels, store.ErrConcurrentModification)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -222,8 +222,8 @@ func TestPlaylistWrites_extensionsDisabled_plainWrite(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	req, intent := expectPlaylistReplace(t, mockStore, mockDP1)
 	del := expectPlaylistDelete(mockStore, mockDP1)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any()).Return(listingChannels[:1], nil)
-	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any()).Return(listingChannels[:1], nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), false).Return(listingChannels[:1], nil)
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), false).Return(listingChannels[:1], nil)
 
 	notifications := &recordingNotificationClient{}
 	e := executor.New(mockStore, mockDP1, false, nil, testPublicBase, executor.WithNotificationClient(notifications))
@@ -235,6 +235,28 @@ func TestPlaylistWrites_extensionsDisabled_plainWrite(t *testing.T) {
 	}
 	if len(notifications.events) != 0 {
 		t.Fatalf("events = %#v, want none with extensions disabled", notifications.events)
+	}
+}
+
+// Without a notification client there is nobody to deliver to, so the executor must not ask the store for
+// the listing channels at all: recipient discovery is a scan over an unbounded membership set (channel
+// creation is open) and would be pure cost on a deployment that cannot act on the answer.
+func TestPlaylistWrites_noNotificationClient_doesNotAskForListing(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	mockStore := mocks.NewMockStore(ctrl)
+	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
+	req, intent := expectPlaylistReplace(t, mockStore, mockDP1)
+	del := expectPlaylistDelete(mockStore, mockDP1)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), false).Return(nil, nil)
+	mockStore.EXPECT().DeletePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), false).Return(nil, nil)
+
+	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase)
+	if _, err := e.ReplacePlaylist(context.Background(), "keep-me", req, intent); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.DeletePlaylist(context.Background(), "id-1", del); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -251,8 +273,8 @@ func TestReplacePlaylist_notificationSurvivesRequestCancellationAfterCommit(t *t
 	deadlineCtx := notifiedMutationContext(t)
 	wantDeadline, _ := deadlineCtx.Deadline()
 	ctx, cancel := context.WithCancel(deadlineCtx)
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any()).DoAndReturn(
-		func(mutationCtx context.Context, _ string, _ []byte, _ time.Time) ([]uuid.UUID, error) {
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), true).DoAndReturn(
+		func(mutationCtx context.Context, _ string, _ []byte, _ time.Time, _ bool) ([]uuid.UUID, error) {
 			cancel() // The row committed just before the HTTP request context was canceled.
 			if err := mutationCtx.Err(); err != nil {
 				t.Fatalf("mutation context error after request cancellation = %v, want detached context", err)
@@ -318,7 +340,7 @@ func TestReplacePlaylist_notificationFanOutIsBounded(t *testing.T) {
 	for i := range ids {
 		ids[i] = uuid.New()
 	}
-	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any()).Return(ids, nil)
+	mockStore.EXPECT().UpdatePlaylist(gomock.Any(), memberTestPlaylistID.String(), gomock.Any(), gomock.Any(), true).Return(ids, nil)
 
 	client := &blockingNotificationClient{arrived: make(chan struct{}, channelCount), release: make(chan struct{})}
 	e := executor.New(mockStore, mockDP1, true, nil, testPublicBase, executor.WithNotificationClient(client))
