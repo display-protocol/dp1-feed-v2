@@ -856,52 +856,25 @@ func (s *Store) queryPlaylistRecords(ctx context.Context, q string, args ...any)
 	return out, nil
 }
 
-// channelsListingPlaylist returns the distinct channels whose membership lists playlistID, via
-// idx_channel_members_playlist_id. Sorted so callers and tests see a stable order regardless of plan.
-func channelsListingPlaylist(ctx context.Context, q interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, playlistID uuid.UUID) ([]uuid.UUID, error) {
-	const listing = `SELECT DISTINCT channel_id FROM channel_members WHERE playlist_id = $1 ORDER BY channel_id`
-	rows, err := q.Query(ctx, listing, playlistID)
-	if err != nil {
-		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
-	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-	if err != nil {
-		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
-	}
-	return ids, nil
-}
+// listingChannelsQuery streams one row per membership position via idx_channel_members_playlist_id.
+// Deliberately no DISTINCT / ORDER BY: the server would then have to consume the whole index range
+// before emitting its first row, and DeletePlaylist relies on the first row (or completion) arriving as
+// soon as the scan has begun — that is its signal that the statement's snapshot exists. Deduplication
+// and ordering happen in collectDistinctChannels instead, at memory proportional to the number of
+// distinct channels rather than rows.
+const listingChannelsQuery = `SELECT channel_id FROM channel_members WHERE playlist_id = $1`
 
-// removeMembershipReturningChannels deletes every channel_members row that lists playlistID and returns
-// the distinct channel ids (sorted, same memcmp order as PostgreSQL's uuid type) those rows carried. It
-// is how DeletePlaylist captures its recipients: the rows have to go anyway — on any other path the FK
-// cascade (migration 000005) removes them with the playlist — so doing that removal here, with RETURNING,
-// makes recipient capture a by-product of the delete's own work rather than a second pass over the same
-// index that competes with the delete for the route budget. The cascade that follows then finds nothing.
-//
-// Rejected alternative: a separate SELECT fenced in a savepoint under a statement timeout. Whatever share
-// of the remaining budget that read was allowed, the cascade — writes over a superset of the same rows —
-// needed more than the read did, so a delete that fit the deadline on main could time out behind its own
-// recipient discovery; and the SET LOCAL it needed overrode any statement_timeout an operator had set.
-// Here the only cost beyond the cascade is shipping one uuid per removed row to this process, which is a
-// fraction of removing the row, and there is no separate statement left to fence or time.
-//
-// Distinct and sort happen here, not in SQL: a DISTINCT/ORDER BY over an adversarially large row set can
-// spill past work_mem and is exactly the kind of extra server-side work the delete should not carry;
-// deduplicating while streaming keeps memory proportional to the number of channels, not rows.
-func removeMembershipReturningChannels(ctx context.Context, tx pgx.Tx, playlistID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := tx.Query(ctx, `DELETE FROM channel_members WHERE playlist_id = $1 RETURNING channel_id`, playlistID)
-	if err != nil {
-		return nil, fmt.Errorf("remove channel membership of playlist: %w", err)
-	}
+// collectDistinctChannels drains rows (whose first Next the caller has already issued, result hasRow)
+// into the distinct channel ids, sorted bytewise — the same order PostgreSQL's uuid type has, so callers
+// and tests see a stable order regardless of plan. Always closes rows.
+func collectDistinctChannels(rows pgx.Rows, hasRow bool) ([]uuid.UUID, error) {
 	defer rows.Close()
 	seen := map[uuid.UUID]struct{}{}
 	var ids []uuid.UUID
-	for rows.Next() {
+	for ; hasRow; hasRow = rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("remove channel membership of playlist: %w", err)
+			return nil, fmt.Errorf("list channels referencing playlist: %w", err)
 		}
 		if _, dup := seen[id]; dup {
 			continue
@@ -910,10 +883,116 @@ func removeMembershipReturningChannels(ctx context.Context, tx pgx.Tx, playlistI
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("remove channel membership of playlist: %w", err)
+		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
 	}
 	slices.SortFunc(ids, func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) })
 	return ids, nil
+}
+
+// channelsListingPlaylist returns the distinct channels (sorted) whose membership lists playlistID.
+func channelsListingPlaylist(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, playlistID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.Query(ctx, listingChannelsQuery, playlistID)
+	if err != nil {
+		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
+	}
+	return collectDistinctChannels(rows, rows.Next())
+}
+
+// listingReadBound caps each wait a playlist delete makes on behalf of its recipient read: obtaining a
+// spare pool connection, and the read's start on it. The read needs a second connection (see
+// listingRead); the delete must not need one. Unbounded, a delete on a pool whose other connections are
+// busy would wait for one until the route deadline and fail, where on main it succeeds with the single
+// connection it has — and a stale idle connection (a database failover; the pool does not ping on
+// acquire) would hang the start until the deadline just the same. So each wait is a small fixed slice
+// of the seconds-scale route budget — enough for the pool to hand over an idle connection or dial a new
+// one (connect + auth) to a same-region database, and for the statement to be parsed and begun — after
+// which the delete proceeds without capture: nobody is notified, the documented best-effort outcome.
+// pgxpool has no non-blocking acquire, which is why this is a timeout and not a try.
+const listingReadBound = 200 * time.Millisecond
+
+// listingRead is a recipient read on its own pool connection, run concurrently with the caller's write
+// transaction. It is how DeletePlaylist captures recipients without putting them on the delete's path.
+//
+// Why concurrent, on a separate connection: the membership rows cascade away with the playlist row
+// (migration 000005), so the listing cannot be read after commit as UpdatePlaylist does — it has to be
+// read while the rows still exist. Reading them inside the write transaction, however, puts an unbounded
+// scan (channel creation is open) on the delete's critical path: sequentially it spends route budget the
+// cascade then lacks, and any failure of it — deadline expiry mid-stream, a spilled sort canceled by an
+// operator limit — aborts the transaction and with it an owner-authorized delete. A savepoint plus a
+// statement timeout was tried and rejected for the same reason (the timeout's share of the budget was
+// still taken from the delete, and SET LOCAL overrode operator caps). Running the read on another
+// connection, in parallel with the delete, is what makes the two independent: the delete keeps the full
+// budget and exactly its failure modes from main; the read has the same budget, and its failure only
+// means nobody is notified (the store has no logger, so the error is dropped and the caller notifies
+// nobody, the documented best-effort outcome).
+//
+// Why the connection is acquired after Begin but before the lock, and only briefly: the delete must
+// wait for the read to *start* (see start) while it holds the playlist's advisory lock, and a pool
+// acquire in that window can wait on connections held by the very transactions blocked on that lock —
+// ingests referencing the playlist — which only ends at the deadline. Acquiring before the lock removes
+// that cycle; acquiring after Begin keeps the delete's own pool wait exactly what it is on main; and
+// bounding the acquire and the start (listingReadBound) keeps a busy pool, or a stale connection, from
+// turning the read's need for a second connection into a failed delete. Two early exits are therefore normal: no connection within
+// the bound, or the delete failing before the read started.
+type listingRead struct {
+	conn    *pgxpool.Conn
+	started chan struct{}    // closed once the statement has begun executing on the server (or failed)
+	result  chan []uuid.UUID // the distinct channel ids, or nil when the read failed
+	running bool
+}
+
+// acquireListingRead takes a pool connection for a read, waiting at most listingReadBound. nil — and
+// nothing held — when none could be had in time, which is the best-effort outcome, not an error.
+func (s *Store) acquireListingRead(ctx context.Context) *listingRead {
+	acquireCtx, cancel := context.WithTimeout(ctx, listingReadBound)
+	defer cancel()
+	conn, err := s.pool.Acquire(acquireCtx)
+	if err != nil {
+		return nil
+	}
+	return &listingRead{conn: conn, started: make(chan struct{}), result: make(chan []uuid.UUID, 1)}
+}
+
+// start issues the listing query on the held connection, in a goroutine that owns the connection from
+// here on. started closes once the statement's first row, or its completion, has arrived — the moment
+// its READ COMMITTED snapshot is fixed, which is all the caller waits for: one or two round trips
+// (a Parse/Describe when the statement is not yet cached on this connection, then Bind/Execute) on a
+// connection it already holds, independent of how many rows there are. READ COMMITTED gives the SELECT
+// one snapshot for its whole run, so rows the caller's cascade deletes afterwards stay visible to it even
+// after the delete commits; readers never block writers, so the caller is not held up by the read either.
+//
+// Goroutine ownership: it exits once the query returns, which ctx cancellation makes prompt (pgx cancels
+// the statement and closes this connection only). started is closed on every path and result is
+// buffered, so neither send blocks and the goroutine cannot leak when the caller stops waiting for it.
+func (r *listingRead) start(ctx context.Context, playlistID uuid.UUID) {
+	r.running = true
+	go func() {
+		defer r.conn.Release()
+		rows, err := r.conn.Query(ctx, listingChannelsQuery, playlistID)
+		if err != nil {
+			close(r.started)
+			r.result <- nil
+			return
+		}
+		hasRow := rows.Next()
+		close(r.started)
+		ids, err := collectDistinctChannels(rows, hasRow)
+		if err != nil {
+			ids = nil
+		}
+		r.result <- ids
+	}()
+}
+
+// close returns the connection when the read never ran (the caller failed before start); after start
+// the goroutine owns it and close is a no-op — the caller's context cancellation ends the read.
+func (r *listingRead) close() {
+	if r.running {
+		return
+	}
+	r.conn.Release()
 }
 
 // resolveDocumentID maps a route key onto a row id for one of the three document tables: a value that
@@ -1011,20 +1090,25 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 // made on an earlier read cannot remove a row that has since changed or been re-created (see
 // store.ErrConcurrentModification).
 //
-// Order inside the transaction is load-bearing: lock → remove channel membership (capturing the channel
-// ids) → delete the playlist row. Membership must be captured before the playlist row goes because the
-// rest of it cascades away with the row (migration 000005), and it must follow lockDocumentID because a
-// concurrent group/channel ingest that references this playlist takes the same advisory lock before
-// inserting membership (insertMissingPlaylistsBatch). Such an ingest therefore either committed before
-// our lock — and its rows are among those removed and reported — or blocks until we commit and then
-// fails on the tombstone we wrote, so no channel that ever listed this playlist can be missed.
+// The write transaction is exactly the shared conditional delete (lock → conditional DELETE with the
+// membership cascade → tombstone → commit). Recipient capture, when asked for, is not part of it: the
+// listing is read on a separate connection, concurrently, and only collected after commit, so its size
+// can neither spend the delete's budget nor fail it (see listingRead for why that, and not a read inside
+// the transaction, is what keeps an unbounded third-party membership set from vetoing an owner's
+// delete). What the delete does spend on capture is bounded and independent of the row count: at most
+// listingReadBound to obtain the read's connection and, again, at most listingReadBound for the read to
+// *start* — its snapshot has to exist before the cascade removes the rows.
 //
-// Recipient capture must never decide whether the delete applies, and must not cost it budget it did not
-// already need: the set of listing channels is unbounded (channel creation is open). That is why it is
-// not a read at all but the membership removal itself with RETURNING (removeMembershipReturningChannels):
-// the delete does that work on every path — explicitly here, through the cascade otherwise — so the only
-// addition is shipping the ids back, and a failure there is a failure of the delete's own work, exactly
-// as a cascade failure would be on main. Without reportListing the rows are left to the cascade.
+// Ordering is load-bearing: begin → resolve → acquire read connection (bounded) → lock → read started →
+// delete. The read connection is taken before the lock so the delete never waits on the pool while
+// holding it (see listingRead), and the query is issued only after the lock. A concurrent group/channel
+// ingest that references this playlist takes the same advisory lock before inserting membership
+// (insertMissingPlaylistsBatch), so it either committed before our lock — and its rows are in the read's
+// snapshot — or blocks until we commit and then fails on the tombstone we wrote; no channel that ever
+// listed this playlist can be missed. Exceptions, all best-effort by contract: when no spare connection
+// could be had within the bound (a saturated or single-connection pool) no read is started; when the
+// read has not started within the bound, or the delete does not apply, the read is abandoned — its
+// context canceled, its result never collected.
 func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1036,13 +1120,29 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpd
 	if err != nil {
 		return nil, err
 	}
+	var read *listingRead
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	if reportListing {
+		if read = s.acquireListingRead(readCtx); read != nil {
+			defer read.close()
+		}
+	}
 	if err := lockDocumentID(ctx, tx, "playlists", rowID); err != nil {
 		return nil, err
 	}
-	var listing []uuid.UUID
-	if reportListing {
-		if listing, err = removeMembershipReturningChannels(ctx, tx, rowID); err != nil {
-			return nil, err
+	if read != nil {
+		read.start(readCtx, rowID)
+		// The snapshot must exist before the cascade removes the rows, so wait for the start — but only
+		// within the bound: past it the read is abandoned (its result could carry a snapshot taken after
+		// the cascade, so it must not be collected). If ctx expires first the delete below fails on its
+		// own, exactly as it would on main.
+		select {
+		case <-read.started:
+		case <-time.After(listingReadBound):
+			cancelRead()
+			read = nil
+		case <-ctx.Done():
 		}
 	}
 	if err := deleteLockedDocument(ctx, tx, "playlists", rowID, expectedUpdatedAt); err != nil {
@@ -1051,7 +1151,10 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpd
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return listing, nil
+	if read == nil {
+		return nil, nil
+	}
+	return <-read.result, nil
 }
 
 // deleteDocumentRow is the shared conditional delete for playlist-groups and channels (playlists have

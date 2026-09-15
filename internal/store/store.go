@@ -251,12 +251,15 @@ type Store interface {
 	// DeletePlaylist removes a playlist row, conditional on expectedUpdatedAt (see UpdatePlaylist).
 	//
 	// With reportListing, returns the distinct channel ids (sorted) that listed the playlist. They are
-	// captured BEFORE the playlist row goes, in the same transaction, because the FK cascade (migration
-	// 000005) removes the membership rows with the playlist and nothing could recover them afterwards —
-	// but not by a separate read: the delete removes the channel_members rows itself and keeps the channel
-	// ids that come back, so recipient capture is a by-product of work the delete performs on every path
-	// and never competes with it for the route budget. Without reportListing the cascade removes those rows
-	// and nil is returned. nil also when the delete did not apply.
+	// read while the membership rows still exist — the FK cascade (migration 000005) removes them with the
+	// playlist and nothing could recover them afterwards — but not by the write transaction: the read runs
+	// concurrently on its own connection (the delete waits only for the read to start, so its snapshot
+	// predates the cascade, never for it to finish) and is collected after commit, so its size never
+	// spends the delete's budget and its failure never fails the delete; what the delete spends on it is
+	// a small fixed bound to obtain that connection and another for the read to start. As for UpdatePlaylist a listing that cannot be read
+	// — or could not be started: a saturated or single-connection pool — is returned as nil with a nil
+	// error and the delete still applies. Without reportListing nil is returned and nothing is read.
+	// nil also when the delete did not apply.
 	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) (listingChannels []uuid.UUID, err error)
 
 	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
