@@ -177,6 +177,16 @@ func TestConfigValidateCloudflareLogging(t *testing.T) {
 			wantError: "logging environment is required",
 		},
 		{
+			name: "missing service",
+			configure: func(cfg *Config) {
+				cfg.Logging.Service = ""
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "logging service is required",
+		},
+		{
 			name: "non-HTTPS stream URL",
 			configure: func(cfg *Config) {
 				cfg.Logging.Environment = "production"
@@ -184,6 +194,15 @@ func TestConfigValidateCloudflareLogging(t *testing.T) {
 				cfg.Logging.Cloudflare.APIKey = "send-token"
 			},
 			wantError: "must use https",
+		},
+		{
+			name: "stream URL with query",
+			configure: func(cfg *Config) {
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example?token=wrong-place"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "must not contain credentials",
 		},
 	}
 

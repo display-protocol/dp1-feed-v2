@@ -35,6 +35,7 @@ type StreamConfig struct {
 	flushInterval time.Duration
 	queueSize     int
 	maxBatchBytes int
+	maxQueueBytes int64
 }
 
 // ShutdownFunc flushes accepted remote records and releases logger-owned resources.

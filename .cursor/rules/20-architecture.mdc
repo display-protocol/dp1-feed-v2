@@ -56,7 +56,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 
 ## Observability expectations
 
-- **Logging:** Zap via `internal/logger`; every accepted entry goes to stdout. Optional Cloudflare delivery converts entries to the immutable shared service-log schema, batches them through a bounded memory queue, and flushes accepted entries at shutdown. Remote delivery is best-effort and never suppresses stdout; there is no file sink or redaction at this internal-service boundary.
+- **Logging:** Zap via `internal/logger`; every accepted entry goes to stdout. Optional Cloudflare delivery converts entries to the immutable shared service-log schema. Its memory-only path caps the queue by record count and aggregate bytes, rejects records that cannot fit a batch before enqueue, and flushes accepted entries only after graceful HTTP shutdown drains handlers. Remote delivery is best-effort and never suppresses stdout; there is no file sink or redaction at this internal-service boundary.
 - **Errors:** HTTP mapping in `internal/httpserver/errors.go`; executor returns errors handlers translate.
 - **Metrics / tracing:** not prescribed in-repo; add only when requirements justify it.
 

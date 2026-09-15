@@ -20,6 +20,7 @@ const (
 	defaultFlushInterval  = time.Second
 	defaultQueueSize      = 1024
 	defaultMaxBatchBytes  = 4 << 20
+	defaultMaxQueueBytes  = 8 << 20
 	defaultRequestTimeout = 5 * time.Second
 )
 
@@ -221,10 +222,12 @@ type streamSender struct {
 	batchSize     int
 	flushInterval time.Duration
 	maxBatchBytes int
+	maxQueueBytes int64
 
-	mu       sync.Mutex
-	closed   bool
-	closeErr error
+	mu           sync.Mutex
+	closed       bool
+	pendingBytes int64
+	closeErr     error
 }
 
 func newStreamSender(cfg StreamConfig, diagnostic io.Writer) (*streamSender, error) {
@@ -257,6 +260,10 @@ func newStreamSender(cfg StreamConfig, diagnostic io.Writer) (*streamSender, err
 	if maxBatchBytes <= 0 {
 		maxBatchBytes = defaultMaxBatchBytes
 	}
+	maxQueueBytes := cfg.maxQueueBytes
+	if maxQueueBytes <= 0 {
+		maxQueueBytes = defaultMaxQueueBytes
+	}
 	if diagnostic == nil {
 		diagnostic = io.Discard
 	}
@@ -272,6 +279,7 @@ func newStreamSender(cfg StreamConfig, diagnostic io.Writer) (*streamSender, err
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		maxBatchBytes: maxBatchBytes,
+		maxQueueBytes: maxQueueBytes,
 	}
 	go sender.run()
 	return sender, nil
@@ -283,12 +291,27 @@ func (s *streamSender) enqueue(record []byte) error {
 	if s.closed {
 		return fmt.Errorf("cloudflare log sender is closed")
 	}
+	// Reject a single oversized record before the channel retains it. The batch limit includes the JSON
+	// array brackets, so one record may occupy at most maxBatchBytes-2 bytes.
+	if len(record)+2 > s.maxBatchBytes {
+		return fmt.Errorf("cloudflare log record is %d bytes, exceeding the %d-byte batch limit", len(record), s.maxBatchBytes)
+	}
+	if s.pendingBytes+int64(len(record)) > s.maxQueueBytes {
+		return fmt.Errorf("cloudflare log queue exceeds its %d-byte limit; remote record dropped", s.maxQueueBytes)
+	}
 	select {
 	case s.records <- record:
+		s.pendingBytes += int64(len(record))
 		return nil
 	default:
 		return fmt.Errorf("cloudflare log queue is full; remote record dropped")
 	}
+}
+
+func (s *streamSender) markDequeued(record []byte) {
+	s.mu.Lock()
+	s.pendingBytes -= int64(len(record))
+	s.mu.Unlock()
 }
 
 func (s *streamSender) flush(ctx context.Context) error {
@@ -354,11 +377,6 @@ func (s *streamSender) run() {
 	}
 	appendRecord := func(ctx context.Context, record []byte) {
 		recordBytes := len(record) + 1
-		if recordBytes+1 > s.maxBatchBytes {
-			lastErr = fmt.Errorf("cloudflare log record is %d bytes, exceeding the %d-byte batch limit", len(record), s.maxBatchBytes)
-			_, _ = fmt.Fprintln(s.diagnostic, lastErr)
-			return
-		}
 		if len(batch) > 0 && batchBytes+recordBytes > s.maxBatchBytes {
 			_ = flush(ctx)
 		}
@@ -372,14 +390,19 @@ func (s *streamSender) run() {
 	for {
 		select {
 		case record := <-s.records:
+			s.markDequeued(record)
 			appendRecord(context.Background(), record)
 		case request := <-s.flushes:
-			drainRecords(s.records, func(record []byte) { appendRecord(request.ctx, record) })
-			request.result <- errorsOrLast(flush(request.ctx), lastErr)
+			s.drainRecords(func(record []byte) { appendRecord(request.ctx, record) })
+			flushErr := flush(request.ctx)
+			if flushErr == nil {
+				flushErr = lastErr
+			}
+			request.result <- flushErr
 		case <-ticker.C:
 			_ = flush(context.Background())
 		case request := <-s.closeRequests:
-			drainRecords(s.records, func(record []byte) { appendRecord(request.ctx, record) })
+			s.drainRecords(func(record []byte) { appendRecord(request.ctx, record) })
 			_ = flush(request.ctx)
 			s.mu.Lock()
 			s.closeErr = lastErr
@@ -390,22 +413,16 @@ func (s *streamSender) run() {
 	}
 }
 
-func drainRecords(records <-chan []byte, appendRecord func([]byte)) {
+func (s *streamSender) drainRecords(appendRecord func([]byte)) {
 	for {
 		select {
-		case record := <-records:
+		case record := <-s.records:
+			s.markDequeued(record)
 			appendRecord(record)
 		default:
 			return
 		}
 	}
-}
-
-func errorsOrLast(current, last error) error {
-	if current != nil {
-		return current
-	}
-	return last
 }
 
 func (s *streamSender) deliver(ctx context.Context, records [][]byte, capacity int) error {

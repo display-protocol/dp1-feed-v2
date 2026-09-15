@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -113,17 +114,35 @@ func main() {
 	exec := executor.New(st, dp1, cfg.Extensions.Enabled, f, cfg.Playlist.PublicBaseURL, execOptions...)
 	srv := httpserver.New(cfg, zlog, exec, version)
 
-	// 3) Graceful shutdown on SIGINT/SIGTERM, then block on ListenAndServe.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	// 3) Keep the process logger open until graceful HTTP shutdown has finished draining handlers.
+	processContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	if err := serveUntilShutdown(processContext, srv); err != nil {
+		zlog.Fatal("serve", zap.Error(err))
+	}
+}
+
+type gracefulServer interface {
+	ListenAndServe() error
+	Shutdown(context.Context) error
+}
+
+// serveUntilShutdown owns HTTP lifecycle ordering. Shutdown runs synchronously after a process signal,
+// and the function does not return to main's deferred logger close until active handlers have drained.
+func serveUntilShutdown(processContext context.Context, srv gracefulServer) error {
+	serveErrors := make(chan error, 1)
 	go func() {
-		<-sig
-		shctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shctx)
+		serveErrors <- srv.ListenAndServe()
 	}()
 
-	if err := srv.ListenAndServe(); err != nil {
-		zlog.Fatal("serve", zap.Error(err))
+	select {
+	case err := <-serveErrors:
+		return err
+	case <-processContext.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownErr := srv.Shutdown(shutdownContext)
+		cancel()
+		serveErr := <-serveErrors
+		return errors.Join(shutdownErr, serveErr)
 	}
 }
