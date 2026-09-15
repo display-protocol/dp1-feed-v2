@@ -30,7 +30,8 @@ alwaysApply: true
 
 ## ETag (conditional GET)
 
-- **Single-resource GETs** (`GET` one playlist, playlist-group, channel, or playlist-item by id) return a strong **`ETag`** (SHA-256 of UTF-8 JSON body) and honor **`If-None-Match`** with **`304`** when unchanged. See `docs/api_design.md` and OpenAPI.
+- **Single-resource GETs** (`GET` one playlist, playlist-group, channel, or playlist-item by id) return a strong **`ETag`** (SHA-256 of the UTF-8 JSON body — for **channels**, of the body plus the channel's current member state, so a member playlist's replace/delete changes the channel tag while its bytes stay identical) and honor **`If-None-Match`** with **`304`** when unchanged. Tags are opaque; never recompute them from the body. See `docs/api_design.md` and OpenAPI.
+- **Channel webhooks:** `channel.added` / `channel.updated` / `channel.deleted` after channel commits, and **`channel.updated` for every channel listing a playlist that is replaced or deleted** (fan-out paced within the route deadline, best-effort). Groups have none.
 - **List GETs, health/metadata:** no **`ETag`** in API v1 unless a future spec revision adds it.
 
 ## Authentication
@@ -45,7 +46,7 @@ alwaysApply: true
 - **Content-preserving:** documents are verified, co-signed, stored and served with no field added, dropped or rewritten. Not byte-identical: feed signing re-encodes and jsonb re-orders keys, both JCS-neutral, so compare via JCS/signing digest rather than raw bytes. Bodies are decoded strictly and capped (`413`).
 - **Reference-only ingest:** a referenced playlist is linked, never modified. Remote references are fetched; if the origin is unreachable (transport failure, timeout, `5xx`/`429`) the URI falls back to the playlist it last resolved to (`playlist_sources`), so an outage cannot block a group write. An origin that answers is authoritative — `404`/`410`/`403`, and a guard-refused destination, fail the write instead of reusing the cache. An unknown reference is held to the full POST bar. Reference URIs are capped at 2048 bytes.
 - **Memory bound:** resolved playlist documents for one write are capped in aggregate by `playlist.max_resolved_bytes` (default 64 MiB); the reference cap bounds count, not size, and the two multiply. Over it is `400`.
-- **Fan-out bound:** a group/channel may reference at most `playlist.max_playlist_references` playlists (default 1000), checked before resolution; over it is `400`. Reference-resolving mutations carry a request deadline.
+- **Fan-out bound:** a group/channel may reference at most `playlist.max_playlist_references` playlists (default 1000), checked before resolution; over it is `400`. Every mutating route carries a request deadline (`write_timeout - response_write_reserve`).
 - **No PATCH.** Ownership is derived from the document itself; no global key allowlist.
 - Reads public unless network-restricted; no built-in OAuth.
 

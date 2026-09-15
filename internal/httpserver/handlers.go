@@ -413,7 +413,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
 		return
 	}
-	writeBytesIndividualGET(c, body.Raw)
+	writeBytesIndividualGETWithRevision(c, body.Raw, body.MembersDigest)
 }
 
 // ReplaceChannel PUT /api/v1/channels/:id.

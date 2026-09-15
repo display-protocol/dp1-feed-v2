@@ -856,69 +856,311 @@ func (s *Store) queryPlaylistRecords(ctx context.Context, q string, args ...any)
 	return out, nil
 }
 
+// listingChannelsQuery streams one row per membership position via idx_channel_members_playlist_id.
+// Deliberately no DISTINCT / ORDER BY: the server would then have to consume the whole index range
+// before emitting its first row, and DeletePlaylist relies on the first row (or completion) arriving as
+// soon as the scan has begun — that is its signal that the statement's snapshot exists. Deduplication
+// and ordering happen in collectDistinctChannels instead, at memory proportional to the number of
+// distinct channels rather than rows.
+const listingChannelsQuery = `SELECT channel_id FROM channel_members WHERE playlist_id = $1`
+
+// collectDistinctChannels drains rows (whose first Next the caller has already issued, result hasRow)
+// into the distinct channel ids, sorted bytewise — the same order PostgreSQL's uuid type has, so callers
+// and tests see a stable order regardless of plan. Always closes rows.
+func collectDistinctChannels(rows pgx.Rows, hasRow bool) ([]uuid.UUID, error) {
+	defer rows.Close()
+	seen := map[uuid.UUID]struct{}{}
+	var ids []uuid.UUID
+	for ; hasRow; hasRow = rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list channels referencing playlist: %w", err)
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
+	}
+	slices.SortFunc(ids, func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) })
+	return ids, nil
+}
+
+// channelsListingPlaylist returns the distinct channels (sorted) whose membership lists playlistID.
+func channelsListingPlaylist(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, playlistID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.Query(ctx, listingChannelsQuery, playlistID)
+	if err != nil {
+		return nil, fmt.Errorf("list channels referencing playlist: %w", err)
+	}
+	return collectDistinctChannels(rows, rows.Next())
+}
+
+// listingReadBound caps each wait a playlist delete makes on behalf of its recipient read: obtaining a
+// spare pool connection, and the read's start on it. The read needs a second connection (see
+// listingRead); the delete must not need one. Unbounded, a delete on a pool whose other connections are
+// busy would wait for one until the route deadline and fail, where on main it succeeds with the single
+// connection it has — and a stale idle connection (a database failover; the pool does not ping on
+// acquire) would hang the start until the deadline just the same. So each wait is a small fixed slice
+// of the seconds-scale route budget — enough for the pool to hand over an idle connection or dial a new
+// one (connect + auth) to a same-region database, and for the statement to be parsed and begun — after
+// which the delete proceeds without capture: nobody is notified, the documented best-effort outcome.
+// pgxpool has no non-blocking acquire, which is why this is a timeout and not a try.
+const listingReadBound = 200 * time.Millisecond
+
+// listingRead is a recipient read on its own pool connection, run concurrently with the caller's write
+// transaction. It is how DeletePlaylist captures recipients without putting them on the delete's path.
+//
+// Why concurrent, on a separate connection: the membership rows cascade away with the playlist row
+// (migration 000005), so the listing cannot be read after commit as UpdatePlaylist does — it has to be
+// read while the rows still exist. Reading them inside the write transaction, however, puts an unbounded
+// scan (channel creation is open) on the delete's critical path: sequentially it spends route budget the
+// cascade then lacks, and any failure of it — deadline expiry mid-stream, a spilled sort canceled by an
+// operator limit — aborts the transaction and with it an owner-authorized delete. A savepoint plus a
+// statement timeout was tried and rejected for the same reason (the timeout's share of the budget was
+// still taken from the delete, and SET LOCAL overrode operator caps). Running the read on another
+// connection, in parallel with the delete, is what makes the two independent: the delete keeps the full
+// budget and exactly its failure modes from main; the read has the same budget, and its failure only
+// means nobody is notified (the store has no logger, so the error is dropped and the caller notifies
+// nobody, the documented best-effort outcome).
+//
+// Why the connection is acquired after Begin but before the lock, and only briefly: the delete must
+// wait for the read to *start* (see start) while it holds the playlist's advisory lock, and a pool
+// acquire in that window can wait on connections held by the very transactions blocked on that lock —
+// ingests referencing the playlist — which only ends at the deadline. Acquiring before the lock removes
+// that cycle; acquiring after Begin keeps the delete's own pool wait exactly what it is on main; and
+// bounding the acquire and the start (listingReadBound) keeps a busy pool, or a stale connection, from
+// turning the read's need for a second connection into a failed delete. Two early exits are therefore normal: no connection within
+// the bound, or the delete failing before the read started.
+type listingRead struct {
+	conn    *pgxpool.Conn
+	started chan struct{}    // closed once the statement has begun executing on the server (or failed)
+	result  chan []uuid.UUID // the distinct channel ids, or nil when the read failed
+	running bool
+}
+
+// acquireListingRead takes a pool connection for a read, waiting at most listingReadBound. nil — and
+// nothing held — when none could be had in time, which is the best-effort outcome, not an error.
+func (s *Store) acquireListingRead(ctx context.Context) *listingRead {
+	acquireCtx, cancel := context.WithTimeout(ctx, listingReadBound)
+	defer cancel()
+	conn, err := s.pool.Acquire(acquireCtx)
+	if err != nil {
+		return nil
+	}
+	return &listingRead{conn: conn, started: make(chan struct{}), result: make(chan []uuid.UUID, 1)}
+}
+
+// start issues the listing query on the held connection, in a goroutine that owns the connection from
+// here on. started closes once the statement's first row, or its completion, has arrived — the moment
+// its READ COMMITTED snapshot is fixed, which is all the caller waits for: one or two round trips
+// (a Parse/Describe when the statement is not yet cached on this connection, then Bind/Execute) on a
+// connection it already holds, independent of how many rows there are. READ COMMITTED gives the SELECT
+// one snapshot for its whole run, so rows the caller's cascade deletes afterwards stay visible to it even
+// after the delete commits; readers never block writers, so the caller is not held up by the read either.
+//
+// Goroutine ownership: it exits once the query returns, which ctx cancellation makes prompt (pgx cancels
+// the statement and closes this connection only). started is closed on every path and result is
+// buffered, so neither send blocks and the goroutine cannot leak when the caller stops waiting for it.
+func (r *listingRead) start(ctx context.Context, playlistID uuid.UUID) {
+	r.running = true
+	go func() {
+		defer r.conn.Release()
+		rows, err := r.conn.Query(ctx, listingChannelsQuery, playlistID)
+		if err != nil {
+			close(r.started)
+			r.result <- nil
+			return
+		}
+		hasRow := rows.Next()
+		close(r.started)
+		ids, err := collectDistinctChannels(rows, hasRow)
+		if err != nil {
+			ids = nil
+		}
+		r.result <- ids
+	}()
+}
+
+// close returns the connection when the read never ran (the caller failed before start); after start
+// the goroutine owns it and close is a no-op — the caller's context cancellation ends the read.
+func (r *listingRead) close() {
+	if r.running {
+		return
+	}
+	r.conn.Release()
+}
+
+// resolveDocumentID maps a route key onto a row id for one of the three document tables: a value that
+// parses as a UUID is the id (no slug fallback, see docs/api_design.md), anything else is a slug looked
+// up on table. ErrNotFound when a slug matches nothing.
+//
+// table is a fixed internal constant, never client input (see classifyConditionalWrite).
+func resolveDocumentID(ctx context.Context, q rowQuerier, table, idOrSlug string) (uuid.UUID, error) {
+	if id, err := uuid.Parse(idOrSlug); err == nil {
+		return id, nil
+	}
+	var rowID uuid.UUID
+	if err := q.QueryRow(ctx, "SELECT id FROM "+table+" WHERE slug = $1", idOrSlug).Scan(&rowID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf("%w", store.ErrNotFound)
+		}
+		return uuid.Nil, fmt.Errorf("lookup %s slug: %w", table, err)
+	}
+	return rowID, nil
+}
+
 // UpdatePlaylist implements store.Store (updated_at is set by trigger; item index rebuilt from body.items).
-func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
+//
+// The listing-channel read runs only when asked for (reportListing — the caller can act on the answer)
+// and AFTER the write has committed, on its own connection, and its failure is swallowed into a nil
+// listing. Recipient discovery must never decide whether the replace succeeded:
+// the set of channels listing a playlist is unbounded (channel creation is open), so a read that is
+// inside the write transaction lets an expired deadline or a query error roll back a body update the
+// owner authorized — and, having committed, returning that error would report the write as failed when
+// it is not. Notification is best-effort at every other step (see executor.notifyChannels), and a read
+// failure here is the same posture: the channels are simply not notified. Nothing is lost by leaving the
+// transaction: READ COMMITTED gives each statement its own snapshot anyway, so "same transaction" never
+// tied the listing to the UPDATE's snapshot, and there is no advisory lock on the playlist either way.
+//
+// A channel ingest that adds this playlist can therefore commit after this read started and be missing
+// from the result. That is harmless: the ingest is itself a channel write and emits its own channel
+// event, and a consumer that re-fetches on that event sees the body written here.
+// Do not "fix" it with lockDocumentID — that would serialize every playlist replace against every ingest
+// that references it, for a race whose only effect is one redundant notification the other writer
+// already sends.
+func (s *Store) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
 	const (
 		updateByID = `UPDATE playlists
 SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug)
 WHERE id = $1 AND updated_at = $3 RETURNING created_at`
-		selectIDBySlug = `SELECT id FROM playlists WHERE slug = $1`
 		clearItemIndex = `DELETE FROM playlist_item_index WHERE playlist_id = $1`
 	)
 
 	if err := requireDocument(raw, "playlist body"); err != nil {
-		return err
+		return nil, err
 	}
 	bodyJSON := []byte(raw)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var rowID uuid.UUID
-	if id, perr := uuid.Parse(idOrSlug); perr == nil {
-		rowID = id
-	} else {
-		if err := tx.QueryRow(ctx, selectIDBySlug, idOrSlug).Scan(&rowID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
-			}
-			return fmt.Errorf("lookup playlist slug: %w", err)
-		}
+	rowID, err := resolveDocumentID(ctx, tx, "playlists", idOrSlug)
+	if err != nil {
+		return nil, err
 	}
 
 	var playlistCreatedAt time.Time
 	err = tx.QueryRow(ctx, updateByID, rowID, bodyJSON, expectedUpdatedAt).Scan(&playlistCreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return classifyConditionalWrite(ctx, tx, "playlists", rowID)
+			return nil, classifyConditionalWrite(ctx, tx, "playlists", rowID)
 		}
-		return fmt.Errorf("update playlist: %w", err)
+		return nil, fmt.Errorf("update playlist: %w", err)
 	}
 	if _, err := tx.Exec(ctx, clearItemIndex, rowID); err != nil {
-		return fmt.Errorf("clear playlist_item_index: %w", err)
+		return nil, fmt.Errorf("clear playlist_item_index: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertPlaylistItemIndexFromBody, rowID, bodyJSON, playlistCreatedAt); err != nil {
-		return fmt.Errorf("insert playlist_item_index: %w", err)
+		return nil, fmt.Errorf("insert playlist_item_index: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	if !reportListing {
+		return nil, nil
+	}
+	// Post-commit, best-effort: the store has no logger, so the error is dropped here; the caller sees a
+	// nil listing and notifies nobody, which is the documented outcome for channels not reached in time.
+	listing, err := channelsListingPlaylist(ctx, s.pool, rowID)
+	if err != nil {
+		return nil, nil
+	}
+	return listing, nil
 }
 
 // DeletePlaylist implements store.Store. The delete is conditional on expectedUpdatedAt so a decision
 // made on an earlier read cannot remove a row that has since changed or been re-created (see
 // store.ErrConcurrentModification).
-func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
-	return s.deleteDocumentRow(ctx, "playlists", idOrSlug, expectedUpdatedAt)
+//
+// The write transaction is exactly the shared conditional delete (lock → conditional DELETE with the
+// membership cascade → tombstone → commit). Recipient capture, when asked for, is not part of it: the
+// listing is read on a separate connection, concurrently, and only collected after commit, so its size
+// can neither spend the delete's budget nor fail it (see listingRead for why that, and not a read inside
+// the transaction, is what keeps an unbounded third-party membership set from vetoing an owner's
+// delete). What the delete does spend on capture is bounded and independent of the row count: at most
+// listingReadBound to obtain the read's connection and, again, at most listingReadBound for the read to
+// *start* — its snapshot has to exist before the cascade removes the rows.
+//
+// Ordering is load-bearing: begin → resolve → acquire read connection (bounded) → lock → read started →
+// delete. The read connection is taken before the lock so the delete never waits on the pool while
+// holding it (see listingRead), and the query is issued only after the lock. A concurrent group/channel
+// ingest that references this playlist takes the same advisory lock before inserting membership
+// (insertMissingPlaylistsBatch), so it either committed before our lock — and its rows are in the read's
+// snapshot — or blocks until we commit and then fails on the tombstone we wrote; no channel that ever
+// listed this playlist can be missed. Exceptions, all best-effort by contract: when no spare connection
+// could be had within the bound (a saturated or single-connection pool) no read is started; when the
+// read has not started within the bound, or the delete does not apply, the read is abandoned — its
+// context canceled, its result never collected.
+func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rowID, err := resolveDocumentID(ctx, tx, "playlists", idOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	var read *listingRead
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	if reportListing {
+		if read = s.acquireListingRead(readCtx); read != nil {
+			defer read.close()
+		}
+	}
+	if err := lockDocumentID(ctx, tx, "playlists", rowID); err != nil {
+		return nil, err
+	}
+	if read != nil {
+		read.start(readCtx, rowID)
+		// The snapshot must exist before the cascade removes the rows, so wait for the start — but only
+		// within the bound: past it the read is abandoned (its result could carry a snapshot taken after
+		// the cascade, so it must not be collected). If ctx expires first the delete below fails on its
+		// own, exactly as it would on main.
+		select {
+		case <-read.started:
+		case <-time.After(listingReadBound):
+			cancelRead()
+			read = nil
+		case <-ctx.Done():
+		}
+	}
+	if err := deleteLockedDocument(ctx, tx, "playlists", rowID, expectedUpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	if read == nil {
+		return nil, nil
+	}
+	return <-read.result, nil
 }
 
-// deleteDocumentRow is the shared conditional delete for the three document tables. It resolves the row
-// id (accepting a UUID or a slug), deletes only when updated_at still matches what the caller authorized
-// against, and classifies a zero-row delete as ErrConcurrentModification or ErrNotFound.
+// deleteDocumentRow is the shared conditional delete for playlist-groups and channels (playlists have
+// their own, see DeletePlaylist). It resolves the row id (accepting a UUID or a slug), deletes only when
+// updated_at still matches what the caller authorized against, and classifies a zero-row delete as
+// ErrConcurrentModification or ErrNotFound.
 //
 // table is a fixed internal constant, never client input (see classifyConditionalWrite).
 func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, expectedUpdatedAt time.Time) error {
@@ -928,24 +1170,27 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var rowID uuid.UUID
-	if id, perr := uuid.Parse(idOrSlug); perr == nil {
-		rowID = id
-	} else {
-		if err := tx.QueryRow(ctx, "SELECT id FROM "+table+" WHERE slug = $1", idOrSlug).Scan(&rowID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
-			}
-			return fmt.Errorf("lookup %s slug: %w", table, err)
-		}
+	rowID, err := resolveDocumentID(ctx, tx, table, idOrSlug)
+	if err != nil {
+		return err
 	}
-
-	// Lock before deleting so a concurrent replaying create waits here rather than on the row key, and
-	// therefore re-reads the tombstone this transaction is about to write.
 	if err := lockDocumentID(ctx, tx, table, rowID); err != nil {
 		return err
 	}
+	if err := deleteLockedDocument(ctx, tx, table, rowID, expectedUpdatedAt); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
 
+// deleteLockedDocument runs the conditional DELETE, classifies a zero-row result, and writes the
+// tombstone in the caller's transaction. The caller must already hold lockDocumentID(table, rowID):
+// locking before deleting makes a concurrent replaying create wait here rather than on the row key, so it
+// re-reads the tombstone this transaction is about to write instead of resurrecting the id.
+func deleteLockedDocument(ctx context.Context, tx pgx.Tx, table string, rowID uuid.UUID, expectedUpdatedAt time.Time) error {
 	ct, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE id = $1 AND updated_at = $2", rowID, expectedUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", table, err)
@@ -956,9 +1201,6 @@ func (s *Store) deleteDocumentRow(ctx context.Context, table, idOrSlug string, e
 	// Same transaction as the delete: a tombstone that could be lost would leave the id resurrectable.
 	if _, err := tx.Exec(ctx, tombstoneInsert, table, rowID); err != nil {
 		return fmt.Errorf("record %s tombstone: %w", table, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -1439,17 +1681,37 @@ VALUES ($1, $2, $3::jsonb)`
 }
 
 // GetChannel implements store.Store.
+//
+// The member digest is a correlated subquery in the same statement as the document, so the document and
+// the member state it is paired with come from one snapshot. Each member contributes
+// "<playlist_id>@<updated_at as epoch microseconds>" in position order; the string is hashed in SQL so the
+// column is a fixed 64 hex characters however many members the channel has (this record is also loaded by
+// the executor's channel replace/delete just to read UpdatedAt). Epoch microseconds rather than a text
+// cast: timestamptz::text depends on the session TimeZone/DateStyle, which would make the digest — and so
+// the ETag — vary by pool connection. ORDER BY position is total because (channel_id, position) is the
+// PK; a playlist listed twice appears twice, mirroring the rows. Membership ingest never touches an
+// existing playlist row, so re-ingesting a channel leaves the digest alone; a member replace bumps its
+// updated_at (strictly increasing, migration 000008) and a member delete cascades its row away, so both
+// change it.
 func (s *Store) GetChannel(ctx context.Context, idOrSlug string) (*store.ChannelRecord, error) {
 	const (
+		membersDigest = `COALESCE((
+	SELECT encode(sha256(convert_to(
+		string_agg(m.playlist_id::text || '@' || (extract(epoch FROM p.updated_at) * 1000000)::bigint::text,
+		           ',' ORDER BY m.position), 'UTF8')), 'hex')
+	FROM channel_members m
+	JOIN playlists p ON p.id = m.playlist_id
+	WHERE m.channel_id = c.id
+), '')`
 		byID = `
-SELECT id, slug, body, created_at, updated_at
-FROM channels
-WHERE id = $1`
+SELECT c.id, c.slug, c.body, c.created_at, c.updated_at, ` + membersDigest + `
+FROM channels c
+WHERE c.id = $1`
 
 		bySlug = `
-SELECT id, slug, body, created_at, updated_at
-FROM channels
-WHERE slug = $1`
+SELECT c.id, c.slug, c.body, c.created_at, c.updated_at, ` + membersDigest + `
+FROM channels c
+WHERE c.slug = $1`
 	)
 
 	id, err := uuid.Parse(idOrSlug)
@@ -1462,7 +1724,7 @@ WHERE slug = $1`
 
 	var rec store.ChannelRecord
 	var raw []byte
-	if err := row.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+	if err := row.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt, &rec.MembersDigest); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w", store.ErrNotFound)
 		}

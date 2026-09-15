@@ -102,17 +102,18 @@ func (mr *MockStoreMockRecorder) DeleteChannel(ctx, idOrSlug, expectedUpdatedAt 
 }
 
 // DeletePlaylist mocks base method.
-func (m *MockStore) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
+func (m *MockStore) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeletePlaylist", ctx, idOrSlug, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "DeletePlaylist", ctx, idOrSlug, expectedUpdatedAt, reportListing)
+	ret0, _ := ret[0].([]uuid.UUID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // DeletePlaylist indicates an expected call of DeletePlaylist.
-func (mr *MockStoreMockRecorder) DeletePlaylist(ctx, idOrSlug, expectedUpdatedAt any) *gomock.Call {
+func (mr *MockStoreMockRecorder) DeletePlaylist(ctx, idOrSlug, expectedUpdatedAt, reportListing any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePlaylist", reflect.TypeOf((*MockStore)(nil).DeletePlaylist), ctx, idOrSlug, expectedUpdatedAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeletePlaylist", reflect.TypeOf((*MockStore)(nil).DeletePlaylist), ctx, idOrSlug, expectedUpdatedAt, reportListing)
 }
 
 // DeletePlaylistGroup mocks base method.
@@ -342,17 +343,18 @@ func (mr *MockStoreMockRecorder) UpdateChannel(ctx, idOrSlug, in, expectedUpdate
 }
 
 // UpdatePlaylist mocks base method.
-func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time) error {
+func (m *MockStore) UpdatePlaylist(ctx context.Context, idOrSlug string, raw json.RawMessage, expectedUpdatedAt time.Time, reportListing bool) ([]uuid.UUID, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, raw, expectedUpdatedAt)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "UpdatePlaylist", ctx, idOrSlug, raw, expectedUpdatedAt, reportListing)
+	ret0, _ := ret[0].([]uuid.UUID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // UpdatePlaylist indicates an expected call of UpdatePlaylist.
-func (mr *MockStoreMockRecorder) UpdatePlaylist(ctx, idOrSlug, raw, expectedUpdatedAt any) *gomock.Call {
+func (mr *MockStoreMockRecorder) UpdatePlaylist(ctx, idOrSlug, raw, expectedUpdatedAt, reportListing any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePlaylist", reflect.TypeOf((*MockStore)(nil).UpdatePlaylist), ctx, idOrSlug, raw, expectedUpdatedAt)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePlaylist", reflect.TypeOf((*MockStore)(nil).UpdatePlaylist), ctx, idOrSlug, raw, expectedUpdatedAt, reportListing)
 }
 
 // UpdatePlaylistGroup mocks base method.

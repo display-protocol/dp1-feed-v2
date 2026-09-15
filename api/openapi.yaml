@@ -272,6 +272,9 @@ paths:
         `curator`, by a stored owner and be fresh. 403 if the signer is not an owner acting as curator, an
         owner was removed, or an added owner did not consent; 409 if the resource changed since it was
         authorized.
+
+        Every channel that lists this playlist changes its `ETag` and, when webhooks are configured,
+        receives `channel.updated`.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -311,7 +314,8 @@ paths:
         could otherwise veto an owner's deletion indefinitely. Their membership links are removed with the
         playlist. Those documents are signed and therefore left untouched — they keep listing the deleted
         playlist's URI, which now resolves to `404`, and a later PUT of one will fail to resolve it until
-        its owner publishes an updated document.
+        its owner publishes an updated document. Every channel that listed it changes its `ETag` and, when
+        webhooks are configured, receives `channel.updated`.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
       requestBody:
@@ -559,7 +563,12 @@ paths:
       description: |
         Returns a single channel by UUID or slug (requires extensions).
 
-        Strong ETag and optional `If-None-Match` (304) apply as for other single-resource GETs.
+        Strong ETag and optional `If-None-Match` (304) apply as for other single-resource GETs, with one
+        difference: a channel's tag covers the response bytes **and** the channel's current member state
+        (each listed playlist's id and stored generation, in membership order). Replacing or deleting a
+        listed playlist therefore changes the tag while the served document — signed, listing members by
+        URL only — stays byte-identical. A conditional GET with the old tag then returns 200 with the same
+        body and a new tag; that is the signal to re-check the members.
       parameters:
         - $ref: '#/components/parameters/IdOrSlug'
         - $ref: '#/components/parameters/IfNoneMatch'
@@ -784,8 +793,11 @@ components:
   headers:
     IndividualGETETag:
       description: >
-        Strong entity-tag for the exact UTF-8 JSON response bytes: a quoted hexadecimal SHA-256 digest.
-        Send the same value in If-None-Match for conditional GETs.
+        Strong entity-tag: a quoted hexadecimal SHA-256 digest. For playlists, playlist-groups and
+        playlist-items it is computed over the exact UTF-8 JSON response bytes. For channels it also covers
+        the channel's current member state, so it changes when a listed playlist is replaced or deleted
+        even though the channel document does not. Opaque: send the same value back in If-None-Match for
+        conditional GETs and never recompute it from the body.
       schema:
         type: string
 

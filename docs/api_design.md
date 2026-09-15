@@ -50,11 +50,21 @@ would let a lookup resolve a value a filter could not, or vice versa.
 
 **Semantics:**
 
-- **`ETag` response header:** Strong entity-tag over the **exact UTF-8 JSON bytes** of the response body: quoted **SHA-256** (hexadecimal digest). The tag changes when the encoded JSON would change.
+- **`ETag` response header:** Strong entity-tag, a quoted **SHA-256** hexadecimal digest.
+  - For **playlists, playlist-groups and playlist-items** it is computed over the **exact UTF-8 JSON bytes** of the response body, so it changes exactly when the encoded JSON would change.
+  - For **channels** it is computed over those bytes **plus the channel's current member state** — each listed playlist's id and stored generation, in membership order. A channel document lists its members by URL only and is served byte-for-byte as signed, so the bytes alone cannot reflect a member being replaced or deleted; the tag does. Consequence: after a member `PUT` or `DELETE`, a conditional `GET` with the old tag returns **`200`** with a **byte-identical** body and a **new** tag. That `200` is the signal to re-check the channel's members; do not treat an unchanged body as "nothing changed". The channel's own `updated_at`-based generation (the `409` check and the membership cursor) does **not** move on a member edit.
 - **`If-None-Match` request header (optional):** If the value matches the current ETag for that resource, the server responds with **`304 Not Modified`** and an **empty** body. This avoids re-downloading unchanged documents.
 - **`If-None-Match: *`** does not produce 304 when a representation exists (normal HTTP semantics).
 
-**Compatibility:** ETag values are opaque; clients should store and resend them verbatim. Future list-ETag support, if added, will be documented separately in OpenAPI and this document.
+**Compatibility:** ETag values are opaque; clients should store and resend them verbatim and must not recompute them from the body. Future list-ETag support, if added, will be documented separately in OpenAPI and this document.
+
+---
+
+## Channel notifications (webhooks)
+
+When notification clients are configured (see `DEVELOPMENT.md`), the feed delivers a signed `channel.added`, `channel.updated` or `channel.deleted` event carrying the canonical channel URL after the mutation commits. Events are best-effort and request-path only.
+
+**A member playlist write is a channel change.** `PUT` or `DELETE` of a playlist emits **`channel.updated` once for every channel that lists it**, in addition to changing each such channel's `ETag` (above). The event does not say which member changed or whether the channel document itself changed — the document bytes may be identical — so a consumer should re-fetch the channel and its members rather than short-circuit on a document hash. After a member `DELETE` the channel keeps listing the deleted URI, which now resolves to `404` (see "Reference-only ingest"). Fan-out is paced, not capped: with many listing channels, delivery proceeds a few at a time within the request's remaining deadline, and channels not reached in time are not notified — the same best-effort posture every channel event has. Playlist-groups have no notifications.
 
 ---
 
