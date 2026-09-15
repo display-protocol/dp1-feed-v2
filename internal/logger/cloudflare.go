@@ -153,6 +153,17 @@ func (c *cloudflareCore) record(entry zapcore.Entry, fields []zapcore.Field) (cl
 			delete(encoder.Fields, "exception")
 		}
 	}
+	if entry.Level >= zapcore.PanicLevel && record.Exception == nil {
+		exceptionType := "panic"
+		if entry.Level == zapcore.FatalLevel {
+			exceptionType = "fatal"
+		}
+		record.Exception = map[string]any{
+			"type":    exceptionType,
+			"message": entry.Message,
+			"stack":   entry.Stack,
+		}
+	}
 	if entry.Caller.Defined {
 		encoder.Fields["caller"] = entry.Caller.TrimmedPath()
 	}

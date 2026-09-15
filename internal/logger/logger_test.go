@@ -357,6 +357,71 @@ func TestCloudflareCoreFlushesPanicLevelBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestCloudflareDirectZapPanicUsesExceptionSchemaField(t *testing.T) {
+	t.Parallel()
+
+	bodies := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		bodies <- body
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	log, shutdown, err := New(Config{
+		Output: io.Discard,
+		Cloudflare: StreamConfig{
+			URL: server.URL, APIKey: "send-token", Service: "dp1-feed-v2", Environment: "test",
+			HTTPClient: server.Client(), flushInterval: time.Hour,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		log.Panic("boom")
+	}()
+	if recovered == nil {
+		t.Fatal("log.Panic did not panic")
+	}
+	if err := shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	var records []map[string]any
+	if err := json.Unmarshal(<-bodies, &records); err != nil {
+		t.Fatalf("decode records: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
+	}
+	exception, ok := records[0]["exception"].(map[string]any)
+	if !ok {
+		t.Fatalf("exception = %#v, want object", records[0]["exception"])
+	}
+	if got := exception["type"]; got != "panic" {
+		t.Errorf("exception.type = %#v, want panic", got)
+	}
+	if got := exception["message"]; got != "boom" {
+		t.Errorf("exception.message = %#v, want boom", got)
+	}
+	if stack, ok := exception["stack"].(string); !ok || stack == "" {
+		t.Errorf("exception.stack = %#v, want non-empty string", exception["stack"])
+	}
+	if structured, ok := records[0]["structured"].(map[string]any); ok {
+		if _, exists := structured["stacktrace"]; exists {
+			t.Error("panic stack must be encoded under exception, not structured")
+		}
+	}
+}
+
 func TestCloudflareCoreFlushesAcceptedRecordsWhenTerminalRecordCannotEnqueue(t *testing.T) {
 	t.Parallel()
 
