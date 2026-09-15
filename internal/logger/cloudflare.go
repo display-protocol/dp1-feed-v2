@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap/zapcore"
@@ -22,6 +23,7 @@ const (
 	defaultMaxBatchBytes  = 4 << 20
 	defaultMaxQueueBytes  = 8 << 20
 	defaultRequestTimeout = 5 * time.Second
+	defaultDropReportRate = time.Minute
 )
 
 type cloudflareRecord struct {
@@ -75,14 +77,14 @@ func (c *cloudflareCore) Write(entry zapcore.Entry, fields []zapcore.Field) erro
 	allFields = append(allFields, fields...)
 	record, err := c.record(entry, allFields)
 	if err != nil {
-		return err
-	}
-	raw, err := json.Marshal(record)
-	if err != nil {
-		return fmt.Errorf("encode Cloudflare log record: %w", err)
-	}
-	if err := c.sender.enqueue(raw); err != nil {
-		return err
+		c.sender.reportDrop(err)
+	} else {
+		raw, marshalErr := json.Marshal(record)
+		if marshalErr != nil {
+			c.sender.reportDrop(fmt.Errorf("encode Cloudflare log record: %w", marshalErr))
+		} else if enqueueErr := c.sender.enqueue(raw); enqueueErr != nil {
+			c.sender.reportDrop(enqueueErr)
+		}
 	}
 
 	// Zap's fatal and panic hooks terminate control flow immediately after Core.Write. Flush those entries
@@ -218,16 +220,18 @@ type streamSender struct {
 	records       chan []byte
 	flushes       chan flushRequest
 	closeRequests chan closeRequest
+	dropNotices   chan error
 	done          chan struct{}
 	batchSize     int
 	flushInterval time.Duration
 	maxBatchBytes int
 	maxQueueBytes int64
 
-	mu           sync.Mutex
-	closed       bool
-	pendingBytes int64
-	closeErr     error
+	mu             sync.Mutex
+	closed         bool
+	pendingBytes   int64
+	closeErr       error
+	droppedRecords atomic.Uint64
 }
 
 func newStreamSender(cfg StreamConfig, diagnostic io.Writer) (*streamSender, error) {
@@ -275,6 +279,7 @@ func newStreamSender(cfg StreamConfig, diagnostic io.Writer) (*streamSender, err
 		records:       make(chan []byte, queueSize),
 		flushes:       make(chan flushRequest),
 		closeRequests: make(chan closeRequest, 1),
+		dropNotices:   make(chan error, 1),
 		done:          make(chan struct{}),
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
@@ -283,6 +288,17 @@ func newStreamSender(cfg StreamConfig, diagnostic io.Writer) (*streamSender, err
 	}
 	go sender.run()
 	return sender, nil
+}
+
+// reportDrop records local admission failures without writing to stderr or returning an error on the
+// caller's log path. The delivery goroutine owns diagnostics so queue pressure cannot add synchronous
+// IO to request handling; the single pending notice also coalesces an error storm.
+func (s *streamSender) reportDrop(err error) {
+	s.droppedRecords.Add(1)
+	select {
+	case s.dropNotices <- err:
+	default:
+	}
 }
 
 func (s *streamSender) enqueue(record []byte) error {
@@ -362,6 +378,22 @@ func (s *streamSender) run() {
 	batch := make([][]byte, 0, s.batchSize)
 	batchBytes := 2
 	var lastErr error
+	var lastDropReport time.Time
+	reportDrop := func(err error) {
+		// Admission failures can repeat for every request while the queue is saturated. Emit at most one
+		// diagnostic per minute; droppedRecords retains the complete in-process count.
+		now := time.Now()
+		if !lastDropReport.IsZero() && now.Sub(lastDropReport) < defaultDropReportRate {
+			return
+		}
+		lastDropReport = now
+		_, _ = fmt.Fprintf(
+			s.diagnostic,
+			"cloudflare log record dropped (total dropped: %d): %v\n",
+			s.droppedRecords.Load(),
+			err,
+		)
+	}
 	flush := func(ctx context.Context) error {
 		if len(batch) == 0 {
 			return nil
@@ -401,6 +433,8 @@ func (s *streamSender) run() {
 			request.result <- flushErr
 		case <-ticker.C:
 			_ = flush(context.Background())
+		case err := <-s.dropNotices:
+			reportDrop(err)
 		case request := <-s.closeRequests:
 			s.drainRecords(func(record []byte) { appendRecord(request.ctx, record) })
 			_ = flush(request.ctx)

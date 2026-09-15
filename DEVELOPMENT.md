@@ -281,7 +281,7 @@ The `.env` file contains all necessary environment variables for Docker deployme
 - `DP1_FEED_LOG_SERVICE` — Stable service name in remote records (default `dp1-feed-v2`)
 - `DP1_FEED_LOG_ENVIRONMENT` — Stable deployment environment; required when Cloudflare streaming is enabled
 - `DP1_FEED_CLOUDFLARE_STREAM_URL` — Optional Cloudflare Pipeline Stream ingest URL
-- `DP1_FEED_CLOUDFLARE_API_KEY` — Producer-specific Cloudflare token with `Pipelines Send`; required with the Stream URL
+- `DP1_FEED_CLOUDFLARE_API_KEY` — Producer-specific Cloudflare token with `Workers Pipeline Send`; required with the Stream URL
 - `DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX` — P-256 private scalar used only to sign webhooks
 - `DP1_FEED_NOTIFICATION_CLIENTS` — Optional JSON destination list
 

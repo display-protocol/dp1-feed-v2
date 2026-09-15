@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -60,6 +61,8 @@ func TestNewWritesStdoutAndCloudflareSchema(t *testing.T) {
 
 	log.Named("http.request").With(zap.String("release", "2026.09.15")).Error("request failed",
 		zap.String("event", "request_failed"),
+		zap.String("trace_id", "trace-123"),
+		zap.String("span_id", "span-123"),
 		zap.String("request_id", "req-123"),
 		zap.Int("status", http.StatusInternalServerError),
 		zap.Any("context", map[string]any{"region": "wnam"}),
@@ -96,16 +99,7 @@ func TestNewWritesStdoutAndCloudflareSchema(t *testing.T) {
 		t.Fatalf("record count = %d, want 1", len(records))
 	}
 	record := records[0]
-	allowedKeys := map[string]bool{
-		"timestamp": true, "level": true, "service": true, "environment": true, "message": true,
-		"logger": true, "event": true, "trace_id": true, "span_id": true, "request_id": true,
-		"structured": true, "context": true, "exception": true,
-	}
-	for key := range record {
-		if !allowedKeys[key] {
-			t.Errorf("unexpected top-level schema field %q", key)
-		}
-	}
+	validateCloudflareRecordAgainstCanonicalSchema(t, record)
 	for key, want := range map[string]any{
 		"level":       "error",
 		"service":     "dp1-feed-v2",
@@ -113,6 +107,8 @@ func TestNewWritesStdoutAndCloudflareSchema(t *testing.T) {
 		"message":     "request failed",
 		"logger":      "http.request",
 		"event":       "request_failed",
+		"trace_id":    "trace-123",
+		"span_id":     "span-123",
 		"request_id":  "req-123",
 	} {
 		if got := record[key]; got != want {
@@ -139,6 +135,73 @@ func TestNewWritesStdoutAndCloudflareSchema(t *testing.T) {
 	}
 	if _, exists := structured["error"]; exists {
 		t.Error("error must be encoded under exception, not structured")
+	}
+}
+
+func validateCloudflareRecordAgainstCanonicalSchema(t *testing.T, record map[string]any) {
+	t.Helper()
+
+	// This fixture is pinned from ff-logging's immutable service_logs_stream contract at commit fb9c4fd.
+	rawSchema, err := os.ReadFile("testdata/service-log-schema.json")
+	if err != nil {
+		t.Fatalf("read canonical schema fixture: %v", err)
+	}
+	var schema struct {
+		Fields []struct {
+			Name     string `json:"name"`
+			Type     string `json:"type"`
+			Required bool   `json:"required"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(rawSchema, &schema); err != nil {
+		t.Fatalf("decode canonical schema fixture: %v", err)
+	}
+
+	fields := make(map[string]struct {
+		typeName string
+		required bool
+	}, len(schema.Fields))
+	for _, field := range schema.Fields {
+		fields[field.Name] = struct {
+			typeName string
+			required bool
+		}{typeName: field.Type, required: field.Required}
+	}
+	for name, field := range fields {
+		value, present := record[name]
+		if field.required && !present {
+			t.Errorf("required schema field %q is absent", name)
+			continue
+		}
+		if !present {
+			continue
+		}
+		switch field.typeName {
+		case "timestamp":
+			text, ok := value.(string)
+			if !ok {
+				t.Errorf("schema field %q has type %T, want timestamp string", name, value)
+				continue
+			}
+			if _, err := time.Parse(time.RFC3339Nano, text); err != nil {
+				t.Errorf("schema field %q is not an RFC 3339 timestamp: %v", name, err)
+			}
+		case "string":
+			if _, ok := value.(string); !ok {
+				t.Errorf("schema field %q has type %T, want string", name, value)
+			}
+		case "json":
+			if _, ok := value.(map[string]any); !ok {
+				t.Errorf("schema field %q has type %T, want JSON object", name, value)
+			}
+		default:
+			t.Errorf("canonical schema fixture has unsupported type %q for %q", field.typeName, name)
+		}
+	}
+	for name := range record {
+		if _, ok := fields[name]; !ok {
+			t.Errorf("record contains field %q outside the canonical schema", name)
+		}
 	}
 }
 
@@ -204,15 +267,57 @@ func TestCloudflareRecordHandlesOptionalObjectAndStackFields(t *testing.T) {
 	}
 }
 
-func TestCloudflareCoreRejectsUnencodableStructuredField(t *testing.T) {
+func TestCloudflareCoreDropsUnencodableRemoteCopyWithoutWriteError(t *testing.T) {
 	t.Parallel()
 
-	core := &cloudflareCore{level: zapcore.DebugLevel, service: "dp1-feed-v2", environment: "test"}
+	sender := &streamSender{dropNotices: make(chan error, 1)}
+	core := &cloudflareCore{
+		level: zapcore.DebugLevel, service: "dp1-feed-v2", environment: "test", sender: sender,
+	}
 	err := core.Write(zapcore.Entry{Level: zapcore.InfoLevel, Message: "bad field"}, []zapcore.Field{
 		zap.Reflect("unsupported", make(chan int)),
 	})
-	if err == nil || !strings.Contains(err.Error(), "encode Cloudflare log record") {
-		t.Fatalf("Write error = %v", err)
+	if err != nil {
+		t.Fatalf("Write error = %v, want nil for a dropped remote copy", err)
+	}
+	if got := sender.droppedRecords.Load(); got != 1 {
+		t.Fatalf("dropped records = %d, want 1", got)
+	}
+	select {
+	case dropErr := <-sender.dropNotices:
+		if !strings.Contains(dropErr.Error(), "encode Cloudflare log record") {
+			t.Fatalf("drop error = %v", dropErr)
+		}
+	default:
+		t.Fatal("drop notice was not queued")
+	}
+}
+
+func TestCloudflareCoreQueueOverflowDoesNotReachZapErrorOutput(t *testing.T) {
+	t.Parallel()
+
+	sender := &streamSender{
+		records:       make(chan []byte, 1),
+		dropNotices:   make(chan error, 1),
+		maxBatchBytes: 1024,
+		maxQueueBytes: 1024,
+	}
+	if err := sender.enqueue([]byte(`{"message":"occupies queue"}`)); err != nil {
+		t.Fatalf("fill queue: %v", err)
+	}
+	core := &cloudflareCore{
+		level: zapcore.DebugLevel, service: "dp1-feed-v2", environment: "test", sender: sender,
+	}
+	var zapErrors bytes.Buffer
+	log := zap.New(core, zap.ErrorOutput(zapcore.AddSync(&zapErrors)))
+
+	log.Info("remote copy is dropped")
+
+	if got := zapErrors.String(); got != "" {
+		t.Fatalf("Zap error output = %q, want empty", got)
+	}
+	if got := sender.droppedRecords.Load(); got != 1 {
+		t.Fatalf("dropped records = %d, want 1", got)
 	}
 }
 
