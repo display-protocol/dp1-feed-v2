@@ -300,7 +300,10 @@ schema does not describe the field and DP-1 tolerates unknown members, so it is 
 unchecked. Either way the value is part of the signed payload and is preserved as sent.
 
 Bodies are also capped by `server.max_request_bytes` (default 5 MiB); exceeding it is **`413`**
-`payload_too_large`, enforced before the body is buffered for authentication.
+`payload_too_large`, enforced before the body is buffered for authentication. The server buffers at most
+one byte past the cap before answering, and closes the connection after the `413` (`Connection: close`):
+the remainder is discarded, never buffered — at most 256 KiB of it is read, or none when the declared
+`Content-Length` leaves more than that — and the connection is not reused.
 
 - **Reads** are unauthenticated by default (health, lists, gets). Deployment may still restrict network access.
 - **No global allowlist.** "Owner" is derived from the document itself (its declared curators/publisher, else its owner-role signers), not a configured key list: anyone can create (and thereby own) new resources, but only an owner can replace or delete one. Front with a gateway if you need to restrict who may create.
@@ -409,7 +412,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
 | **409** | `conflict` | `POST` collided with a **live** resource: the `id` or `slug` is already taken. A lost-response retry — `GET` the resource; a slug collision needs a different `slug`. Do **not** republish under a new id. |
 | **409** | `conflict` | `POST` named an id this feed has already **deleted** (tombstoned); ids are not reusable — create under a new id. Distinct from the live collision above, and the only 409 where a new id is the right action. |
-| **413** | `payload_too_large` | Request body exceeds `server.max_request_bytes` (enforced before the body is buffered). |
+| **413** | `payload_too_large` | Request body exceeds `server.max_request_bytes` (enforced before the body is buffered; the connection is closed after the response). |
 | **500** | `internal_error` | Unhandled or unexpected failure (message may contain detail in development; do not rely on it across versions). |
 
 Clients should branch on **`error`** (stable) and treat **`message`** as diagnostic text, not a long-term contract.

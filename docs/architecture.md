@@ -82,6 +82,7 @@ Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membersh
 
 ```text
 POST /api/v1/playlists
+  → http.MaxBytesHandler (on the http.Server, ahead of gin): body capped at server.max_request_bytes, 413 beyond it
   → RequireSignatures: body must carry a non-empty signatures[]
   → Parse JSON into models
   → Executor: verify signatures + owner-role authority → feed co-sign (dp1svc) → validate → store
