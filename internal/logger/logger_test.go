@@ -357,6 +357,75 @@ func TestCloudflareCoreFlushesPanicLevelBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestCloudflareCoreFlushesAcceptedRecordsWhenTerminalRecordCannotEnqueue(t *testing.T) {
+	t.Parallel()
+
+	firstRequestStarted := make(chan struct{})
+	releaseFirstRequest := make(chan struct{})
+	bodies := make(chan []byte, 2)
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		bodies <- body
+		if requests.Add(1) == 1 {
+			close(firstRequestStarted)
+			<-releaseFirstRequest
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	sender, err := newStreamSender(StreamConfig{
+		URL: server.URL, APIKey: "send-token", Service: "dp1-feed-v2", Environment: "test",
+		HTTPClient: server.Client(), batchSize: 1, queueSize: 1, flushInterval: time.Hour,
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("newStreamSender: %v", err)
+	}
+	if err := sender.enqueue([]byte(`{"message":"in flight"}`)); err != nil {
+		t.Fatalf("enqueue in-flight record: %v", err)
+	}
+	<-firstRequestStarted
+	if err := sender.enqueue([]byte(`{"message":"accepted backlog"}`)); err != nil {
+		t.Fatalf("enqueue accepted backlog: %v", err)
+	}
+
+	core := &cloudflareCore{
+		level: zapcore.DebugLevel, service: "dp1-feed-v2", environment: "test", sender: sender,
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- core.Write(zapcore.Entry{Level: zapcore.PanicLevel, Message: "queue is full"}, nil)
+	}()
+	select {
+	case err := <-writeDone:
+		t.Fatalf("terminal Write returned before the admitted backlog could flush: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirstRequest)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("terminal Write: %v", err)
+	}
+	if got := sender.droppedRecords.Load(); got != 1 {
+		t.Fatalf("dropped records = %d, want terminal record only", got)
+	}
+	if err := sender.close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	firstBody := <-bodies
+	secondBody := <-bodies
+	if !bytes.Contains(firstBody, []byte("in flight")) {
+		t.Fatalf("first request body = %s", firstBody)
+	}
+	if !bytes.Contains(secondBody, []byte("accepted backlog")) {
+		t.Fatalf("second request body = %s", secondBody)
+	}
+}
+
 func TestCloudflareBatchesRecords(t *testing.T) {
 	t.Parallel()
 
