@@ -1717,7 +1717,11 @@ components:
                 message: document id was deleted and cannot be reused
 
     PayloadTooLarge:
-      description: The request body exceeds the configured size limit (server.max_request_bytes).
+      description: |
+        The request body exceeds the configured size limit (server.max_request_bytes). The limit is
+        enforced before the body is buffered for authentication, so it applies to unauthenticated
+        requests too. The connection is closed after this response (`Connection: close`) and is not
+        reused; the remainder of the body is discarded, not buffered.
       content:
         application/json:
           schema:

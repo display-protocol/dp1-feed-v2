@@ -59,7 +59,7 @@ func doRequest(t *testing.T, srv *Server, method, path string, body any, headers
 		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
-	srv.engine.ServeHTTP(rec, req)
+	srv.srv.Handler.ServeHTTP(rec, req)
 	if rec.Code != wantStatus {
 		t.Fatalf("%s %s: status=%d want %d body=%s", method, path, rec.Code, wantStatus, rec.Body.String())
 	}

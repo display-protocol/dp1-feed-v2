@@ -3,7 +3,9 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -240,5 +242,158 @@ func TestRequireSignatures(t *testing.T) {
 				t.Error("handler should not be called when signatures are absent")
 			}
 		})
+	}
+}
+
+// endlessBody is a request body that never reaches EOF on its own and counts how much of it was pulled.
+// It is how the body-cap tests distinguish "rejected after reading the cap" from "rejected after reading
+// the request". budget is the most it will hand over before failing the read: a missing cap then shows
+// up as a wrong status and a byte count, not as a test that never returns.
+type endlessBody struct {
+	budget int64
+	read   int64
+}
+
+var errBodyBudgetExhausted = errors.New("endlessBody: read past the test budget; is the body cap missing?")
+
+func (b *endlessBody) Read(p []byte) (int, error) {
+	if b.read >= b.budget {
+		return 0, errBodyBudgetExhausted
+	}
+	for i := range p {
+		p[i] = ' '
+	}
+	b.read += int64(len(p))
+	return len(p), nil
+}
+
+func (b *endlessBody) Close() error { return nil }
+
+// signedBodyOfSize returns a body RequireSignatures accepts, padded to exactly n bytes.
+func signedBodyOfSize(t *testing.T, n int) []byte {
+	t.Helper()
+	const shape = `{"signatures":[{"kid":"did:key:abc","alg":"ed25519","sig":"%s"}]}`
+	pad := n - len(shape) + len("%s")
+	if pad < 0 {
+		t.Fatalf("size %d too small for the signed envelope", n)
+	}
+	body := fmt.Sprintf(shape, strings.Repeat("x", pad))
+	if len(body) != n {
+		t.Fatalf("padding math: want %d bytes, got %d", n, len(body))
+	}
+	return []byte(body)
+}
+
+// TestRequireSignatures_BodyCap covers how the pre-auth read reports the cap New installs around it: an
+// oversize body must fail 413 after at most cap+1 bytes have been pulled from the wire, and a body at
+// the cap must pass through untouched.
+func TestRequireSignatures_BodyCap(t *testing.T) {
+	setGinTestMode()
+	log := zaptest.NewLogger(t)
+	const limit = 4096
+
+	newHandler := func(t *testing.T) (http.Handler, *[]byte) {
+		t.Helper()
+		var seen []byte
+		router := gin.New()
+		router.POST("/test", RequireSignatures(log), func(c *gin.Context) {
+			b, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				t.Errorf("handler could not read body: %v", err)
+				return
+			}
+			seen = b
+			c.Status(http.StatusOK)
+		})
+		return http.MaxBytesHandler(router, limit), &seen
+	}
+
+	t.Run("unbounded_body_rejected_413_after_cap", func(t *testing.T) {
+		handler, seen := newHandler(t)
+		body := &endlessBody{budget: limit * 4}
+		req := httptest.NewRequest(http.MethodPost, "/test", body)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("want 413, got %d: %s", w.Code, w.Body.String())
+		}
+		if *seen != nil {
+			t.Fatal("handler ran on an oversize body")
+		}
+		// MaxBytesReader needs exactly one byte past the cap to know it was exceeded; anything more
+		// would mean the cap is not bounding the read.
+		if body.read > limit+1 {
+			t.Fatalf("server pulled %d bytes of an unbounded body; cap is %d", body.read, limit)
+		}
+		var resp ErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("413 body is not the error envelope: %v: %s", err, w.Body.String())
+		}
+		if resp.Error != "payload_too_large" {
+			t.Fatalf("want error code payload_too_large, got %q", resp.Error)
+		}
+	})
+
+	t.Run("declared_oversize_body_rejected_413", func(t *testing.T) {
+		handler, seen := newHandler(t)
+		req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader(signedBodyOfSize(t, limit+1)))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("want 413, got %d: %s", w.Code, w.Body.String())
+		}
+		if *seen != nil {
+			t.Fatal("handler ran on an oversize body")
+		}
+	})
+
+	t.Run("body_at_cap_passes_intact", func(t *testing.T) {
+		handler, seen := newHandler(t)
+		body := signedBodyOfSize(t, limit)
+		req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if !bytes.Equal(*seen, body) {
+			t.Fatalf("handler saw %d bytes, want the %d-byte body unchanged", len(*seen), len(body))
+		}
+	})
+}
+
+// TestRequireSignatures_BodyCapClosesConnection drives a real net/http server, because the behavior
+// under test lives there: the 413 must go out with Connection: close, so the connection is not reused
+// for a request the server never finished reading. That is what MaxBytesReader arranges when it is
+// handed the server's own ResponseWriter — which http.MaxBytesHandler does and a gin-level wrapper would
+// not, since gin's ResponseWriter hides the hook. Without the flag, net/http would drain this 8 KiB body
+// (it is under its 256 KiB post-handler tolerance) and answer on a keep-alive connection. Note the
+// drain itself still happens with the flag; only the keep-alive decision changes.
+func TestRequireSignatures_BodyCapClosesConnection(t *testing.T) {
+	setGinTestMode()
+	const limit = 1024
+	router := gin.New()
+	router.POST("/test", RequireSignatures(zaptest.NewLogger(t)), func(c *gin.Context) {
+		t.Error("handler ran on an oversize body")
+	})
+	srv := httptest.NewServer(http.MaxBytesHandler(router, limit))
+	defer srv.Close()
+
+	resp, err := srv.Client().Post(srv.URL+"/test", "application/json", bytes.NewReader(signedBodyOfSize(t, limit*8)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("want 413, got %d", resp.StatusCode)
+	}
+	if !resp.Close {
+		t.Fatalf("want Connection: close on the 413, got headers %v", resp.Header)
 	}
 }
