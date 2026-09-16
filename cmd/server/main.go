@@ -53,6 +53,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	// Keep a deferred close for unexpected panics. The normal serve path also closes explicitly before
+	// any non-zero exit; stream shutdown is idempotent, so the successful path may safely reach both.
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), logger.DefaultShutdownTimeout)
 		defer cancel()
@@ -117,8 +119,9 @@ func main() {
 	// 3) Keep the process logger open until graceful HTTP shutdown has finished draining handlers.
 	processContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
-	if err := serveUntilShutdown(processContext, srv); err != nil {
-		zlog.Fatal("serve", zap.Error(err))
+	if err := serveUntilShutdownAndCloseLogger(processContext, srv, zlog, shutdownLogger); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "server stopped with error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -145,4 +148,23 @@ func serveUntilShutdown(processContext context.Context, srv gracefulServer) erro
 		serveErr := <-serveErrors
 		return errors.Join(shutdownErr, serveErr)
 	}
+}
+
+// serveUntilShutdownAndCloseLogger reports a server failure while remote admission is still open, then
+// drains every accepted log before the caller may exit. This must not be replaced with zap.Logger.Fatal:
+// Fatal calls os.Exit directly and would bypass the bounded logger shutdown on HTTP drain timeouts.
+func serveUntilShutdownAndCloseLogger(
+	processContext context.Context,
+	srv gracefulServer,
+	zlog *zap.Logger,
+	shutdownLogger logger.ShutdownFunc,
+) error {
+	serveErr := serveUntilShutdown(processContext, srv)
+	if serveErr != nil {
+		zlog.Error("serve", zap.Error(serveErr))
+	}
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), logger.DefaultShutdownTimeout)
+	defer cancel()
+	return errors.Join(serveErr, shutdownLogger(shutdownContext))
 }
