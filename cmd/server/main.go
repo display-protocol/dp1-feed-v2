@@ -54,7 +54,7 @@ func main() {
 		panic(err)
 	}
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), logger.DefaultShutdownTimeout)
 		defer cancel()
 		if err := shutdownLogger(ctx); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "logger shutdown failed: %v\n", err)

@@ -24,7 +24,22 @@ const (
 	defaultMaxQueueBytes  = 8 << 20
 	defaultRequestTimeout = 5 * time.Second
 	defaultDropReportRate = time.Minute
+
+	// A close can begin with one request in flight, one partial batch retained by the worker, and a full
+	// record queue. Batch closure can be triggered independently by record count or bytes. The next-fit
+	// byte bound counts each pending byte at most twice: once in the batch it occupies and once as the
+	// record that makes the preceding batch overflow. One byte per record conservatively covers commas.
+	defaultMaxPendingRecords = defaultBatchSize - 1 + defaultQueueSize
+	defaultMaxPendingBytes   = defaultMaxBatchBytes + defaultMaxQueueBytes + defaultMaxPendingRecords
+	defaultMaxCountClosures  = defaultMaxPendingRecords / defaultBatchSize
+	defaultMaxByteClosures   = (2*defaultMaxPendingBytes + defaultMaxBatchBytes - 1) / defaultMaxBatchBytes
+	defaultMaxDrainRequests  = 1 + defaultMaxCountClosures + defaultMaxByteClosures + 1
 )
+
+// DefaultShutdownTimeout gives every record accepted by the default bounded sender one delivery attempt,
+// even if each HTTP request consumes its full timeout. The extra request-timeout interval is scheduling
+// margin so the final request is not canceled exactly at its own deadline.
+const DefaultShutdownTimeout = time.Duration(defaultMaxDrainRequests+1) * defaultRequestTimeout
 
 type cloudflareRecord struct {
 	Timestamp   string         `json:"timestamp"`

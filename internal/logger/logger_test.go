@@ -535,6 +535,122 @@ func TestCloudflareBatchesRecords(t *testing.T) {
 	}
 }
 
+func TestShutdownDrainsSlowSuccessfulMultipleBatches(t *testing.T) {
+	t.Parallel()
+
+	var delivered atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(40 * time.Millisecond)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		var records []json.RawMessage
+		if err := json.Unmarshal(body, &records); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		delivered.Add(int64(len(records)))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	log, shutdown, err := New(Config{
+		Output: io.Discard,
+		Cloudflare: StreamConfig{
+			URL: server.URL, APIKey: "send-token", Service: "dp1-feed-v2", Environment: "test",
+			HTTPClient: server.Client(), batchSize: 2, queueSize: 8, flushInterval: time.Hour,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := range 7 {
+		log.Info("queued before shutdown", zap.Int("index", i))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if got := delivered.Load(); got != 7 {
+		t.Fatalf("delivered records = %d, want 7 across multiple slow batches", got)
+	}
+}
+
+func TestDefaultShutdownTimeoutCoversMaximumAcceptedRequests(t *testing.T) {
+	t.Parallel()
+
+	minimum := time.Duration(defaultMaxDrainRequests) * defaultRequestTimeout
+	if DefaultShutdownTimeout <= minimum {
+		t.Fatalf("DefaultShutdownTimeout = %s, want greater than maximum request time %s", DefaultShutdownTimeout, minimum)
+	}
+}
+
+func TestStreamSenderMixedCountAndByteBatchingFitsShutdownBound(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		requests.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	sender, err := newStreamSender(StreamConfig{
+		URL: server.URL, APIKey: "send-token", Service: "dp1-feed-v2", Environment: "test",
+		HTTPClient: server.Client(), flushInterval: time.Hour,
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("newStreamSender: %v", err)
+	}
+	for range defaultBatchSize - 1 {
+		if err := sender.enqueue([]byte(`{}`)); err != nil {
+			t.Fatalf("enqueue partial-batch record: %v", err)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		sender.mu.Lock()
+		pending := sender.pendingBytes
+		sender.mu.Unlock()
+		if pending == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not consume the initial partial batch")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Together with the 99-record partial batch above, these small records produce eleven count-closed
+	// requests and leave twenty records pending. The large/mid/large tail then forces three more requests
+	// under next-fit byte batching: partial+large, mid, and large.
+	for range 1021 {
+		if err := sender.enqueue([]byte(`{}`)); err != nil {
+			t.Fatalf("enqueue count-bound record: %v", err)
+		}
+	}
+	sizedRecord := func(size int) []byte {
+		const prefix = `{"message":"`
+		const suffix = `"}`
+		return []byte(prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix)
+	}
+	for _, size := range []int{3_600_000, 700_000, 3_600_000} {
+		if err := sender.enqueue(sizedRecord(size)); err != nil {
+			t.Fatalf("enqueue byte-bound record of %d bytes: %v", size, err)
+		}
+	}
+	if err := sender.close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if got := requests.Load(); got != 14 {
+		t.Fatalf("delivery requests = %d, want 14 from mixed count/byte fragmentation", got)
+	}
+	if got := requests.Load(); got > int64(defaultMaxDrainRequests) {
+		t.Fatalf("delivery requests = %d, shutdown bound covers %d", got, defaultMaxDrainRequests)
+	}
+}
+
 func TestCloudflareDeliveryFailureDoesNotSuppressStdout(t *testing.T) {
 	t.Parallel()
 
