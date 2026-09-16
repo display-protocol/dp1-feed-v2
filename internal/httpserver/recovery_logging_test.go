@@ -12,11 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/display-protocol/dp1-feed-v2/internal/config"
 	feedlogger "github.com/display-protocol/dp1-feed-v2/internal/logger"
 )
 
-func TestRecoveryWritesPanicToStdoutAndCloudflare(t *testing.T) {
+func TestZapRecoveryWritesPanicToStdoutAndCloudflare(t *testing.T) {
 	requests := make(chan []byte, 1)
 	stream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -45,12 +44,13 @@ func TestRecoveryWritesPanicToStdoutAndCloudflare(t *testing.T) {
 	}
 
 	gin.SetMode(gin.TestMode)
-	srv := New(&config.Config{Logging: config.LoggingConfig{Debug: true}}, log, nil, "test")
-	srv.engine.GET("/panic-test", func(*gin.Context) {
+	engine := gin.New()
+	engine.Use(ZapRecovery(log))
+	engine.GET("/panic-test", func(*gin.Context) {
 		panic("database invariant failed")
 	})
 	recorder := httptest.NewRecorder()
-	srv.engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panic-test", nil))
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panic-test", nil))
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
 	}
