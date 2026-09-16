@@ -1,0 +1,69 @@
+{
+  "fields": [
+    {
+      "name": "timestamp",
+      "type": "timestamp",
+      "required": true
+    },
+    {
+      "name": "level",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "service",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "environment",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "message",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "logger",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "event",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "trace_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "span_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "request_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "structured",
+      "type": "json",
+      "required": false
+    },
+    {
+      "name": "context",
+      "type": "json",
+      "required": false
+    },
+    {
+      "name": "exception",
+      "type": "json",
+      "required": false
+    }
+  ]
+}

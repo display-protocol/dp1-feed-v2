@@ -28,11 +28,16 @@ auth:
   # Override with DP1_FEED_INTENT_MAX_CLOCK_SKEW (Go duration, e.g. 5m).
   intent_max_clock_skew: "5m"
 
-sentry:
-  dsn: ""
-
 logging:
   debug: true
+  # Stable dimensions required by the shared service-log schema.
+  service: "dp1-feed-v2"
+  environment: "development"
+  cloudflare:
+    # Set both values to enable remote streaming. Keep the API key in
+    # DP1_FEED_CLOUDFLARE_API_KEY rather than checked-in YAML.
+    stream_url: ""
+    api_key: ""
 
 extensions:
   enabled: true

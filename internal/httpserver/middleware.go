@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,6 +24,29 @@ func RequestDeadline(timeout time.Duration) gin.HandlerFunc {
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	}
+}
+
+// ZapRecovery keeps recovered handler panics on the same stdout and Cloudflare paths as every other
+// service log. The panic value and the recovery stack are deliberately kept in the schema's exception
+// object; Gin's default recovery writes to its own error stream and would bypass the process logger.
+func ZapRecovery(log *zap.Logger) gin.HandlerFunc {
+	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
+		message := fmt.Sprint(recovered)
+		if err, ok := recovered.(error); ok {
+			message = err.Error()
+		}
+		log.Error("http panic recovered",
+			zap.String("method", c.Request.Method),
+			zap.String("path", c.Request.URL.Path),
+			zap.Int("status", http.StatusInternalServerError),
+			zap.Any("exception", map[string]any{
+				"type":    fmt.Sprintf("%T", recovered),
+				"message": message,
+				"stack":   string(debug.Stack()),
+			}),
+		)
+		c.AbortWithStatus(http.StatusInternalServerError)
+	})
 }
 
 // RequireSignatures gates every mutating route (POST/PUT/DELETE). There is no API key: a mutating request

@@ -85,6 +85,10 @@ func TestLoad_envOverrides(t *testing.T) {
 	t.Setenv("DP1_FEED_SERVER_HOST", "10.0.0.1")
 	t.Setenv("DP1_FEED_SERVER_PORT", "12345")
 	t.Setenv("DP1_FEED_LOG_DEBUG", "true")
+	t.Setenv("DP1_FEED_CLOUDFLARE_STREAM_URL", "https://stream.example")
+	t.Setenv("DP1_FEED_CLOUDFLARE_API_KEY", "send-token")
+	t.Setenv("DP1_FEED_LOG_SERVICE", "custom-feed")
+	t.Setenv("DP1_FEED_LOG_ENVIRONMENT", "staging")
 	t.Setenv("DP1_FEED_EXTENSIONS_ENABLED", "0")
 	t.Setenv("DP1_FEED_PUBLIC_BASE_URL", "https://example.com/")
 	t.Setenv("DP1_FEED_WEBHOOK_PRIVATE_KEY_HEX", testWebhookPrivateKeyHex)
@@ -106,6 +110,18 @@ func TestLoad_envOverrides(t *testing.T) {
 	if !cfg.Logging.Debug {
 		t.Fatalf("LOG_DEBUG override")
 	}
+	if got := cfg.Logging.Cloudflare.StreamURL; got != "https://stream.example" {
+		t.Fatalf("CLOUDFLARE_STREAM_URL override = %q", got)
+	}
+	if got := cfg.Logging.Cloudflare.APIKey; got != "send-token" {
+		t.Fatalf("CLOUDFLARE_API_KEY override = %q", got)
+	}
+	if got := cfg.Logging.Service; got != "custom-feed" {
+		t.Fatalf("LOG_SERVICE override = %q", got)
+	}
+	if got := cfg.Logging.Environment; got != "staging" {
+		t.Fatalf("LOG_ENVIRONMENT override = %q", got)
+	}
 	if cfg.Extensions.Enabled {
 		t.Fatalf("EXTENSIONS_ENABLED=0 should disable extensions")
 	}
@@ -117,6 +133,96 @@ func TestLoad_envOverrides(t *testing.T) {
 	}
 	if !strings.HasPrefix(cfg.Notifications.PublicKey, "p256:") {
 		t.Fatalf("derived webhook public key = %q", cfg.Notifications.PublicKey)
+	}
+}
+
+func TestConfigValidateCloudflareLogging(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		configure func(*Config)
+		wantError string
+	}{
+		{
+			name: "valid",
+			configure: func(cfg *Config) {
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+		},
+		{
+			name: "missing API key",
+			configure: func(cfg *Config) {
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example"
+			},
+			wantError: "cloudflare api key is required",
+		},
+		{
+			name: "missing stream URL",
+			configure: func(cfg *Config) {
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "cloudflare stream url is required",
+		},
+		{
+			name: "missing environment",
+			configure: func(cfg *Config) {
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "logging environment is required",
+		},
+		{
+			name: "missing service",
+			configure: func(cfg *Config) {
+				cfg.Logging.Service = ""
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "logging service is required",
+		},
+		{
+			name: "non-HTTPS stream URL",
+			configure: func(cfg *Config) {
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "http://stream.example"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "must use https",
+		},
+		{
+			name: "stream URL with query",
+			configure: func(cfg *Config) {
+				cfg.Logging.Environment = "production"
+				cfg.Logging.Cloudflare.StreamURL = "https://stream.example?token=wrong-place"
+				cfg.Logging.Cloudflare.APIKey = "send-token"
+			},
+			wantError: "must not contain credentials",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := defaultConfig()
+			cfg.Playlist.SigningKeyHex = testSeedHex
+			tt.configure(cfg)
+			err := cfg.validate()
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validate: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validate error = %v, want %q", err, tt.wantError)
+			}
+		})
 	}
 }
 

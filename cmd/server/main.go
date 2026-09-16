@@ -4,14 +4,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -40,21 +41,27 @@ func main() {
 		panic(err)
 	}
 
-	if cfg.Sentry.DSN != "" {
-		if err := sentry.Init(sentry.ClientOptions{
-			Dsn:   cfg.Sentry.DSN,
-			Debug: cfg.Logging.Debug,
-		}); err != nil {
-			panic(err)
-		}
-		defer sentry.Flush(2 * time.Second)
-	}
-
-	zlog, err := logger.New(logger.Config{Debug: cfg.Logging.Debug})
+	zlog, shutdownLogger, err := logger.New(logger.Config{
+		Debug: cfg.Logging.Debug,
+		Cloudflare: logger.StreamConfig{
+			URL:         cfg.Logging.Cloudflare.StreamURL,
+			APIKey:      cfg.Logging.Cloudflare.APIKey,
+			Service:     cfg.Logging.Service,
+			Environment: cfg.Logging.Environment,
+		},
+	})
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = zlog.Sync() }()
+	// Keep a deferred close for unexpected panics. The normal serve path also closes explicitly before
+	// any non-zero exit; stream shutdown is idempotent, so the successful path may safely reach both.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), logger.DefaultShutdownTimeout)
+		defer cancel()
+		if err := shutdownLogger(ctx); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "logger shutdown failed: %v\n", err)
+		}
+	}()
 	if cfg.Notifications.PublicKey != "" {
 		zlog.Info("webhook signing public key", zap.String("public_key", cfg.Notifications.PublicKey))
 	}
@@ -109,17 +116,55 @@ func main() {
 	exec := executor.New(st, dp1, cfg.Extensions.Enabled, f, cfg.Playlist.PublicBaseURL, execOptions...)
 	srv := httpserver.New(cfg, zlog, exec, version)
 
-	// 3) Graceful shutdown on SIGINT/SIGTERM, then block on ListenAndServe.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	// 3) Keep the process logger open until graceful HTTP shutdown has finished draining handlers.
+	processContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	if err := serveUntilShutdownAndCloseLogger(processContext, srv, zlog, shutdownLogger); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "server stopped with error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+type gracefulServer interface {
+	ListenAndServe() error
+	Shutdown(context.Context) error
+}
+
+// serveUntilShutdown owns HTTP lifecycle ordering. Shutdown runs synchronously after a process signal,
+// and the function does not return to main's deferred logger close until active handlers have drained.
+func serveUntilShutdown(processContext context.Context, srv gracefulServer) error {
+	serveErrors := make(chan error, 1)
 	go func() {
-		<-sig
-		shctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shctx)
+		serveErrors <- srv.ListenAndServe()
 	}()
 
-	if err := srv.ListenAndServe(); err != nil {
-		zlog.Fatal("serve", zap.Error(err))
+	select {
+	case err := <-serveErrors:
+		return err
+	case <-processContext.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownErr := srv.Shutdown(shutdownContext)
+		cancel()
+		serveErr := <-serveErrors
+		return errors.Join(shutdownErr, serveErr)
 	}
+}
+
+// serveUntilShutdownAndCloseLogger reports a server failure while remote admission is still open, then
+// drains every accepted log before the caller may exit. This must not be replaced with zap.Logger.Fatal:
+// Fatal calls os.Exit directly and would bypass the bounded logger shutdown on HTTP drain timeouts.
+func serveUntilShutdownAndCloseLogger(
+	processContext context.Context,
+	srv gracefulServer,
+	zlog *zap.Logger,
+	shutdownLogger logger.ShutdownFunc,
+) error {
+	serveErr := serveUntilShutdown(processContext, srv)
+	if serveErr != nil {
+		zlog.Error("serve", zap.Error(serveErr))
+	}
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), logger.DefaultShutdownTimeout)
+	defer cancel()
+	return errors.Join(serveErr, shutdownLogger(shutdownContext))
 }
