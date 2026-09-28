@@ -980,6 +980,23 @@ components:
             `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed *fetches* when
             ingesting a group or channel by URL — so a playlist with large inline manifests can be
             publishable directly yet too large for another deployment to ingest.
+        contentRating:
+          type: string
+          description: >-
+            Optional audience label from the Content Rating Extension v0.1.0 (display-protocol/dp1
+            `extensions/content-rating`), on the item at the same level as `source`. Open vocabulary:
+            `general` and `mature` are defined, and a value a consumer does not recognise reads as
+            unrated. Part of the signed document, stored and returned as sent; this feed does not
+            validate the extension or apply content policy (players do). Declared by the request
+            models since the dp1-go v0.6.2 bump — before it the strict decoder refused the member
+            with `400`, so a publisher that signed it could not publish a labelled item.
+        contentReasons:
+          type: array
+          items:
+            type: string
+          description: >-
+            Optional reasons behind `contentRating`, in the curator's words (Content Rating Extension
+            v0.1.0 asks for non-empty strings). Stored and returned as sent, unvalidated here.
 
     Playlist:
       type: object
@@ -1033,6 +1050,14 @@ components:
           description: >-
             Optional complete DP-1 Ref Manifest carried on the item (Playlist Extension §3.6).
             Same shape, validation, and handling as PlaylistItemInput.inlineManifest.
+        contentRating:
+          type: string
+          description: Content Rating Extension label; same handling as PlaylistItemInput.contentRating.
+        contentReasons:
+          type: array
+          items:
+            type: string
+          description: Same handling as PlaylistItemInput.contentReasons.
         # Additional fields...
 
     PlaylistGroupInput:
