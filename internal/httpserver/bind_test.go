@@ -54,6 +54,14 @@ func TestDecodeDocument_rejectsUnknownMembersAtEveryDepth(t *testing.T) {
 			body: `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x","inlineManifest":{"anything":{"nested":true}}}]}`,
 		},
 		{
+			// Content Rating Extension members, declared by dp1-go's PlaylistItem since v0.6.2. That struct
+			// decodes through its own UnmarshalJSON, which DisallowUnknownFields cannot see into, so
+			// checkExactMembers is what still rejects a stray member inside an item; this case pins that
+			// the two known members pass it.
+			name: "content-rating members on a playlist item are known",
+			body: `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x","contentRating":"mature","contentReasons":["nudity"]}]}`,
+		},
+		{
 			name: "a well-formed document with no unknown members",
 			body: `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x"}],"defaults":{"license":"open"}}`,
 		},
