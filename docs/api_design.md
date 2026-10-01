@@ -364,6 +364,41 @@ position-ordered list and leaking the decoy's items into a UUID-filtered item li
 - **`playlist-group`** — restrict to playlists that belong to that group (UUID or slug).
 - These two query params are **mutually exclusive** where the implementation enforces it; sending both may yield **400**.
 
+**Attribution filters (`playlists`, `playlist-groups`, `channels` lists):**
+
+| Endpoint | Param | Matches |
+| -------- | ----- | ------- |
+| `GET /api/v1/playlists` | **`curator`** | an entity in the signed `curators` array whose `key` equals the value |
+| `GET /api/v1/playlist-groups` | **`curator`** | the group's `curator` string |
+| `GET /api/v1/channels` | **`curator`** | an entity in the channel's `curators` array whose `key` equals the value |
+| `GET /api/v1/channels` | **`publisher`** | the channel's `publisher.key` |
+
+- They report **what the stored document says**, not the derived owner set (see *Who owns a document*).
+  The field and the owner set agree only partly, and the differences are deliberate rather than gaps to
+  close by guessing:
+  - `curators` and `publisher` are optional, so a document that declares neither never matches, even though
+    its single owner-role signer owns it. A client that needs "everything this key can edit" cannot get it
+    from these filters.
+  - A playlist's declared `curators` are its owners, but a `POST` may list a key that did not sign (consent
+    is a replace-time rule), so a match is an owner and not necessarily a signer.
+  - A channel's `publisher` is its owner and had to sign the create. Channel `curators` are attribution
+    only and may name any key.
+  - A group's `curator` is a display name in DP-1 core. It may hold a name or a key; when it names one of the
+    group's signers it must be the `curator`-role signer, but a key that did not sign at all is accepted. A
+    match is therefore only a claim the document makes.
+- Matching is **exact and case-sensitive** on the stored value, the same comparison ownership uses for
+  `kid` vs `key`; the query value is trimmed, the stored value is not. Different spellings of one identity
+  (e.g. mixed-case `did:pkh` addresses) are different values.
+- Ordering stays `created_at`, so the cursor is the ordinary `created_at` token and is not bound to the
+  filter: presenting it with other filter values yields the rows past that boundary that match the new
+  filters. An unknown value is an empty page, not **`404`**.
+- On `GET /api/v1/playlists`, `curator` cannot be combined with `channel` or `playlist-group` (**`400`**):
+  those order by membership position and one page cannot follow both keysets. On `GET /api/v1/channels`,
+  `curator` and `publisher` together are ANDed.
+- Backed by indexes over the stored `body` (migration 000009): GIN `jsonb_path_ops` for the `curators`
+  arrays, hash indexes for the scalar fields. Both store hashes rather than the values, because the values
+  are client-supplied and unbounded and a btree entry over about 2.7 kB would fail the insert.
+
 ---
 
 ## Methods and semantics

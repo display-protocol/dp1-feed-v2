@@ -30,7 +30,7 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 // mapStoreError maps store.ErrNotFound, store.ErrConcurrentModification, store.ErrListLimitExceeded,
-// or falls through to 500.
+// store.ErrInvalidCursor, store.ErrInvalidListFilter, or falls through to 500.
 func mapStoreError(err error) (status int, code, msg string) {
 	if errors.Is(err, store.ErrNotFound) {
 		return http.StatusNotFound, "not_found", err.Error()
@@ -49,7 +49,7 @@ func mapStoreError(err error) (status int, code, msg string) {
 	if errors.As(err, &conflict) {
 		return http.StatusConflict, "conflict", conflict.Detail
 	}
-	if errors.Is(err, store.ErrListLimitExceeded) || errors.Is(err, store.ErrInvalidCursor) {
+	if errors.Is(err, store.ErrListLimitExceeded) || errors.Is(err, store.ErrInvalidCursor) || errors.Is(err, store.ErrInvalidListFilter) {
 		return http.StatusBadRequest, "bad_request", err.Error()
 	}
 	return http.StatusInternalServerError, "internal_error", err.Error()

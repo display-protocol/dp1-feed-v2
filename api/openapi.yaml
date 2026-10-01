@@ -157,11 +157,23 @@ paths:
         Returns a paginated list of playlists. Unfiltered, the list is ordered by created_at. With a
         channel or playlist-group filter it is ordered by membership position, i.e. the order the signed
         channel/group document lists its playlists (a playlist listed at several positions appears once
-        per position). Cursors are specific to the ordering that issued them.
+        per position). With a curator filter it is ordered by created_at. Cursors are specific to the
+        ordering that issued them.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Sort'
+        - name: curator
+          in: query
+          description: >-
+            Filter to playlists whose signed `curators` array contains an entity with exactly this `key`
+            (e.g. a did:key). Attribution as the document states it, not the derived owner set: a playlist
+            that declares no `curators` never matches, even though its single `curator`-role signer owns
+            it. Matching is exact and case-sensitive against the stored key; the query value is trimmed.
+            Ordered by created_at. Cannot be combined with `channel` or `playlist-group` (400). Unknown key
+            yields an empty list.
+          schema:
+            type: string
         - name: channel
           in: query
           description: >-
@@ -349,6 +361,16 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Sort'
+        - name: curator
+          in: query
+          description: >-
+            Filter to playlist-groups whose `curator` string equals this value exactly (case-sensitive;
+            the query value is trimmed). DP-1 core defines `curator` as a display name, so this matches
+            whatever text the document carries — a name or a key — and the feed does not require a key it
+            names to have signed the group. Groups without `curator` never match. Unknown value yields an
+            empty list.
+          schema:
+            type: string
       responses:
         '200':
           description: List of playlist-groups
@@ -500,11 +522,31 @@ paths:
     get:
       tags: [channels]
       summary: List channels
-      description: Returns paginated list of channels (requires extensions enabled)
+      description: >-
+        Returns paginated list of channels (requires extensions enabled). `curator` and `publisher`
+        filters may be combined; a channel must then match both.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Sort'
+        - name: curator
+          in: query
+          description: >-
+            Filter to channels whose `curators` array contains an entity with exactly this `key`. Channel
+            curators are attribution only: they never authorize writes, and a key may be listed without
+            having signed. Matching is exact and case-sensitive; the query value is trimmed. Unknown key
+            yields an empty list.
+          schema:
+            type: string
+        - name: publisher
+          in: query
+          description: >-
+            Filter to channels whose `publisher.key` equals this value exactly (case-sensitive; the query
+            value is trimmed). A declared publisher is the channel's owner and must have signed it. A
+            channel that declares no `publisher` never matches, even though its single `publisher`-role
+            signer owns it. Unknown key yields an empty list.
+          schema:
+            type: string
       responses:
         '200':
           description: List of channels
@@ -772,8 +814,8 @@ components:
       name: sort
       in: query
       description: >-
-        Sort direction. Applies to created_at, except on GET /api/v1/playlists filtered by channel or
-        playlist-group, where it applies to membership position.
+        Sort direction. Applies to created_at (including under `curator` / `publisher` filters), except on
+        GET /api/v1/playlists filtered by channel or playlist-group, where it applies to membership position.
       schema:
         type: string
         enum: [asc, desc]

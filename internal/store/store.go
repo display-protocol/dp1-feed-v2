@@ -138,7 +138,8 @@ type PlaylistItemRecord struct {
 	Item       playlist.PlaylistItem
 }
 
-// ListPlaylistsParams filters list results.
+// ListPlaylistsParams filters list results. It is shared by ListPlaylists, ListPlaylistGroups and
+// ListChannels; each documents which fields it reads.
 // ChannelFilter and PlaylistGroupFilter are mutually exclusive when both non-empty (HTTP returns 400).
 type ListPlaylistsParams struct {
 	// Limit is the maximum rows to return (validated in the store layer via ResolveListLimit).
@@ -155,6 +156,16 @@ type ListPlaylistsParams struct {
 	// PlaylistGroupFilter, if non-empty, restricts to playlists that are members of that group (UUID or slug),
 	// ordered by their position in it, as for ChannelFilter.
 	PlaylistGroupFilter string
+	// CuratorFilter, if non-empty, restricts to documents whose signed body names this curator: a
+	// `curators[].key` equal to it on playlists and channels, the `curator` string equal to it on
+	// playlist-groups. Matching is exact (case-sensitive, no trimming of the stored value): it reports what
+	// the document says, which is deliberately not the derived owner set (see docs/api_design.md). Ordered
+	// by created_at like an unfiltered list. On ListPlaylists it cannot be combined with ChannelFilter or
+	// PlaylistGroupFilter (ErrInvalidListFilter).
+	CuratorFilter string
+	// PublisherFilter, if non-empty, restricts channels to those whose `publisher.key` equals it, matched
+	// as CuratorFilter. Read by ListChannels only; combined with CuratorFilter both must match.
+	PublisherFilter string
 }
 
 // ListPlaylistItemsParams lists rows from playlist_item_index for stable keyset pagination.
@@ -227,8 +238,9 @@ type Store interface {
 	ListPlaylistItems(ctx context.Context, p *ListPlaylistItemsParams) ([]PlaylistItemRecord, string, error)
 	// GetPlaylistItem returns one indexed item by its item UUID.
 	GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*PlaylistItemRecord, error)
-	// ListPlaylists returns a page of playlists: ordered by created_at when unfiltered, by membership
-	// position when filtered by channel or playlist-group (direction from Sort). Cursors are specific to
+	// ListPlaylists returns a page of playlists: ordered by created_at when unfiltered or filtered by
+	// curator, by membership position when filtered by channel or playlist-group (direction from Sort).
+	// A curator filter combined with a container filter is ErrInvalidListFilter. Cursors are specific to
 	// the ordering that issued them, and a membership cursor also to its container and sort direction
 	// (ErrInvalidCursor otherwise).
 	ListPlaylists(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistRecord, string, error)
@@ -266,7 +278,7 @@ type Store interface {
 	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error
 	// GetPlaylistGroup loads a playlist-group by UUID or slug.
 	GetPlaylistGroup(ctx context.Context, idOrSlug string) (*PlaylistGroupRecord, error)
-	// ListPlaylistGroups returns a page ordered by created_at and Sort.
+	// ListPlaylistGroups returns a page ordered by created_at and Sort, optionally restricted by CuratorFilter.
 	ListPlaylistGroups(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistGroupRecord, string, error)
 	// UpdatePlaylistGroup upserts playlists and item indexes, updates the group row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
 	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
@@ -280,7 +292,8 @@ type Store interface {
 	CreateChannel(ctx context.Context, in *ChannelInput) error
 	// GetChannel loads a channel by UUID or slug, including MembersDigest (see ChannelRecord).
 	GetChannel(ctx context.Context, idOrSlug string) (*ChannelRecord, error)
-	// ListChannels returns a page ordered by created_at and Sort.
+	// ListChannels returns a page ordered by created_at and Sort, optionally restricted by CuratorFilter
+	// and PublisherFilter.
 	ListChannels(ctx context.Context, p *ListPlaylistsParams) ([]ChannelRecord, string, error)
 	// UpdateChannel upserts playlists and item indexes, updates the channel row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
 	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
