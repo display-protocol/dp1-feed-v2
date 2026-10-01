@@ -641,7 +641,7 @@ func TestListPlaylists(t *testing.T) {
 	}).Return(recs, "next-page", nil)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	items, next, err := e.ListPlaylists(context.Background(), 25, "cur", store.SortDesc, "", "")
+	items, next, err := e.ListPlaylists(context.Background(), 25, "cur", store.SortDesc, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,12 +670,14 @@ func TestListPlaylists_filters(t *testing.T) {
 			PlaylistGroupFilter: pg,
 		}
 	}
+	const curatorKey = "did:key:zCurator"
 
 	tests := []struct {
 		name           string
 		extEnabled     bool
 		ch             string
 		pg             string
+		cur            string
 		setupMock      func(*mocks.MockStore) // nil when the store must not be called
 		wantErr        error
 		wantItems      int
@@ -746,6 +748,18 @@ func TestListPlaylists_filters(t *testing.T) {
 			wantNext:  "",
 		},
 		{
+			name:       "curator_filter_forwards_without_extensions",
+			extEnabled: false,
+			cur:        curatorKey,
+			setupMock: func(m *mocks.MockStore) {
+				m.EXPECT().ListPlaylists(gomock.Any(), &store.ListPlaylistsParams{
+					Limit: 10, Sort: store.SortAsc, CuratorFilter: curatorKey,
+				}).Return([]store.PlaylistRecord{{Body: playlist.Playlist{Title: "Curated"}}}, "", nil)
+			},
+			wantItems:      1,
+			wantFirstTitle: "Curated",
+		},
+		{
 			name:       "store_error_propagates_with_channel_filter",
 			extEnabled: true,
 			ch:         "ch",
@@ -768,7 +782,7 @@ func TestListPlaylists_filters(t *testing.T) {
 			}
 
 			e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), tt.extEnabled, nil, "")
-			items, next, err := e.ListPlaylists(context.Background(), 10, "", store.SortAsc, tt.ch, tt.pg)
+			items, next, err := e.ListPlaylists(context.Background(), 10, "", store.SortAsc, tt.ch, tt.pg, tt.cur)
 
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
@@ -2311,11 +2325,11 @@ func TestListPlaylistGroups(t *testing.T) {
 	mockStore := mocks.NewMockStore(ctrl)
 	recs := []store.PlaylistGroupRecord{{Body: playlistgroup.Group{Title: "A"}}}
 	mockStore.EXPECT().ListPlaylistGroups(gomock.Any(), &store.ListPlaylistsParams{
-		Limit: 10, Cursor: "", Sort: store.SortAsc,
+		Limit: 10, Cursor: "", Sort: store.SortAsc, CuratorFilter: "did:key:zCurator",
 	}).Return(recs, "n", nil)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	items, next, err := e.ListPlaylistGroups(context.Background(), 10, "", store.SortAsc)
+	items, next, err := e.ListPlaylistGroups(context.Background(), 10, "", store.SortAsc, "did:key:zCurator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2802,7 +2816,7 @@ func TestListChannels_extensionsDisabled(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	e := executor.New(mocks.NewMockStore(ctrl), mocks.NewMockValidatorSigner(ctrl), false, nil, "")
-	_, _, err := e.ListChannels(context.Background(), 10, "", store.SortDesc)
+	_, _, err := e.ListChannels(context.Background(), 10, "", store.SortDesc, "", "")
 	if !executor.IsExtensionsDisabled(err) {
 		t.Fatalf("got %v", err)
 	}
@@ -3028,10 +3042,11 @@ func TestListChannels(t *testing.T) {
 	recs := []store.ChannelRecord{{Body: channels.Channel{Title: "X"}}}
 	mockStore.EXPECT().ListChannels(gomock.Any(), &store.ListPlaylistsParams{
 		Limit: 5, Cursor: "c", Sort: store.SortDesc,
+		CuratorFilter: "did:key:zCurator", PublisherFilter: "did:key:zPublisher",
 	}).Return(recs, "next", nil)
 
 	e := executor.New(mockStore, mocks.NewMockValidatorSigner(ctrl), true, nil, "")
-	items, next, err := e.ListChannels(context.Background(), 5, "c", store.SortDesc)
+	items, next, err := e.ListChannels(context.Background(), 5, "c", store.SortDesc, "did:key:zCurator", "did:key:zPublisher")
 	if err != nil {
 		t.Fatal(err)
 	}

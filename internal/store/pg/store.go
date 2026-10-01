@@ -583,7 +583,8 @@ WHERE item_id = $1`
 //
 // Two orderings, chosen by the filter:
 //
-//   - Unfiltered: created_at then id, direction from p.Sort. Cursor is (created_at, id) of the last row.
+//   - Unfiltered or filtered by curator: created_at then id, direction from p.Sort. Cursor is
+//     (created_at, id) of the last row (see createdAtListQuery).
 //   - Filtered by channel or playlist-group: membership position (the order the signed document lists
 //     its playlists), direction from p.Sort. Cursor is the last row's position. A document that
 //     repeats a playlist URI stores one membership row per position, and this list mirrors that — the
@@ -594,6 +595,10 @@ WHERE item_id = $1`
 // made the order depend on when each member was published rather than on the channel, so a playlist
 // republished under a new id jumped to the end of every channel that carried it. Position is what a
 // player rendering a channel needs, and it is already how ListPlaylistsInChannel/InGroup answer.
+//
+// A curator filter is refused together with a container filter (ErrInvalidListFilter): it has no
+// meaning under membership order that a client could page reliably, and silently dropping either filter
+// would answer a different question than the one asked.
 //
 // The two cursor shapes are deliberately distinct (see decodeCursor / decodeMembershipCursor): a token
 // from one ordering means nothing under the other, and decoding it as zero values would silently start
@@ -612,36 +617,22 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 
 	chF := strings.TrimSpace(p.ChannelFilter)
 	pgF := strings.TrimSpace(p.PlaylistGroupFilter)
+	curF := strings.TrimSpace(p.CuratorFilter)
 	if chF != "" || pgF != "" {
+		if curF != "" {
+			return nil, "", fmt.Errorf("%w: a curator filter cannot be combined with a channel or playlist-group filter", store.ErrInvalidListFilter)
+		}
 		return s.listPlaylistsByMembership(ctx, p, limit, chF, pgF)
 	}
 
-	order := p.Sort.SQLOrder()
-	tupleOp := p.Sort.TupleAfterCursorOp()
-
-	var q string
-	var args []any
-	if p.Cursor == "" {
-		args = []any{limit + 1}
-		q = fmt.Sprintf(`
-SELECT id, slug, body, created_at, updated_at
-FROM playlists
-ORDER BY created_at %s, id %s
-LIMIT $1`, order, order)
-	} else {
-		created, id, derr := decodeCursor(p.Cursor)
-		if derr != nil {
-			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
-		}
-		args = []any{limit + 1, created, id}
-		q = fmt.Sprintf(`
-SELECT id, slug, body, created_at, updated_at
-FROM playlists
-WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)
-ORDER BY created_at %s, id %s
-LIMIT $1`, tupleOp, order, order)
+	var filters []docFilter
+	if curF != "" {
+		filters = append(filters, curatorsKeyFilter(curF))
 	}
-
+	q, args, err := createdAtListQuery("playlists", limit, p.Sort, p.Cursor, filters)
+	if err != nil {
+		return nil, "", err
+	}
 	out, err := s.queryPlaylistRecords(ctx, q, args...)
 	if err != nil {
 		return nil, "", err
@@ -654,6 +645,75 @@ LIMIT $1`, tupleOp, order, order)
 		nextCursor = encodeCursor(last.CreatedAt, last.ID)
 	}
 	return out, nextCursor, nil
+}
+
+// docFilter is one optional predicate on a document table's body, for a created_at-ordered list.
+//
+// expr holds a single %s placeholder that createdAtListQuery fills with the predicate's bind parameter.
+// The body expression on its left must stay textually identical to the index expression in migration
+// 000009 (`body -> 'curators'`, `body ->> 'curator'`, `body -> 'publisher' ->> 'key'`), or the planner
+// cannot use the index and every filtered list becomes a sequential scan over all bodies.
+type docFilter struct {
+	expr string
+	arg  any
+}
+
+// curatorsKeyFilter matches a playlist or channel whose `curators` array holds an entity with this exact
+// `key`. jsonb containment (@>) is what the jsonb_path_ops GIN index serves; it compares the whole string,
+// so the match is exact and case-sensitive, like the ownership code's kid comparison. The probe is built
+// with json.Marshal, never by string concatenation, so any query text is a JSON string value and cannot
+// reshape the probe.
+func curatorsKeyFilter(key string) docFilter {
+	probe, _ := json.Marshal([]map[string]string{{"key": key}}) // a string map always marshals
+	return docFilter{expr: `body -> 'curators' @> %s::jsonb`, arg: string(probe)}
+}
+
+// groupCuratorFilter matches a playlist-group whose `curator` string equals name exactly. DP-1 core defines
+// that field as a display name, so this is attribution only (see docs/api_design.md).
+func groupCuratorFilter(name string) docFilter {
+	return docFilter{expr: `body ->> 'curator' = %s`, arg: name}
+}
+
+// publisherKeyFilter matches a channel whose `publisher.key` equals key exactly.
+func publisherKeyFilter(key string) docFilter {
+	return docFilter{expr: `body -> 'publisher' ->> 'key' = %s`, arg: key}
+}
+
+// createdAtListQuery builds the page query shared by every created_at-ordered list: (created_at, id)
+// keyset, direction from sort, limit+1 rows so the caller can tell whether another page exists, and every
+// filter ANDed in. table is one of the document-table literals the callers own, never client input; the
+// filter values and cursor fields are bind parameters.
+//
+// Filters do not change the ordering, so the cursor stays the plain (created_at, id) token and is not
+// bound to the filter: presenting it under different filters is still a well-defined page (the rows past
+// that boundary which match the new filters), exactly as decodeCursor already allows across sort
+// directions.
+func createdAtListQuery(table string, limit int, sort store.SortOrder, cursor string, filters []docFilter) (string, []any, error) {
+	args := []any{limit + 1}
+	var where []string
+	if cursor != "" {
+		created, id, err := decodeCursor(cursor)
+		if err != nil {
+			return "", nil, fmt.Errorf("%w: %w", store.ErrInvalidCursor, err)
+		}
+		args = append(args, created, id)
+		where = append(where, fmt.Sprintf("(created_at, id) %s ($2::timestamptz, $3::uuid)", sort.TupleAfterCursorOp()))
+	}
+	for _, f := range filters {
+		args = append(args, f.arg)
+		where = append(where, fmt.Sprintf(f.expr, fmt.Sprintf("$%d", len(args))))
+	}
+
+	var b strings.Builder
+	b.WriteString("\nSELECT id, slug, body, created_at, updated_at\nFROM ")
+	b.WriteString(table)
+	if len(where) > 0 {
+		b.WriteString("\nWHERE ")
+		b.WriteString(strings.Join(where, "\n  AND "))
+	}
+	order := sort.SQLOrder()
+	fmt.Fprintf(&b, "\nORDER BY created_at %s, id %s\nLIMIT $1", order, order)
+	return b.String(), args, nil
 }
 
 // rowQuerier is the one method resolveContainer needs, satisfied by both the pool and a pgx.Tx so a
@@ -1416,23 +1476,9 @@ WHERE slug = $1`
 	return &rec, nil
 }
 
-// ListPlaylistGroups implements store.Store (same pagination rules as ListPlaylists).
+// ListPlaylistGroups implements store.Store (same created_at pagination as an unfiltered ListPlaylists;
+// CuratorFilter matches the group's `curator` string).
 func (s *Store) ListPlaylistGroups(ctx context.Context, p *store.ListPlaylistsParams) ([]store.PlaylistGroupRecord, string, error) {
-	const (
-		firstPage = `
-SELECT id, slug, body, created_at, updated_at
-FROM playlist_groups
-ORDER BY created_at %s, id %s
-LIMIT $1`
-
-		afterCursor = `
-SELECT id, slug, body, created_at, updated_at
-FROM playlist_groups
-WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)
-ORDER BY created_at %s, id %s
-LIMIT $1`
-	)
-
 	if p == nil {
 		return nil, "", fmt.Errorf("nil list params")
 	}
@@ -1440,21 +1486,15 @@ LIMIT $1`
 	if err != nil {
 		return nil, "", err
 	}
-	order := p.Sort.SQLOrder()
-	tupleOp := p.Sort.TupleAfterCursorOp()
-
-	var rows pgx.Rows
-	if p.Cursor == "" {
-		q := fmt.Sprintf(firstPage, order, order)
-		rows, err = s.pool.Query(ctx, q, limit+1)
-	} else {
-		created, id, derr := decodeCursor(p.Cursor)
-		if derr != nil {
-			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
-		}
-		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
-		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
+	var filters []docFilter
+	if f := strings.TrimSpace(p.CuratorFilter); f != "" {
+		filters = append(filters, groupCuratorFilter(f))
 	}
+	q, args, err := createdAtListQuery("playlist_groups", limit, p.Sort, p.Cursor, filters)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("list playlist_groups: %w", err)
 	}
@@ -1736,23 +1776,9 @@ WHERE c.slug = $1`
 	return &rec, nil
 }
 
-// ListChannels implements store.Store (same pagination rules as ListPlaylists).
+// ListChannels implements store.Store (same created_at pagination as an unfiltered ListPlaylists;
+// CuratorFilter matches `curators[].key`, PublisherFilter `publisher.key`, both ANDed when set).
 func (s *Store) ListChannels(ctx context.Context, p *store.ListPlaylistsParams) ([]store.ChannelRecord, string, error) {
-	const (
-		firstPage = `
-SELECT id, slug, body, created_at, updated_at
-FROM channels
-ORDER BY created_at %s, id %s
-LIMIT $1`
-
-		afterCursor = `
-SELECT id, slug, body, created_at, updated_at
-FROM channels
-WHERE (created_at, id) %s ($2::timestamptz, $3::uuid)
-ORDER BY created_at %s, id %s
-LIMIT $1`
-	)
-
 	if p == nil {
 		return nil, "", fmt.Errorf("nil list params")
 	}
@@ -1760,21 +1786,18 @@ LIMIT $1`
 	if err != nil {
 		return nil, "", err
 	}
-	order := p.Sort.SQLOrder()
-	tupleOp := p.Sort.TupleAfterCursorOp()
-
-	var rows pgx.Rows
-	if p.Cursor == "" {
-		q := fmt.Sprintf(firstPage, order, order)
-		rows, err = s.pool.Query(ctx, q, limit+1)
-	} else {
-		created, id, derr := decodeCursor(p.Cursor)
-		if derr != nil {
-			return nil, "", fmt.Errorf("%w: %w", store.ErrInvalidCursor, derr)
-		}
-		q := fmt.Sprintf(afterCursor, tupleOp, order, order)
-		rows, err = s.pool.Query(ctx, q, limit+1, created, id)
+	var filters []docFilter
+	if f := strings.TrimSpace(p.CuratorFilter); f != "" {
+		filters = append(filters, curatorsKeyFilter(f))
 	}
+	if f := strings.TrimSpace(p.PublisherFilter); f != "" {
+		filters = append(filters, publisherKeyFilter(f))
+	}
+	q, args, err := createdAtListQuery("channels", limit, p.Sort, p.Cursor, filters)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("list channels: %w", err)
 	}

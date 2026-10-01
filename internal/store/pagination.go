@@ -13,6 +13,12 @@ var ErrListLimitExceeded = errors.New("list limit exceeds store maximum")
 // unfiltered one by created_at; their tokens are not interchangeable). Maps to HTTP 400.
 var ErrInvalidCursor = errors.New("invalid cursor")
 
+// ErrInvalidListFilter is returned when a list query combines filters that have no single ordering: a
+// curator filter pages by created_at, a channel or playlist-group filter by membership position, so the
+// two cannot share one keyset. Maps to HTTP 400. The HTTP layer rejects the combination first; the store
+// refuses it too rather than silently dropping one filter.
+var ErrInvalidListFilter = errors.New("invalid list filter")
+
 // Store-side list limits: default when the caller passes zero; hard cap above typical API max to catch bugs or abuse.
 const (
 	StoreDefaultListLimit = 100

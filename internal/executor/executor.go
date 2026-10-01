@@ -58,8 +58,9 @@ type Executor interface {
 	CreatePlaylist(ctx context.Context, req *models.PlaylistCreateRequest) (*store.PlaylistRecord, error)
 	// GetPlaylist returns the stored playlist document for id or slug (HTTP layer JSON-encodes the response).
 	GetPlaylist(ctx context.Context, idOrSlug string) (*store.PlaylistRecord, error)
-	// ListPlaylists returns one page of playlist bodies and an optional next cursor (optional channel or playlist-group filter; id or slug).
-	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]store.PlaylistRecord, string, error)
+	// ListPlaylists returns one page of playlist bodies and an optional next cursor (optional channel or
+	// playlist-group filter, id or slug; or, exclusive with those, a curator key matched against curators[].key).
+	ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter, curatorFilter string) ([]store.PlaylistRecord, string, error)
 	// ReplacePlaylist performs a full PUT (owner-bound; owners may be added, never removed): verify owner signature, feed co-sign, validate, update.
 	ReplacePlaylist(ctx context.Context, idOrSlug string, req *models.PlaylistReplaceRequest, intent *models.SignedIntent) (*store.PlaylistRecord, error)
 	// DeletePlaylist verifies the signed delete-intent against the stored owner keys, then removes the playlist row.
@@ -74,8 +75,8 @@ type Executor interface {
 	CreatePlaylistGroup(ctx context.Context, req *models.PlaylistGroupCreateRequest) (*store.PlaylistGroupRecord, error)
 	// GetPlaylistGroup returns the stored playlist-group document for id or slug (HTTP layer JSON-encodes).
 	GetPlaylistGroup(ctx context.Context, idOrSlug string) (*store.PlaylistGroupRecord, error)
-	// ListPlaylistGroups returns one page of playlist-group bodies.
-	ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.PlaylistGroupRecord, string, error)
+	// ListPlaylistGroups returns one page of playlist-group bodies (optional curator filter, matched against the `curator` string).
+	ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder, curatorFilter string) ([]store.PlaylistGroupRecord, string, error)
 	// ReplacePlaylistGroup re-resolves playlist URIs, verifies the owner signature, re-signs, and commits updates in one transaction.
 	ReplacePlaylistGroup(ctx context.Context, idOrSlug string, req *models.PlaylistGroupReplaceRequest, intent *models.SignedIntent) (*store.PlaylistGroupRecord, error)
 	// DeletePlaylistGroup verifies the signed delete-intent against the stored curator, then removes the playlist-group row (membership CASCADE).
@@ -85,8 +86,8 @@ type Executor interface {
 	CreateChannel(ctx context.Context, req *models.ChannelCreateRequest) (*store.ChannelRecord, error)
 	// GetChannel returns the stored channel document for id or slug (HTTP layer JSON-encodes).
 	GetChannel(ctx context.Context, idOrSlug string) (*store.ChannelRecord, error)
-	// ListChannels returns one page of channel bodies.
-	ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.ChannelRecord, string, error)
+	// ListChannels returns one page of channel bodies (optional curator and publisher key filters, ANDed).
+	ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder, curatorFilter, publisherFilter string) ([]store.ChannelRecord, string, error)
 	// ReplaceChannel re-resolves playlist URIs, verifies the owner (publisher) signature, re-signs, and commits updates in one transaction.
 	ReplaceChannel(ctx context.Context, idOrSlug string, req *models.ChannelReplaceRequest, intent *models.SignedIntent) (*store.ChannelRecord, error)
 	// DeleteChannel verifies the signed delete-intent against the stored publisher, then removes the channel row (membership CASCADE).
@@ -360,7 +361,7 @@ func (e *impl) GetPlaylist(ctx context.Context, idOrSlug string) (*store.Playlis
 }
 
 // ListPlaylists returns one page of stored playlist records.
-func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter string) ([]store.PlaylistRecord, string, error) {
+func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort store.SortOrder, channelFilter, playlistGroupFilter, curatorFilter string) ([]store.PlaylistRecord, string, error) {
 	if !e.extensionsEnabled && strings.TrimSpace(channelFilter) != "" {
 		return nil, "", ErrExtensionsDisabled
 	}
@@ -370,6 +371,7 @@ func (e *impl) ListPlaylists(ctx context.Context, limit int, cursor string, sort
 		Sort:                sort,
 		ChannelFilter:       channelFilter,
 		PlaylistGroupFilter: playlistGroupFilter,
+		CuratorFilter:       curatorFilter,
 	})
 }
 
@@ -634,11 +636,12 @@ func (e *impl) GetPlaylistGroup(ctx context.Context, idOrSlug string) (*store.Pl
 }
 
 // ListPlaylistGroups returns one page of stored playlist-group records.
-func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.PlaylistGroupRecord, string, error) {
+func (e *impl) ListPlaylistGroups(ctx context.Context, limit int, cursor string, sort store.SortOrder, curatorFilter string) ([]store.PlaylistGroupRecord, string, error) {
 	return e.store.ListPlaylistGroups(ctx, &store.ListPlaylistsParams{
-		Limit:  limit,
-		Cursor: cursor,
-		Sort:   sort,
+		Limit:         limit,
+		Cursor:        cursor,
+		Sort:          sort,
+		CuratorFilter: curatorFilter,
 	})
 }
 
@@ -815,14 +818,16 @@ func (e *impl) GetChannel(ctx context.Context, idOrSlug string) (*store.ChannelR
 }
 
 // ListChannels returns one page of stored channel records.
-func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder) ([]store.ChannelRecord, string, error) {
+func (e *impl) ListChannels(ctx context.Context, limit int, cursor string, sort store.SortOrder, curatorFilter, publisherFilter string) ([]store.ChannelRecord, string, error) {
 	if !e.extensionsEnabled {
 		return nil, "", ErrExtensionsDisabled
 	}
 	return e.store.ListChannels(ctx, &store.ListPlaylistsParams{
-		Limit:  limit,
-		Cursor: cursor,
-		Sort:   sort,
+		Limit:           limit,
+		Cursor:          cursor,
+		Sort:            sort,
+		CuratorFilter:   curatorFilter,
+		PublisherFilter: publisherFilter,
 	})
 }
 

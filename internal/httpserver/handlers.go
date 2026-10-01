@@ -92,12 +92,19 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 	}
 	chF := strings.TrimSpace(c.Query("channel"))
 	pgF := strings.TrimSpace(c.Query("playlist-group"))
+	curF := strings.TrimSpace(c.Query("curator"))
 	if chF != "" && pgF != "" {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel and playlist-group filters cannot be used together")
 		return
 	}
+	// A container filter orders by membership position and a curator filter by created_at; one page
+	// cannot follow both keysets, so the combination is refused rather than one filter dropped.
+	if curF != "" && (chF != "" || pgF != "") {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", "curator filter cannot be combined with channel or playlist-group filters")
+		return
+	}
 
-	pl, next, err := h.Exec.ListPlaylists(c.Request.Context(), limit, cursor, sortOrder, chF, pgF)
+	pl, next, err := h.Exec.ListPlaylists(c.Request.Context(), limit, cursor, sortOrder, chF, pgF, curF)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -255,7 +262,8 @@ func (h *Handler) ListPlaylistGroups(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	bodies, next, err := h.Exec.ListPlaylistGroups(c.Request.Context(), limit, cursor, sortOrder)
+	curF := strings.TrimSpace(c.Query("curator"))
+	bodies, next, err := h.Exec.ListPlaylistGroups(c.Request.Context(), limit, cursor, sortOrder, curF)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -358,7 +366,9 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err2.Error())
 		return
 	}
-	bodies, next, err := h.Exec.ListChannels(c.Request.Context(), limit, cursor, sortOrder)
+	curF := strings.TrimSpace(c.Query("curator"))
+	pubF := strings.TrimSpace(c.Query("publisher"))
+	bodies, next, err := h.Exec.ListChannels(c.Request.Context(), limit, cursor, sortOrder, curF, pubF)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)

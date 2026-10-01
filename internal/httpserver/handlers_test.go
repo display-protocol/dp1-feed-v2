@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -134,7 +135,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "").
 					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "cursor1", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -151,7 +152,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?limit=50&sort=desc",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "").
+					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "", "").
 					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -167,7 +168,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?cursor=abc123",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "").
+					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "", "").
 					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -204,7 +205,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?channel=my-channel",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "", "").
 					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -219,7 +220,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?playlist-group=my-group",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "my-group").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "my-group", "").
 					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -242,11 +243,64 @@ func TestListPlaylists(t *testing.T) {
 			},
 		},
 		{
+			name:        "success with curator filter (trimmed, %-decoded)",
+			queryParams: "?curator=%20did:key:zCurator%20",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "did:key:zCurator").
+					Return([]store.PlaylistRecord{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[playlist.Playlist]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
+			},
+		},
+		{
+			name:           "curator with channel filter",
+			queryParams:    "?curator=did:key:zC&channel=ch",
+			setupMock:      func(m *mocks.MockExecutor) {},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, "bad_request", resp.Error)
+				assert.Contains(t, resp.Message, "curator filter cannot be combined")
+			},
+		},
+		{
+			name:           "curator with playlist-group filter",
+			queryParams:    "?curator=did:key:zC&playlist-group=pg",
+			setupMock:      func(m *mocks.MockExecutor) {},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Contains(t, resp.Message, "curator filter cannot be combined")
+			},
+		},
+		{
+			name:        "store refuses curator with container filter",
+			queryParams: "?curator=did:key:zC",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "did:key:zC").
+					Return(nil, "", fmt.Errorf("%w: test", store.ErrInvalidListFilter))
+			},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Equal(t, "bad_request", resp.Error)
+			},
+		},
+		{
 			name:        "executor returns not found error",
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "").
 					Return(nil, "", store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -261,7 +315,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "").
 					Return(nil, "", errors.New("db connection failed"))
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -1046,7 +1100,7 @@ func TestListPlaylistGroups(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc).
+					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc, "").
 					Return([]store.PlaylistGroupRecord{groupRec(playlistgroup.Group{Title: "Test Group"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -1054,6 +1108,21 @@ func TestListPlaylistGroups(t *testing.T) {
 				var resp ListResponse[playlistgroup.Group]
 				require.NoError(t, json.Unmarshal(body, &resp))
 				assert.Len(t, resp.Items, 1)
+			},
+		},
+		{
+			name:        "success with curator filter",
+			queryParams: "?curator=Gallery%20Curator",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc, "Gallery Curator").
+					Return([]store.PlaylistGroupRecord{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[playlistgroup.Group]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
 			},
 		},
 		{
@@ -1415,7 +1484,7 @@ func TestListChannels(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListChannels(gomock.Any(), 100, "", store.SortAsc).
+					ListChannels(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return([]store.ChannelRecord{channelRec(channels.Channel{Title: "Test Channel"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -1423,6 +1492,21 @@ func TestListChannels(t *testing.T) {
 				var resp ListResponse[channels.Channel]
 				require.NoError(t, json.Unmarshal(body, &resp))
 				assert.Len(t, resp.Items, 1)
+			},
+		},
+		{
+			name:        "success with curator and publisher filters",
+			queryParams: "?curator=did:key:zCurator&publisher=did:key:zPublisher",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListChannels(gomock.Any(), 100, "", store.SortAsc, "did:key:zCurator", "did:key:zPublisher").
+					Return([]store.ChannelRecord{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[channels.Channel]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
 			},
 		},
 		{

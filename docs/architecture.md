@@ -68,7 +68,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 - **Engine:** PostgreSQL via `pgx`.
 - **Documents:** JSONB columns for playlist, playlist-group, and channel bodies (flexible schema-aligned storage with validated write path).
 - **Relationships:** junction tables (e.g. group/channel membership); appropriate indexes for id, slug, and key pagination patterns.
-- **Migrations:** `golang-migrate` (SQL under `db/migrations/`). `updated_at` on the document tables is trigger-maintained and strictly increasing per row (000008); it is the generation token for conditional replace/delete and for membership-ordered list cursors.
+- **Migrations:** `golang-migrate` (SQL under `db/migrations/`). `updated_at` on the document tables is trigger-maintained and strictly increasing per row (000008); it is the generation token for conditional replace/delete and for membership-ordered list cursors. The `curator` / `publisher` list filters query `body` directly through expression indexes (000009); each index expression must stay textually identical to its predicate in `internal/store/pg/store.go`, which `TestIntegration_Migration000009_attributionFilterIndexes` pins.
 - **Timekeeping:** `updated_at` maintained with database triggers where applicable.
 
 Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membership tables, and indexed playlist items—see migrations for the authoritative schema.
