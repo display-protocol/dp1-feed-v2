@@ -18,12 +18,19 @@ type PlaylistCreateRequest struct {
 	Slug      string                  `json:"slug,omitempty"`
 	Items     []playlist.PlaylistItem `json:"items" binding:"required"`
 
-	Note         *dp1playlists.Note         `json:"note,omitempty"`
-	Curators     []identity.Entity          `json:"curators,omitempty"`
-	Summary      string                     `json:"summary,omitempty"`
+	Note     *dp1playlists.Note `json:"note,omitempty"`
+	Curators []identity.Entity  `json:"curators,omitempty"`
+	Summary  string             `json:"summary,omitempty"`
+	// OpenAt is when this playlist's own subject became public (an exhibition's opening,
+	// a collection's release) — a playlist-level fact for ordering/display, distinct from
+	// any item's displayAt scheduling (dp1#55; see identity.Entity's own doc comment for
+	// why this SDK needed updating for it).
+	OpenAt       string                     `json:"openAt,omitempty"`
 	CoverImage   string                     `json:"coverImage,omitempty"`
 	Defaults     *playlist.Defaults         `json:"defaults,omitempty"`
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
+	// Links is editorial content about the playlist (articles, events, news), dp1#55.
+	Links []identity.Link `json:"links,omitempty"`
 
 	// Visibility is the playlists extension's listing request (§3.7): "public" (the default when absent)
 	// or "unlisted". Modeled here only so strict decoding accepts it; the pinned dp1-go Playlist struct does
