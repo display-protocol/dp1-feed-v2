@@ -42,3 +42,9 @@ config.yaml
 
 # Locally built server binary (go build ./cmd/server)
 /server
+
+# Local-only dp1-go fork for the go.mod replace directive, copied in so the
+# Docker build context (which COPYs this repo, not arbitrary host paths) can
+# see it. Not a real vendored dependency — remove once #55 and the Entity
+# consolidation ship in a tagged dp1-go release and the replace is dropped.
+/.local-deps/

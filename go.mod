@@ -125,4 +125,4 @@ require (
 
 tool go.uber.org/mock/mockgen
 
-replace github.com/display-protocol/dp1-go => /Users/nguyenphuocsang/Bitmark/dp1-go/.worktrees/openat-entity-extension
+replace github.com/display-protocol/dp1-go => ./.local-deps/dp1-go
