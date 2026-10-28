@@ -270,16 +270,19 @@ RETURNING created_at`
 
 // GetPlaylist implements store.Store.
 func (s *Store) GetPlaylist(ctx context.Context, idOrSlug string) (*store.PlaylistRecord, error) {
-	const (
+	var (
 		byID = `
 SELECT id, slug, body, created_at, updated_at
 FROM playlists
 WHERE id = $1`
 
+		// A slug never reaches an unlisted playlist (see listedPlaylistSQL): every slug-addressed route —
+		// GET, PUT and DELETE by slug, and a container's same-origin reference by slug URL — resolves
+		// through here, so an unlisted row answers exactly as a slug nobody holds.
 		bySlug = `
 SELECT id, slug, body, created_at, updated_at
 FROM playlists
-WHERE slug = $1`
+WHERE slug = $1 AND ` + listedPlaylistSQL("")
 	)
 
 	id, err := uuid.Parse(idOrSlug)
@@ -393,7 +396,7 @@ SET playlist_id = EXCLUDED.playlist_id,
 }
 
 func (s *Store) GetPlaylistItems(ctx context.Context, idOrSlug string) ([]store.PlaylistItemRecord, error) {
-	const (
+	var (
 		byID = `
 SELECT item_id, playlist_id, position, item
 FROM playlist_item_index
@@ -404,7 +407,7 @@ ORDER BY position`
 SELECT i.item_id, i.playlist_id, i.position, i.item
 FROM playlist_item_index i
 JOIN playlists p ON i.playlist_id = p.id
-WHERE p.slug = $1
+WHERE p.slug = $1 AND ` + listedPlaylistSQL("p.") + `
 ORDER BY i.position`
 	)
 
@@ -469,11 +472,19 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 
 	args := []any{limit + 1}
 
+	// Unscoped, this list is a directory across every playlist, so it leaves out items of unlisted
+	// playlists. Scoped to a container it is not: the container's own signed document names its members,
+	// unlisted ones included (playlists extension §3.7), and the container filter replaces this predicate.
+	filterSQL := ` AND EXISTS (
+			SELECT 1 FROM playlists p
+			WHERE p.id = i.playlist_id
+			AND ` + listedPlaylistSQL("p.") + `
+		)`
+
 	// The container filter resolves to exactly one container (resolveContainer), and an unknown one is
 	// the documented empty page. The filter itself stays an EXISTS on membership rather than a join so
 	// a playlist the container lists at several positions contributes its items once: this list is
 	// ordered by the playlist's created_at, not by position, and stays that way (documented).
-	var filterSQL string
 	if chF != "" || pgF != "" {
 		containerTable, memberTable, containerColumn := "channels", "channel_members", "channel_id"
 		key := chF
@@ -556,11 +567,20 @@ LIMIT $1`, filterSQL, cursorSQL, order, order, order)
 }
 
 // GetPlaylistItem implements store.Store.
+//
+// The index is keyed by (playlist_id, item_id), so one item id can sit in several playlists — a work copied
+// from a public playlist into a private one keeps its id. This lookup is a reverse index across playlists,
+// so it answers only from listed ones (see listedPlaylistSQL): otherwise it could serve an unlisted copy,
+// whose title or note the owner never put in a directory. Among listed copies the oldest playlist answers,
+// so the same id gives the same item on every call.
 func (s *Store) GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*store.PlaylistItemRecord, error) {
-	const q = `
-SELECT item_id, playlist_id, position, item
-FROM playlist_item_index
-WHERE item_id = $1`
+	q := `
+SELECT i.item_id, i.playlist_id, i.position, i.item
+FROM playlist_item_index i
+JOIN playlists p ON p.id = i.playlist_id
+WHERE i.item_id = $1 AND ` + listedPlaylistSQL("p.") + `
+ORDER BY i.playlist_created_at, i.playlist_id
+LIMIT 1`
 
 	var rec store.PlaylistItemRecord
 	var raw []byte
@@ -625,11 +645,7 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 		return s.listPlaylistsByMembership(ctx, p, limit, chF, pgF)
 	}
 
-	var filters []docFilter
-	if curF != "" {
-		filters = append(filters, curatorsKeyFilter(curF))
-	}
-	q, args, err := createdAtListQuery("playlists", limit, p.Sort, p.Cursor, filters)
+	q, args, err := createdAtListQuery("playlists", limit, p.Sort, p.Cursor, playlistDirectoryFilters(curF))
 	if err != nil {
 		return nil, "", err
 	}
@@ -649,13 +665,48 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 
 // docFilter is one optional predicate on a document table's body, for a created_at-ordered list.
 //
-// expr holds a single %s placeholder that createdAtListQuery fills with the predicate's bind parameter.
+// expr holds a single %s placeholder that createdAtListQuery fills with the predicate's bind parameter, or,
+// when arg is nil, no placeholder at all: a fixed predicate such as listedPlaylistSQL that binds nothing.
 // The body expression on its left must stay textually identical to the index expression in migration
 // 000009 (`body -> 'curators'`, `body ->> 'curator'`, `body -> 'publisher' ->> 'key'`), or the planner
 // cannot use the index and every filtered list becomes a sequential scan over all bodies.
 type docFilter struct {
 	expr string
 	arg  any
+}
+
+// listedPlaylistSQL is the predicate for "a directory may list this playlist" (playlists extension §3.7),
+// over the playlists row whose columns carry the given alias prefix ("" or "p.").
+//
+// Visibility is a member of the signed document, read from the stored body exactly as served, so a
+// replace that changes it changes the listing in the same commit and no write path maintains a copy (the
+// same choice migration 000009 made for the attribution filters). The rule fails closed: listed only
+// when the member is absent or exactly the string "public". Any other value — "unlisted", a value a later
+// spec version defines, a different case, an empty string, a JSON null — keeps the playlist out, because a
+// directory that does not understand a listing request must not publish what the owner may have asked to
+// keep off it.
+//
+// COALESCE keeps the result a plain boolean: for a present null, ->> is SQL NULL and the comparison would
+// otherwise be NULL, which a WHERE drops but a future NOT would also drop.
+//
+// Only directories apply it: the unfiltered and curator-filtered playlist lists, the unscoped item list,
+// the item reverse lookup, and slug resolution. Lookups by id and container membership reads do not.
+func listedPlaylistSQL(alias string) string {
+	return fmt.Sprintf(`COALESCE(%[1]sbody ->> 'visibility' = 'public', %[1]sbody -> 'visibility' IS NULL)`, alias)
+}
+
+// playlistDirectoryFilters is the filter set of the created_at-ordered playlist list. Unfiltered or by
+// curator, that list is a directory, so it always carries the listing rule: a curator filter is no
+// exception, or one shared link would hand out the same person's other unlisted playlists. The
+// container-filtered lists (listPlaylistsByMembership) are not directories (playlists extension §3.7).
+// Shared with TestIntegration_Migration000009_attributionFilterIndexes so the plan it pins is the one this
+// list runs.
+func playlistDirectoryFilters(curator string) []docFilter {
+	filters := []docFilter{{expr: listedPlaylistSQL("")}}
+	if curator != "" {
+		filters = append(filters, curatorsKeyFilter(curator))
+	}
+	return filters
 }
 
 // curatorsKeyFilter matches a playlist or channel whose `curators` array holds an entity with this exact
@@ -700,6 +751,10 @@ func createdAtListQuery(table string, limit int, sort store.SortOrder, cursor st
 		where = append(where, fmt.Sprintf("(created_at, id) %s ($2::timestamptz, $3::uuid)", sort.TupleAfterCursorOp()))
 	}
 	for _, f := range filters {
+		if f.arg == nil {
+			where = append(where, f.expr)
+			continue
+		}
 		args = append(args, f.arg)
 		where = append(where, fmt.Sprintf(f.expr, fmt.Sprintf("$%d", len(args))))
 	}

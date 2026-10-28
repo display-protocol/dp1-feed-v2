@@ -57,15 +57,17 @@ func TestIntegration_Migration000009_attributionFilterIndexes(t *testing.T) {
 	s := NewStore(pool)
 	for _, tc := range []struct {
 		name, table, index string
-		filter             docFilter
+		filters            []docFilter
 	}{
-		{"playlist curators", "playlists", "idx_playlists_curators", curatorsKeyFilter(long)},
-		{"channel curators", "channels", "idx_channels_curators", curatorsKeyFilter(long)},
-		{"channel publisher", "channels", "idx_channels_publisher_key", publisherKeyFilter(long)},
-		{"group curator", "playlist_groups", "idx_playlist_groups_curator", groupCuratorFilter(long)},
+		// The playlist list always ANDs the visibility rule in (playlistDirectoryFilters), so the plan is
+		// pinned on that exact filter set rather than the curator predicate alone.
+		{"playlist curators", "playlists", "idx_playlists_curators", playlistDirectoryFilters(long)},
+		{"channel curators", "channels", "idx_channels_curators", []docFilter{curatorsKeyFilter(long)}},
+		{"channel publisher", "channels", "idx_channels_publisher_key", []docFilter{publisherKeyFilter(long)}},
+		{"group curator", "playlist_groups", "idx_playlist_groups_curator", []docFilter{groupCuratorFilter(long)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q, args, err := createdAtListQuery(tc.table, 10, store.SortAsc, "", []docFilter{tc.filter})
+			q, args, err := createdAtListQuery(tc.table, 10, store.SortAsc, "", tc.filters)
 			if err != nil {
 				t.Fatal(err)
 			}
