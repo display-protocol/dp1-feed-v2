@@ -31,12 +31,6 @@ type PlaylistCreateRequest struct {
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
 	// Links is editorial content about the playlist (articles, events, news), dp1#55.
 	Links []identity.Link `json:"links,omitempty"`
-	// Series is the series this playlist's items belong to — one entry per series registry
-	// row, so a consumer can group items by contract.address + contract.seriesId and have
-	// something to show for the group (dp1#55 §3.7). Bound only so the decode does not fail
-	// on an unknown field; like every other field here it is read, never used to rebuild the
-	// document — Raw is what gets stored and signed.
-	Series []playlist.SeriesEntry `json:"series,omitempty"`
 
 	// Visibility is the playlists extension's listing request (§3.7): "public" (the default when absent)
 	// or "unlisted". Modeled here only so strict decoding accepts it; the pinned dp1-go Playlist struct does
