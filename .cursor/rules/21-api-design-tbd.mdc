@@ -55,6 +55,14 @@ alwaysApply: true
 - **`limit`:** 1–100, default 100. **`cursor`:** opaque, bound to the ordering that issued it (undecodable or mismatched → 400). **`sort`:** `asc`|`desc` by `created_at`, default `asc` — except `GET /api/v1/playlists` filtered by `channel`/`playlist-group`, which orders by membership position (the signed document's order).
 - **`playlist-items` and `playlists` lists:** query `channel` or `playlist-group` (UUID/slug); mutually exclusive where enforced. Channel filter on `GET /api/v1/playlists` follows extensions policy (404 `extensions_disabled` when extensions off).
 
+## Playlist visibility
+
+- Playlists extension §3.7 `visibility`: `public` (default when absent) or `unlisted`, signed and stored verbatim; any string accepted, non-string (`null` included) `400`. A listing request, not access control.
+- **Directories list only absent or exactly `public`** (fail closed): unfiltered and `curator`-filtered `GET /api/v1/playlists`, unscoped `GET /api/v1/playlist-items`, and `GET /api/v1/playlist-items/{id}` (answers from listed playlists only; oldest listed copy wins).
+- **Slugs never resolve an unlisted playlist** (GET/PUT/DELETE by slug and same-origin slug references answer as a missing slug); UUID lookups always do. The slug is still held (create reuse is `409`).
+- **Containers** (`channel` / `playlist-group` filters, membership reads) include unlisted members they name.
+- Canonical text: `docs/api_design.md` → "Playlist visibility".
+
 ## Error model
 
 - Body shape: `{"error":"<stable_code>","message":"<detail>"}` — see `internal/httpserver/errors.go`.

@@ -314,7 +314,8 @@ the remainder is discarded, never buffered — at most 256 KiB of it is read, or
 
 ## Pagination, sorting, and filtering
 
-**Lists** (`playlists`, `playlist-groups`, `channels`, `playlist-items`) share:
+**Lists** (`playlists`, `playlist-groups`, `channels`, `playlist-items`) share the parameters below. The
+playlist and playlist-item lists also leave out playlists that are not listed (see *Playlist visibility*).
 
 | Query param | Meaning |
 | ----------- | ------- |
@@ -398,6 +399,59 @@ position-ordered list and leaking the decoy's items into a UUID-filtered item li
 - Backed by indexes over the stored `body` (migration 000009): GIN `jsonb_path_ops` for the `curators`
   arrays, hash indexes for the scalar fields. Both store hashes rather than the values, because the values
   are client-supplied and unbounded and a btree entry over about 2.7 kB would fail the insert.
+
+## Playlist visibility
+
+A playlist may carry the playlists extension's top-level **`visibility`** member (DP-1 playlists extension
+§3.7): `public`, the default when absent, or `unlisted`. It is inside the signed bytes, so only an owner
+sets or changes it (with a re-signed `PUT`), and the feed stores and serves it untouched. It is a listing
+request, not access control: an unlisted playlist is still served to anyone who has its UUID, and anyone
+who has the UUID can pass it on. The Feral File app marks every playlist a person shares by link this way.
+
+**A directory lists a playlist only when `visibility` is absent or exactly `public`.** Every other value
+fails closed: `unlisted`, a value a later spec version defines, a different case, an empty string, or any
+non-string value. Any string is accepted on write, because the spec's vocabulary is open; a non-string
+value, `null` included, is a `400` naming the member (`models.Visibility`). A non-string value can still
+reach storage inside a remote member ingested through a group or channel, which is stored as its origin
+signed it, and the listing rule keeps it out.
+
+| Surface | A playlist that is not listed |
+| ------- | ----------------------------- |
+| `GET /api/v1/playlists/{uuid}` | Served, as for any playlist. |
+| `GET /api/v1/playlists/{slug}`, and `PUT` / `DELETE` by slug | `404`, exactly as for a slug nobody holds. |
+| A group's or channel's same-origin reference by slug URL | Fails exactly as a reference to a missing slug; reference it by UUID. |
+| `GET /api/v1/playlists` unfiltered, or with `curator` | Left out. |
+| `GET /api/v1/playlists` with `channel` / `playlist-group` | Included where that container names it. |
+| `GET /api/v1/playlist-items` unscoped | Its items are left out. |
+| `GET /api/v1/playlist-items` with `channel` / `playlist-group` | Its items are included where that container names it. |
+| `GET /api/v1/playlist-items/{id}` | Answers only from listed playlists: an item held only by playlists that are not listed is `404`. Among listed copies the oldest playlist (by `created_at`) answers. |
+| `GET /api/v1/channels/{id}`, `GET /api/v1/playlist-groups/{id}` | Unchanged: the container's signed document names its members by URL. |
+
+Why each line:
+
+- **Directories, curator filter included.** A curator filter enumerates playlists the caller did not
+  name. Without the rule, one link shared with a friend would hand out a list of the same person's other
+  unlisted playlists.
+- **Containers.** A channel or group that lists an unlisted playlist names it in its own signed document,
+  which is already public. Its member lists repeat what that document says; the container's author chose
+  to name it.
+- **Slugs.** The feed never derives a slug. The client supplies one, it is signed, and it must be unique.
+  Clients usually derive it from the title (the Feral File app sends the title plus the first 8 hex digits
+  of the id, about 32 bits), so it is far easier to guess than a random UUID. Slug resolution therefore
+  skips playlists that are not listed, on every route at once, because they all resolve through one store
+  read. An unlisted playlist still holds its slug, so a create that reuses it is `409`. That confirms a
+  slug is taken but never reveals the document or its id; it is an accepted limit. Owners address their
+  own unlisted playlists by UUID, as the Feral File app already does.
+- **Item lookup.** The item index is keyed by playlist and item, so one item id can sit in several
+  playlists: a work copied from a public playlist into a private one keeps its id. The lookup is a
+  reverse index across playlists, and it would otherwise answer with whichever copy the database returned
+  first, possibly the unlisted one, whose title or note the owner never put in a directory.
+
+**Implementation.** The rule is one SQL predicate over the stored body (`listedPlaylistSQL` in
+`internal/store/pg/store.go`), read the same way the attribution filters read the document (migration
+000009). A replace that changes `visibility` changes the listing in the same commit; no write path keeps a
+copy, and no migration or backfill exists. A playlist the feed first learns about through a remote
+reference is stored from its own signed bytes, so its visibility applies from the moment it is ingested.
 
 ---
 

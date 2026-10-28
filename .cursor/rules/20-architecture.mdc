@@ -66,6 +66,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 - **Documents:** JSONB for playlist, playlist-group, channel bodies (validated write path).
 - **Relationships:** junction tables; indexes for id, slug, pagination.
 - **Migrations:** golang-migrate; SQL under `db/migrations/`.
+- **Playlist visibility:** directories and slug resolution apply `listedPlaylistSQL` (store/pg) over the stored body: listed only when `visibility` is absent or exactly `public`. No column, index or write-path copy. UUID lookups and container membership reads skip it.
 - **Timekeeping:** `updated_at` via DB triggers where applicable.
 
 Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_groups`, `channels`, membership, indexed playlist items.
@@ -73,7 +74,7 @@ Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_grou
 ## Request flow (illustrative)
 
 - **Create playlist:** POST → RequireSignatures (body has signatures[]) → parse models → executor: verify signatures + owner-role authority → feed co-sign (`dp1svc`) → validate → store → JSON response.
-- **Read playlist:** GET → store by id/slug → JSONB body (signatures included).
+- **Read playlist:** GET → store by id, or by slug among listed playlists only → JSONB body (signatures included).
 
 ## Authentication
 

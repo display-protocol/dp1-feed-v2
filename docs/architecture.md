@@ -69,6 +69,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 - **Documents:** JSONB columns for playlist, playlist-group, and channel bodies (flexible schema-aligned storage with validated write path).
 - **Relationships:** junction tables (e.g. group/channel membership); appropriate indexes for id, slug, and key pagination patterns.
 - **Migrations:** `golang-migrate` (SQL under `db/migrations/`). `updated_at` on the document tables is trigger-maintained and strictly increasing per row (000008); it is the generation token for conditional replace/delete and for membership-ordered list cursors. The `curator` / `publisher` list filters query `body` directly through expression indexes (000009); each index expression must stay textually identical to its predicate in `internal/store/pg/store.go`, which `TestIntegration_Migration000009_attributionFilterIndexes` pins.
+- **Playlist visibility:** directories (the unfiltered and curator-filtered playlist lists, the unscoped item list, the item reverse lookup) and slug resolution apply one predicate over the stored `body`, `listedPlaylistSQL` in `internal/store/pg/store.go`: listed only when `visibility` is absent or exactly `public`. No column or index backs it and no write path maintains it, so a replace changes the listing in the same commit. Lookups by UUID and container membership reads do not apply it. See `docs/api_design.md`, Playlist visibility.
 - **Timekeeping:** `updated_at` maintained with database triggers where applicable.
 
 Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membership tables, and indexed playlist items—see migrations for the authoritative schema.
@@ -92,7 +93,7 @@ POST /api/v1/playlists
 
 ```text
 GET /api/v1/playlists/:id
-  → Store load by id or slug
+  → Store load by id, or by slug among listed playlists only (visibility)
   → Return JSONB body (signatures included)
 ```
 

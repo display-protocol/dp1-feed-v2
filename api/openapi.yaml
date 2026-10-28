@@ -159,6 +159,12 @@ paths:
         channel/group document lists its playlists (a playlist listed at several positions appears once
         per position). With a curator filter it is ordered by created_at. Cursors are specific to the
         ordering that issued them.
+
+
+        Unfiltered and curator-filtered, this list is a directory and leaves out every playlist whose
+        signed `visibility` is anything other than absent or exactly `public` (playlists extension §3.7;
+        see docs/api_design.md, Playlist visibility). A channel or playlist-group filter lists the
+        members that container's signed document names, unlisted ones included.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -246,6 +252,11 @@ paths:
       summary: Get playlist
       description: |
         Returns a single playlist by UUID or slug.
+
+        A playlist whose `visibility` keeps it out of directories (anything other than absent or exactly
+        `public`) is served by its UUID only. Its slug answers 404, exactly as a slug nobody holds, because a
+        slug is client-chosen and usually derived from the title, so it is far easier to guess than the id.
+        The same holds for PUT and DELETE by slug and for a container's same-origin reference by slug URL.
 
         Responses include a strong `ETag` (SHA-256 of the UTF-8 JSON body). Clients may send `If-None-Match`
         with a previously received ETag to receive 304 Not Modified when the representation is unchanged.
@@ -707,7 +718,10 @@ paths:
     get:
       tags: [playlist-items]
       summary: List playlist items
-      description: Returns paginated indexed items across all playlists, optionally filtered
+      description: >-
+        Returns paginated indexed items across playlists, optionally filtered. Unscoped, it is a directory
+        and leaves out the items of every unlisted playlist (see `GET /api/v1/playlists`). Scoped by
+        `channel` or `playlist-group`, it includes the items of every member that container names.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -751,6 +765,10 @@ paths:
       summary: Get playlist item
       description: |
         Returns a single indexed playlist item by UUID.
+
+        An item id can appear in several playlists. The lookup answers only from playlists a directory may
+        list, so an item held only by unlisted playlists is 404; among listed copies, the one in the oldest
+        playlist (by created_at) answers.
 
         Strong ETag and optional `If-None-Match` (304) apply; the playlist-items list GET does not emit ETag in API v1.
       parameters:
@@ -914,6 +932,14 @@ components:
         coverImage:
           type: string
           format: uri
+        visibility:
+          type: string
+          description: >-
+            Playlists extension §3.7 listing request: `public` (the default when absent) or `unlisted`.
+            Inside the signed bytes and stored verbatim. Any string is accepted, since the vocabulary is
+            open; directories list the playlist only when this is absent or exactly `public`, so an
+            unrecognized value keeps it out. A non-string value, `null` included, is rejected with `400`. Not access control:
+            an unlisted playlist is still served by its UUID.
         defaults:
           type: object
           description: >-
