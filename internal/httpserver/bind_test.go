@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -160,5 +161,81 @@ func TestDecodeDocument_acceptsEveryModelledMember(t *testing.T) {
 	var req models.PlaylistCreateRequest
 	if err := decodeDocument(raw, &req); err != nil {
 		t.Fatalf("a document using only modeled members must decode, got %v", err)
+	}
+}
+
+// seriesIDDocument wraps a provenance seriesId literal in the smallest document decodeDocument
+// will walk into. The literal sits three levels down (items[].provenance.contract.seriesId),
+// which is the point: nothing in this feed reads seriesId, so the only way it is ever parsed is
+// as a side effect of binding the request, and the only guard against a hostile literal is the
+// SDK's own.
+func seriesIDDocument(literal string) string {
+	return `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x",` +
+		`"provenance":{"type":"onChain","contract":{"seriesId":` + literal + `}}}]}`
+}
+
+// A seriesId literal must not buy more work than its own length.
+//
+// Why this test lives in the feed and not only in dp1-go: decodeDocument runs before any
+// signature is verified (handlers.go binds, then Exec verifies), and the signature-presence
+// middleware lets an unauthenticated request reach it. So every allocation the SDK's
+// SeriesID.UnmarshalJSON makes is allocation an anonymous caller can command, bounded by
+// nothing but MaxRequestBytes — and a 146-byte body is nowhere near that limit. dp1-go v0.7.0,
+// which this branch originally bumped to, turned `1e-1000000` into roughly 2.9 MB: the digit
+// bound clamped a negative exponent to zero as "it only shrinks the value", true of the value
+// but not of the work, since big.Rat holds `m e -k` as a fraction over 10^k and materializes
+// that k-digit denominator before IsInt can refuse the literal as fractional. v0.7.1 reads the
+// exponent's magnitude and ignores its sign, so the literal is refused on sight.
+//
+// The assertion is on bytes allocated rather than on the error alone because both versions
+// reject the document — v0.7.0 just pays millions of bytes to do it. An error-only test would
+// have passed against the defect.
+//
+// Not parallel: TotalAlloc is process-wide, so a concurrent test's allocations would land in
+// the measurement. The 1 MiB bound is deliberately loose against the ~2.9 MB regression and the
+// near-zero cost of the fix, so background runtime allocation cannot tip it either way.
+func TestDecodeDocument_seriesIDCannotAmplifyAllocation(t *testing.T) {
+	const hostile = "1e-1000000"
+	body := []byte(seriesIDDocument(hostile))
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	var req models.PlaylistCreateRequest
+	err := decodeDocument(body, &req)
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatalf("seriesId %s is fractional and must be rejected, not decoded", hostile)
+	}
+	if !strings.Contains(err.Error(), "seriesId") {
+		t.Fatalf("error should name seriesId so the caller can fix the document, got %v", err)
+	}
+
+	const bound = 1 << 20
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > bound {
+		t.Fatalf("decoding a %d-byte body allocated %d bytes, over the %d-byte bound: "+
+			"the negative-exponent seriesId guard has regressed", len(body), allocated, bound)
+	}
+}
+
+// The bound above must refuse amplification without refusing the identifiers SeriesID exists to
+// carry. A guard that rejected these would be the other half of the same defect: the corpus this
+// branch was built for publishes series identifiers too large for a JSON number to hold exactly.
+func TestDecodeDocument_acceptsLegitimateSeriesIDSpellings(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ name, literal string }{
+		{name: "plain integer", literal: "42"},
+		{name: "negative exponent the mantissa absorbs", literal: "1500e-2"},
+		{name: "positive exponent", literal: "5e2"},
+		{name: "256-bit identifier as a decimal string", literal: `"115792089237316195423570985008687907853269984665640564039457584007913129639935"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var req models.PlaylistCreateRequest
+			if err := decodeDocument([]byte(seriesIDDocument(tc.literal)), &req); err != nil {
+				t.Fatalf("seriesId %s is a legitimate identifier and must decode, got %v", tc.literal, err)
+			}
+		})
 	}
 }
