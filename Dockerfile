@@ -3,11 +3,6 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 COPY go.mod go.sum ./
-# .local-deps/ is only a replace target when go.mod carries one (see .gitignore);
-# COPY on a missing path would fail the build, so this stays conditional on it
-# existing. Must land before `go mod download`: a `replace` to a local path
-# makes that path part of the module graph, which download resolves eagerly.
-COPY .local-deps* ./.local-deps
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/dp1-feed-v2 ./cmd/server

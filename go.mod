@@ -124,5 +124,3 @@ require (
 )
 
 tool go.uber.org/mock/mockgen
-
-replace github.com/display-protocol/dp1-go => ./.local-deps/dp1-go
