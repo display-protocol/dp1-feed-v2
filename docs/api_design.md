@@ -34,6 +34,7 @@ would let a lookup resolve a value a filter could not, or vice versa.
 
 - Requests and responses use **`application/json`** unless otherwise noted.
 - Response field naming follows the **Go/json tags** used in handlers and DP-1-aligned bodies (e.g. list envelope uses **`items`**, **`hasMore`**, optional **`cursor`**). Follow existing OpenAPI schemas and `internal/httpserver` DTOs when adding fields.
+- **Document bodies are decoded strictly** (`EnableDecoderDisallowUnknownFields`, recursively), so the member set the feed accepts is exactly what the request schemas declare — a member the schema omits is a **`400`**, not a silently dropped field, because dropping it would change the bytes the client signed. The accepted set therefore tracks the `dp1-go` version in `go.mod`, and the two move together: a dependency bump that widens a document struct is also a change to `api/openapi.yaml`. As of dp1-go **v0.7.0** (dp1#55) that set includes a playlist's **`openAt`** and **`links`**, and the full identity-extension **`Entity`** — `id`, `role`, `location`, `addresses`, `avatar`, `biographies`, `links` — on `curators[]` and `publisher`.
 
 ---
 
@@ -91,7 +92,10 @@ a `role`; the extensions add optional entity fields whose `key`s are identity cl
 one **owner set** per document with a single rule, applied to every resource kind:
 
 - **Declared owners win.** When the signed document declares owners — `curators[].key` on a playlist,
-  `publisher.key` on a channel — those keys are the owner set. They sit inside the signed bytes, so no
+  `publisher.key` on a channel — those keys are the owner set. The shared `Entity` schema requires only
+  `name`, because the same shape also credits authors on a `links[]` entry, where no producer holds a
+  DID; an entity declared as an **owner** must still carry `key`, and one that does not simply never
+  matches a signature's `kid`. They sit inside the signed bytes, so no
   relayer can change who owns the document without breaking every signature.
 - **Otherwise the single owner-role signer owns it.** A document with no declaration is accepted only when
   it carries **exactly one** signature in the **owner role** (`curator` for playlists and playlist-groups,

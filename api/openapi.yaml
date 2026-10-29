@@ -929,6 +929,17 @@ components:
             $ref: '#/components/schemas/Entity'
         summary:
           type: string
+        openAt:
+          type: string
+          description: >-
+            Optional ISO 8601 datetime for when this playlist's own subject became public — an
+            exhibition's opening, a collection's release (playlists extension, dp1#55). Accepted forms
+            are the same as `PlaylistItemInput.displayAt`: local datetime with seconds and no timezone
+            (2026-07-21T00:00:00, display-locale local), or absolute RFC 3339 date-time with Z or colon
+            offset. Date-only (YYYY-MM-DD) is not accepted. A playlist-level fact for ordering and
+            display only: it sets no playback eligibility, unlike item `displayAt`, and unlike `created`
+            it names the real-world event rather than the document's issuance time.
+          example: "2026-07-21T00:00:00"
         coverImage:
           type: string
           format: uri
@@ -954,6 +965,13 @@ components:
           description: >-
             DP-1 playlists-extension dynamic query. Member set governed by dp1-go's schema (see
             `defaults`); decoded strictly, so unknown members are rejected with `400`.
+        links:
+          type: array
+          description: >-
+            Editorial content about the playlist — articles, events, news — in the order to show them
+            (playlists extension, dp1#55). References only: the content itself stays at the URL.
+          items:
+            $ref: '#/components/schemas/Link'
         signature:
           type: string
           deprecated: true
@@ -1673,20 +1691,123 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        A curator or publisher identity. `key` is a did:key; it is the value a signature's `kid` must
-        match to authorize a write on the resource that declares this entity as an owner.
+        A curator, publisher, or credited identity (DP-1 identity extension). The member set is the one
+        dp1-go publishes; an entity used purely as a credit — a `Link.authors[]` entry — carries no `key`,
+        which is why only `name` is required here. An entity declared as an owner (`curators[]`,
+        `publisher`) must carry `key`: that is the value a signature's `kid` is matched against to
+        authorize a write.
       required:
-        - key
+        - name
       properties:
         name:
           type: string
         key:
           type: string
-          description: did:key identifier of the owner.
+          description: >-
+            did:key identifier. Required for an entity declared as an owner; omitted on a credit-only
+            entity, for which no producer holds a DID.
           example: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        id:
+          type: string
+          description: >-
+            Producer-scoped identifier for the entity, distinct from `key`: stable within one producer's
+            catalog, not verifiable and not comparable across producers.
         url:
           type: string
           format: uri
+          deprecated: true
+          description: Superseded by `links`; write a `website` or `profile` entry there instead.
+        role:
+          type: string
+          description: >-
+            Disambiguates the entity's function when its position in the document does not already say it.
+            Omitted, the role follows the position: `curators[]` is curator, `publisher` is publisher.
+        location:
+          type: string
+        addresses:
+          type: array
+          description: >-
+            Raw wallet addresses this producer attributes to the entity (`0x…` EVM, `tz1|tz2|tz3|tz4…`
+            Tezos). A signed claim of the producer, not a fact: a wallet may be shared, and overlap
+            between two producers' lists does not by itself make one entity. Contract addresses name a
+            collection rather than a person and are not listed here.
+          items:
+            type: string
+        avatar:
+          $ref: '#/components/schemas/Thumbnail'
+        biographies:
+          type: array
+          items:
+            $ref: '#/components/schemas/Biography'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/Link'
+
+    Thumbnail:
+      type: object
+      additionalProperties: false
+      required:
+        - uri
+      properties:
+        uri:
+          type: string
+          format: uri
+        w:
+          type: integer
+        h:
+          type: integer
+        sha256:
+          type: string
+
+    Biography:
+      type: object
+      additionalProperties: false
+      required:
+        - text
+      properties:
+        text:
+          type: string
+        source:
+          type: string
+          description: Human-readable name of where the text came from.
+        sourceUrl:
+          type: string
+          format: uri
+
+    Link:
+      type: object
+      additionalProperties: false
+      description: >-
+        A reference to editorial content — an article, an event, a news item. The content itself stays at
+        the URL; the feed stores and returns the reference verbatim.
+      required:
+        - type
+        - url
+      properties:
+        type:
+          type: string
+          description: Open vocabulary describing what the destination is, e.g. `article`, `event`, `website`.
+        url:
+          type: string
+          format: uri
+        title:
+          type: string
+          description: Human-readable label for the destination, such as a publication or article title.
+        date:
+          type: string
+          description: >-
+            RFC 3339 timestamp the linked content refers to — an article's publish date, an event's
+            start — not when this entry was written.
+        thumbnail:
+          $ref: '#/components/schemas/Thumbnail'
+        authors:
+          type: array
+          description: >-
+            Who wrote or presented the linked content, credited the way `metadata.artists[]` credits a
+            work. A producer holding one joined credit line emits a single entry carrying it.
+          items:
+            $ref: '#/components/schemas/Entity'
 
   responses:
     BadRequest:
