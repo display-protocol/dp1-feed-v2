@@ -1696,6 +1696,13 @@ components:
         which is why only `name` is required here. An entity declared as an owner (`curators[]`,
         `publisher`) must carry `key`: that is the value a signature's `kid` is matched against to
         authorize a write.
+
+        Value-level constraints on this schema and on the `Thumbnail`, `Biography` and `Link` shapes
+        it composes — `key`'s DID pattern, `role`'s enumeration, non-empty `location`, `addresses[]`,
+        `Biography.text` and `Link.title`, positive `Thumbnail.w`/`h`, `sha256`'s hex form, `Link.date`'s
+        RFC 3339 form — are governed by dp1-go's published schema and deliberately not restated here, so
+        this document cannot drift from a schema it does not own. The extension overlay enforces them in
+        the default configuration: a document this schema admits can still be rejected with `400`.
       required:
         - name
       properties:
@@ -1787,7 +1794,13 @@ components:
       properties:
         type:
           type: string
-          description: Open vocabulary describing what the destination is, e.g. `article`, `event`, `website`.
+          description: >-
+            What the destination is. Unlike `visibility`, this vocabulary is closed: dp1-go's schema
+            enumerates `website`, `twitter`, `instagram`, `profile`, `publication`, `article`, `event`,
+            `news`, `other`, and the extension overlay — on in the default configuration — rejects
+            anything else with `400`. `profile` is the producer's own page about an entity,
+            `publication` is writing by or about one, and `article`/`event`/`news` are editorial
+            content about a playlist.
         url:
           type: string
           format: uri
