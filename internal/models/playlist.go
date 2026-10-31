@@ -33,8 +33,8 @@ type PlaylistCreateRequest struct {
 	Links []identity.Link `json:"links,omitempty"`
 
 	// Visibility is the playlists extension's listing request (§3.7): "public" (the default when absent)
-	// or "unlisted". Modeled here only so strict decoding accepts it; the pinned dp1-go Playlist struct does
-	// not carry it yet. The feed reads it from the stored body, never from this field.
+	// or "unlisted". Modeled here so strict decoding accepts it, with this feed's own type rather than
+	// dp1-go's `*string` (see Visibility). The feed reads it from the stored body, never from this field.
 	Visibility Visibility `json:"visibility,omitempty"`
 
 	// Identity and authorization: the client supplies id, created and the signatures over the document,
@@ -64,10 +64,11 @@ var errVisibilityNotString = errors.New("visibility must be a string")
 // vocabulary is open and the store fails closed on values it does not recognize (pg.listedPlaylistSQL).
 //
 // It is a type of its own, not a plain string, for one case: encoding/json decodes a JSON null into a
-// string field as "" without error, so a plain field would accept `"visibility": null`. The extension
-// schema types the member as a string, and the pinned dp1-go schema does not describe it at all, so this
-// decoder is the only place a non-string value is refused before it is signed into storage. Numbers,
-// booleans, objects and arrays were already refused by the string decode; null is the one this adds.
+// string field as "" without error, so a plain field would accept `"visibility": null`. dp1-go's
+// `Playlist.Visibility` is a `*string`, which reads null as absent, and only its playlists-extension
+// schema types the member: with extensions enabled dp1-go refuses null too, but with them disabled this
+// decoder is the only place null is refused before it is signed into storage. Numbers, booleans,
+// objects and arrays were already refused by the string decode; null is the one this adds.
 type Visibility string
 
 // UnmarshalJSON accepts only a JSON string. encoding/json calls it for a present member, including null,

@@ -16,8 +16,8 @@ import (
 )
 
 // signedVisibilityPlaylist curator-signs a playlist document carrying a top-level visibility member and
-// returns the POST body. The member is added to the signed map directly: the pinned dp1-go Playlist
-// struct does not model it, so marshaling that struct would drop it before signing.
+// returns the POST body. The document is a map rather than a dp1-go Playlist so a test can set the member
+// to any JSON type, which the struct's `*string` could not carry.
 func signedVisibilityPlaylist(t *testing.T, priv ed25519.PrivateKey, kid, id, slug, itemID, visibility string) map[string]any {
 	t.Helper()
 	doc := map[string]any{
@@ -92,9 +92,9 @@ func TestIntegration_VisibilityHTTP(t *testing.T) {
 	}
 }
 
-// The member is a string in the extension schema, and the pinned dp1-go schema does not describe it, so
-// the request decoder is what refuses other JSON types — null included, which a plain Go string would
-// silently accept. Any string is accepted: the vocabulary is open.
+// The request decoder (models.Visibility) refuses every other JSON type before dp1-go sees the document —
+// null included, which a plain Go string would read as "" and dp1-go's `*string` as absent. Any string is
+// accepted: the vocabulary is open.
 func TestIntegration_VisibilityHTTP_memberType(t *testing.T) {
 	srv := newIntegrationServer(t)
 	priv, kid := newCuratorKeypair(t)
