@@ -63,6 +63,13 @@ func TestDecodeDocument_rejectsUnknownMembersAtEveryDepth(t *testing.T) {
 			body: `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x","contentRating":"mature","contentReasons":["nudity"]}]}`,
 		},
 		{
+			// Playlists extension §3.3 note `title` and `author`, declared by dp1-go's Note since v0.7.2. The
+			// same Note type decodes the playlist note and an item's, and author is a full identity Entity.
+			// Before the bump both were unknown members and the write was a 400 naming them.
+			name: "note title and author on the playlist and on an item are known",
+			body: `{"dpVersion":"1.0.0","title":"t","note":{"text":"x","title":"Why","author":{"name":"A","role":"curator"}},"items":[{"source":"https://a.test/x","note":{"text":"y","title":"On this work","author":{"name":"B"}}}]}`,
+		},
+		{
 			name: "a well-formed document with no unknown members",
 			body: `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x"}],"defaults":{"license":"open"}}`,
 		},

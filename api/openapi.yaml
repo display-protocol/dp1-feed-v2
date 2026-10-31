@@ -1673,7 +1673,10 @@ components:
     Note:
       type: object
       additionalProperties: false
-      description: Text note with optional display duration (playlists extension)
+      description: >-
+        Text note with optional display duration, heading and author (playlists extension §3.3). The
+        same shape serves the playlist's `note` and an item's. `title`'s 1–200 character bound is
+        dp1-go's and is not restated here; the extension overlay enforces it in the default configuration.
       required:
         - text
       properties:
@@ -1686,14 +1689,24 @@ components:
           format: float
           description: Display duration in seconds (defaults to 20 when omitted)
           example: 15.0
+        title:
+          type: string
+          description: Heading shown above `text`
+          example: "Why these works"
+        author:
+          allOf:
+            - $ref: '#/components/schemas/Entity'
+          description: >-
+            Who wrote `text`, when it is not the curators. A credit only: a `key` here authorizes
+            nothing.
 
     Entity:
       type: object
       additionalProperties: false
       description: >-
         A curator, publisher, or credited identity (DP-1 identity extension). The member set is the one
-        dp1-go publishes; an entity used purely as a credit — a `Link.authors[]` entry — carries no `key`,
-        which is why only `name` is required here. An entity declared as an owner (`curators[]`,
+        dp1-go publishes; an entity used purely as a credit — a `Link.authors[]` entry or a note's
+        `author` — need not carry a `key`, which is why only `name` is required here. An entity declared as an owner (`curators[]`,
         `publisher`) must carry `key`: that is the value a signature's `kid` is matched against to
         authorize a write.
 

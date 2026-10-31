@@ -34,7 +34,7 @@ would let a lookup resolve a value a filter could not, or vice versa.
 
 - Requests and responses use **`application/json`** unless otherwise noted.
 - Response field naming follows the **Go/json tags** used in handlers and DP-1-aligned bodies (e.g. list envelope uses **`items`**, **`hasMore`**, optional **`cursor`**). Follow existing OpenAPI schemas and `internal/httpserver` DTOs when adding fields.
-- **Document bodies are decoded strictly** (`EnableDecoderDisallowUnknownFields`, recursively), so the member set the feed accepts is exactly what the request schemas declare — a member the schema omits is a **`400`**, not a silently dropped field, because dropping it would change the bytes the client signed. The accepted set therefore tracks the `dp1-go` version in `go.mod`, and the two move together: a dependency bump that widens a document struct is also a change to `api/openapi.yaml`. As of the pinned dp1-go — **v0.7.1**, whose members arrived in v0.7.0 with dp1#55 — that set includes a playlist's **`openAt`** and **`links`**, and the full identity-extension **`Entity`** — `id`, `role`, `location`, `addresses`, `avatar`, `biographies`, `links` — on `curators[]` and `publisher`.
+- **Document bodies are decoded strictly** (`EnableDecoderDisallowUnknownFields`, recursively), so the member set the feed accepts is exactly what the request schemas declare — a member the schema omits is a **`400`**, not a silently dropped field, because dropping it would change the bytes the client signed. The accepted set therefore tracks the `dp1-go` version in `go.mod`, and the two move together: a dependency bump that widens a document struct is also a change to `api/openapi.yaml`. As of the pinned dp1-go — **v0.7.2**; the members below arrived with dp1#55, in v0.7.0 and v0.7.2 — that set includes a playlist's **`openAt`** and **`links`**, a note's **`title`** and **`author`** on the playlist and on its items, and the full identity-extension **`Entity`** — `id`, `role`, `location`, `addresses`, `avatar`, `biographies`, `links` — on `curators[]`, `publisher` and a note's `author`.
 
 ---
 
@@ -71,7 +71,7 @@ When notification clients are configured (see `DEVELOPMENT.md`), the feed delive
 
 **Playlists extension fields:**
 
-- **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20). Part of the DP-1 playlists extension (`extension/playlists`).
+- **`note`** — optional text note with display duration at both **playlist level** and **playlist item level**. When present, contains `text` (required) and optional `duration` (seconds, defaults to 20), `title` (a heading above the text) and `author` (an identity `Entity`; absent means the curators wrote it). Part of the DP-1 playlists extension (`extension/playlists`).
 - **`displayAt`** — optional ISO 8601 datetime on a playlist item (same level as `source`, not inside `display`). Under playlist extension validation, accepted wire forms per §3.5.2 are local datetime with seconds and no timezone (`2026-07-21T00:00:00`, display-locale local), or absolute RFC 3339 date-time with `Z`/colon offset. Date-only (`YYYY-MM-DD`) and compact offset without colon are **not** accepted by that extension validator. This feed stores and returns the item metadata; it does not compute playback eligibility.
 - **`inlineManifest`** — optional complete Ref Manifest carried on a playlist item (same level as `source`) instead of behind `ref`, per §3.6. Under playlist extension validation it is checked against the unmodified ref-manifest schema, so a malformed manifest fails the whole write with **`400`**. With extensions **off**, the core schema does not describe the field and core DP-1 tolerates unknown ones, so the manifest is stored and returned **unchecked** (same posture as `displayAt`). The manifest is **not** returned byte-identical to the one submitted — signing and JSONB storage re-encode it — so do not hash, diff, or cache the returned blob. The feed does not fetch `ref`, merge the two, or apply the §3.6 precedence (a fetched `ref` manifest wins, the inline copy is the offline fallback) — that resolution belongs to players. The manifest is part of the signed payload, with no `refHash` counterpart of its own.
 - **`contentRating` / `contentReasons`** — optional Content Rating Extension v0.1.0 members on a playlist item (same level as `source`). Open vocabulary: `general` and `mature` are defined, an unrecognised value reads as unrated. Declared by the request models since the dp1-go v0.6.2 bump; before it the strict decoder answered them with **`400`** naming the member, so a publisher that signs them (dp1-publisher#26) could not publish a labelled item at all. Stored and returned as sent: this feed validates neither the label nor the reasons and applies no content policy — players do, on the signed document.
@@ -415,9 +415,10 @@ who has the UUID can pass it on. The Feral File app marks every playlist a perso
 **A directory lists a playlist only when `visibility` is absent or exactly `public`.** Every other value
 fails closed: `unlisted`, a value a later spec version defines, a different case, an empty string, or any
 non-string value. Any string is accepted on write, because the spec's vocabulary is open; a non-string
-value, `null` included, is a `400` naming the member (`models.Visibility`). A non-string value can still
-reach storage inside a remote member ingested through a group or channel, which is stored as its origin
-signed it, and the listing rule keeps it out.
+value, `null` included, is a `400` naming the member (`models.Visibility`). A remote member ingested
+through a group or channel is checked by dp1-go instead: with the playlists extension enabled its schema
+refuses every non-string value, and with it disabled dp1-go refuses all but `null`, which is stored as its
+origin signed it and which the listing rule keeps out.
 
 | Surface | A playlist that is not listed |
 | ------- | ----------------------------- |
