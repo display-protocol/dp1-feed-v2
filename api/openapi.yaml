@@ -972,6 +972,16 @@ components:
             (playlists extension, dp1#55). References only: the content itself stays at the URL.
           items:
             $ref: '#/components/schemas/Link'
+        satellites:
+          type: array
+          description: >-
+            Smaller playlists published around this one — a burn record, a memento run, a catalog or
+            launch-party edition — named so a consumer renders them as labeled sections of this
+            playlist's page rather than as shows of their own (playlists extension §3.8, dp1#63).
+            Playlist-only: does not change `channel.playlists[]` membership or ordering, and a
+            satellite's own playlist carries no back-reference to this one.
+          items:
+            $ref: '#/components/schemas/Satellite'
         signature:
           type: string
           deprecated: true
@@ -1834,6 +1844,35 @@ components:
             work. A producer holding one joined credit line emits a single entry carrying it.
           items:
             $ref: '#/components/schemas/Entity'
+
+    Satellite:
+      type: object
+      additionalProperties: false
+      description: >-
+        One entry in a playlist's `satellites[]` (playlists extension §3.8, dp1#63): a smaller playlist
+        published around the parent, to render as a labeled section of the parent's page. The satellite's
+        own playlist stays a complete, independently signable playlist and, if it is also a member of a
+        channel, remains one unchanged — this entry only names it and how to present it.
+      required:
+        - playlist
+        - kind
+      properties:
+        playlist:
+          type: string
+          format: uri
+          description: URI of the satellite's own playlist.
+        kind:
+          type: string
+          description: >-
+            Open vocabulary, as `visibility` and `Link.type`'s closed vocabulary are not: e.g. `burn`,
+            `mementos`, `catalog`, `launch-party`. Any string is a valid satellite; an unrecognized value
+            is simply an unlabeled one.
+        title:
+          type: string
+          description: Heading shown above the satellite's items (1-200 characters), when different from a human-readable form of `kind`.
+        note:
+          type: string
+          description: One paragraph of context shown above the satellite's items (1-2000 characters).
 
   responses:
     BadRequest:
