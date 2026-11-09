@@ -31,6 +31,12 @@ type PlaylistCreateRequest struct {
 	DynamicQuery *dp1playlists.DynamicQuery `json:"dynamicQuery,omitempty"`
 	// Links is editorial content about the playlist (articles, events, news), dp1#55.
 	Links []identity.Link `json:"links,omitempty"`
+	// Satellites names smaller playlists published around this one — a burn record, a memento run, a
+	// catalog or launch-party edition — that a consumer renders as labeled sections of this playlist's
+	// page rather than as shows of their own (playlists extension §3.8, dp1#63). Playlist-only: it does
+	// not change Channel.Playlists[] membership or ordering, and a satellite's own playlist carries no
+	// back-reference to this one.
+	Satellites []dp1playlists.Satellite `json:"satellites,omitempty"`
 
 	// Visibility is the playlists extension's listing request (§3.7): "public" (the default when absent)
 	// or "unlisted". Modeled here so strict decoding accepts it, with this feed's own type rather than

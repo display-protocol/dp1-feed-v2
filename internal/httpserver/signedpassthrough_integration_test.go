@@ -314,3 +314,60 @@ func TestIntegration_SignedPlaylist_itemSlugAndRefHashAccepted(t *testing.T) {
 		t.Fatalf("item refHash not round-tripped: %s", items[0]["refHash"])
 	}
 }
+
+// TestIntegration_SignedPlaylist_satellitesAccepted pins the playlists extension §3.8 `satellites[]`
+// member (dp1#63, dp1-go#17): before dp1-go's satellites pin it was an unknown top-level member and the
+// write was a 400. Publishes a playlist naming a satellite, then asserts the member is accepted and
+// served back byte-for-byte.
+func TestIntegration_SignedPlaylist_satellitesAccepted(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := dp1sign.Ed25519DIDKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned := []byte(`{"dpVersion":"1.1.0","id":"fafafafa-2222-4333-8444-555555555555","slug":"with-satellites",` +
+		`"title":"Satellites parent","created":"2026-01-02T03:04:05Z",` +
+		`"curators":[{"name":"Curator","key":"` + kid + `"}],` +
+		`"items":[{"id":"c3c3c3c3-2222-4333-8444-555555555555","source":"https://cdn.example.com/a.html"}],` +
+		`"satellites":[{"playlist":"https://cdn.example.com/burn.json","kind":"burn","title":"Burn record","note":"What was burned, and when."}]}`)
+	signed := signWith(t, priv, unsigned, playlist.RoleCurator)
+
+	body := mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists", json.RawMessage(signed), http.StatusCreated)
+
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(body, &stored); err != nil {
+		t.Fatal(err)
+	}
+	var satellites []map[string]json.RawMessage
+	if err := json.Unmarshal(stored["satellites"], &satellites); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(satellites[0]["playlist"]); got != `"https://cdn.example.com/burn.json"` {
+		t.Fatalf("satellite playlist not round-tripped: %s", got)
+	}
+	if got := string(satellites[0]["kind"]); got != `"burn"` {
+		t.Fatalf("satellite kind not round-tripped: %s", got)
+	}
+
+	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/with-satellites", nil, http.StatusOK)
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(gotRaw, &got); err != nil {
+		t.Fatal(err)
+	}
+	// jsonb reorders keys, so compare the decoded satellite rather than the raw member bytes.
+	var gotSatellites []map[string]json.RawMessage
+	if err := json.Unmarshal(got["satellites"], &gotSatellites); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(gotSatellites[0]["playlist"]); got != `"https://cdn.example.com/burn.json"` {
+		t.Fatalf("GET satellite playlist differs from POST response: %s", got)
+	}
+	if got := string(gotSatellites[0]["kind"]); got != `"burn"` {
+		t.Fatalf("GET satellite kind differs from POST response: %s", got)
+	}
+}

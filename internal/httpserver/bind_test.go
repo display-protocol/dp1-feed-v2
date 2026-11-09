@@ -70,6 +70,14 @@ func TestDecodeDocument_rejectsUnknownMembersAtEveryDepth(t *testing.T) {
 			body: `{"dpVersion":"1.0.0","title":"t","note":{"text":"x","title":"Why","author":{"name":"A","role":"curator"}},"items":[{"source":"https://a.test/x","note":{"text":"y","title":"On this work","author":{"name":"B"}}}]}`,
 		},
 		{
+			// Playlists extension §3.8 satellites, declared by dp1-go's Playlist since the satellites-field
+			// branch (dp1#63, dp1-go#17). Before that pin "satellites" was an unknown top-level member and
+			// the write was a 400 naming it.
+			name: "satellites on a playlist are known",
+			body: `{"dpVersion":"1.0.0","title":"t","items":[],` +
+				`"satellites":[{"playlist":"https://a.test/satellite.json","kind":"burn","title":"Burn record","note":"What was burned, and when."}]}`,
+		},
+		{
 			name: "a well-formed document with no unknown members",
 			body: `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://a.test/x"}],"defaults":{"license":"open"}}`,
 		},
