@@ -83,12 +83,11 @@ A task is complete only when:
 1. Formatting, lint, vet, and tests are clean.
 2. Comments preserve the non-obvious intent needed for future agentic amendments.
 3. Any architecture or API assumption created by the change is called out explicitly.
-4. The reviewer accepts the change.
+4. For non-trivial changes, a fresh-context review has reported findings for the change owner to disposition.
 
 ## Review workflow
 
-After implementation, run a review loop until the reviewer qualifies the change.
-**Do not commit, push, or open a PR before the reviewer says `Verdict: accept`.**
+For non-trivial changes, run one fresh-context review after implementation. The verdict reports findings and carries no commit, merge, or release authority.
 
 1. Create a compact handoff:
    - goal
@@ -97,10 +96,10 @@ After implementation, run a review loop until the reviewer qualifies the change.
    - checks run
    - unresolved assumptions
 2. Invoke the `reviewer` subagent with the handoff, diff, and test/lint output — run `/review`, or launch it directly with the Agent tool (`subagent_type: reviewer`).
-3. If the verdict is `revise`, address findings, rerun checks, and review again.
-4. Only proceed to commit, push, or PR after `accept`.
+3. The named human change owner decides how to disposition each finding.
+4. If a material revision changes behavior, a later review uses fresh context and the full updated diff.
 
-The single source of truth for review posture and output format is `prompts/code-review.md`.
+The generated source of truth for review posture and output format is `prompts/code-review.md`. Apply the repository-specific checks in `prompts/code-review.delta.md` without weakening it.
 
 ## Commit message format
 
