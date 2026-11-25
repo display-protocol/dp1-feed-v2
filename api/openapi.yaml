@@ -1082,17 +1082,24 @@ components:
             Optional audience label from the Content Rating Extension v0.1.0 (display-protocol/dp1
             `extensions/content-rating`), on the item at the same level as `source`. Open vocabulary:
             `general` and `mature` are defined, and a value a consumer does not recognise reads as
-            unrated. Part of the signed document, stored and returned as sent; this feed does not
-            validate the extension or apply content policy (players do). Declared by the request
+            unrated. Part of the signed document, stored and returned as sent. Every playlist write
+            (and every playlist fetched by URL during ingest) is checked against the content-rating
+            overlay regardless of `extensions.enabled`, so a wrong-typed value is `400`; the label
+            is not checked against the vocabulary and no content policy is applied (players do).
+            Declared by the request
             models since the dp1-go v0.6.2 bump — before it the strict decoder refused the member
             with `400`, so a publisher that signed it could not publish a labelled item.
         contentReasons:
           type: array
           items:
             type: string
+            minLength: 1
           description: >-
-            Optional reasons behind `contentRating`, in the curator's words (Content Rating Extension
-            v0.1.0 asks for non-empty strings). Stored and returned as sent, unvalidated here.
+            Optional reasons behind `contentRating`, in the curator's words. Each entry must be a
+            non-empty string (Content Rating Extension v0.1.0): the overlay is applied to every
+            playlist write regardless of `extensions.enabled`, so an empty entry is `400
+            validation_error`. An empty array is valid. Free text; no vocabulary is enforced.
+            Stored and returned as sent.
 
     Playlist:
       type: object
@@ -1153,7 +1160,8 @@ components:
           type: array
           items:
             type: string
-          description: Same handling as PlaylistItemInput.contentReasons.
+            minLength: 1
+          description: Same handling and validation as PlaylistItemInput.contentReasons.
         # Additional fields...
 
     PlaylistGroupInput:
