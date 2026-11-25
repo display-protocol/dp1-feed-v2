@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dp1 "github.com/display-protocol/dp1-go"
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/sign"
 )
@@ -844,3 +845,43 @@ func TestService_SignChannel_preservesNonFeedSignatures(t *testing.T) {
 		t.Fatalf("want 2 signatures, got %d", len(env.Signatures))
 	}
 }
+
+// TestService_ValidatePlaylist_ContentRating pins that both validators apply the content-rating overlay
+// (survey R3: it used to be skipped, so malformed contentReasons were stored unchecked). An unrecognized
+// contentRating value stays valid by design: the extension's vocabulary is open.
+func TestService_ValidatePlaylist_ContentRating(t *testing.T) {
+	t.Parallel()
+	s, err := New(testSeedHex, "did:key:z6Mkw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	validators := map[string]func([]byte) (*playlist.Playlist, error){
+		"core":       s.ValidatePlaylist,
+		"playlists+": s.ValidatePlaylistWithExtension,
+	}
+	for name, validate := range validators {
+		t.Run(name+"/labeled_ok", func(t *testing.T) {
+			t.Parallel()
+			raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+				{Source: "https://cdn.example.com/a", ContentRating: ratingPtr("mature"), ContentReasons: reasonsPtr("nudity")},
+				{Source: "https://cdn.example.com/b", ContentRating: ratingPtr("from-a-later-minor")},
+			})
+			if _, err := validate(raw); err != nil {
+				t.Fatal(err)
+			}
+		})
+		t.Run(name+"/empty_reason_rejected", func(t *testing.T) {
+			t.Parallel()
+			raw := signedPlaylistWithItems(t, []playlist.PlaylistItem{
+				{Source: "https://cdn.example.com/a", ContentRating: ratingPtr("mature"), ContentReasons: reasonsPtr("")},
+			})
+			if _, err := validate(raw); err == nil {
+				t.Fatal("expected validation error for empty contentReasons entry")
+			}
+		})
+	}
+}
+
+func ratingPtr(v string) *contentrating.Rating { r := contentrating.Rating(v); return &r }
+
+func reasonsPtr(v ...string) *[]string { return &v }

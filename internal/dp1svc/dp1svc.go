@@ -23,9 +23,12 @@ import (
 // Regenerate all mocks from repository root: go generate ./...
 // (directives in internal/mocks/doc.go; uses go tool mockgen from go.mod tools.)
 type ValidatorSigner interface {
-	// ValidatePlaylist validates against the core playlist JSON Schema and returns the parsed document (dp1-go ParseAndValidatePlaylist).
+	// ValidatePlaylist validates against the core playlist JSON Schema plus the content-rating extension overlay
+	// (dp1-go ParseAndValidatePlaylistWithContentRatingExtension) and returns the parsed document. The overlay is
+	// unconditional: it only constrains contentRating/contentReasons, so it is not gated by the playlists-extension flag.
 	ValidatePlaylist(raw []byte) (*playlist.Playlist, error)
-	// ValidatePlaylistWithExtension validates core plus the playlists registry extension overlay and returns the parsed document.
+	// ValidatePlaylistWithExtension validates core plus the playlists registry overlay and the content-rating overlay
+	// (dp1-go ParseAndValidatePlaylistWithPlaylistsAndContentRatingExtensions) and returns the parsed document.
 	ValidatePlaylistWithExtension(raw []byte) (*playlist.Playlist, error)
 	// SignPlaylist appends a v1.1+ feed signature (Ed25519) and returns the document with only "signatures"
 	// changed: an existing entry with the feed Kid is replaced, every other entry and every other field —
@@ -128,26 +131,28 @@ func mergeSignaturesReplacingPriorFeedSig(raw []byte, newSig playlist.Signature)
 	return out, nil
 }
 
-// ValidatePlaylist validates core playlist JSON via dp1-go and returns the typed document.
+// ValidatePlaylist validates core playlist JSON plus the content-rating overlay via dp1-go and returns the typed
+// document. The overlay was previously never applied, so contentRating/contentReasons were stored unchecked (DP-1
+// conformance survey R3); it is always on because it only adds constraints to members that no other schema describes.
 func (s *Service) ValidatePlaylist(raw []byte) (*playlist.Playlist, error) {
-	p, err := dp1.ParseAndValidatePlaylist(raw)
+	p, err := dp1.ParseAndValidatePlaylistWithContentRatingExtension(raw)
 	if err != nil {
 		return nil, err
 	}
 	if p == nil {
-		return nil, fmt.Errorf("dp1: ParseAndValidatePlaylist returned nil document")
+		return nil, fmt.Errorf("dp1: ParseAndValidatePlaylistWithContentRatingExtension returned nil document")
 	}
 	return p, nil
 }
 
-// ValidatePlaylistWithExtension validates playlist+playlists registry extension via dp1-go.
+// ValidatePlaylistWithExtension validates playlist + playlists registry extension + content-rating extension via dp1-go.
 func (s *Service) ValidatePlaylistWithExtension(raw []byte) (*playlist.Playlist, error) {
-	p, err := dp1.ParseAndValidatePlaylistWithPlaylistsExtension(raw)
+	p, err := dp1.ParseAndValidatePlaylistWithPlaylistsAndContentRatingExtensions(raw)
 	if err != nil {
 		return nil, err
 	}
 	if p == nil {
-		return nil, fmt.Errorf("dp1: ParseAndValidatePlaylistWithPlaylistsExtension returned nil document")
+		return nil, fmt.Errorf("dp1: ParseAndValidatePlaylistWithPlaylistsAndContentRatingExtensions returned nil document")
 	}
 	return p, nil
 }
