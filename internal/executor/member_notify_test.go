@@ -35,7 +35,7 @@ func expectPlaylistReplace(t *testing.T, mockStore *mocks.MockStore, mockDP1 *mo
 	t.Helper()
 	expectIntentOK(mockDP1)
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
-	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}]}`)
+	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"name":"Curator","key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}],` + storedSignatures(playlist.RoleCurator, "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK") + `}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(&store.PlaylistRecord{
 		ID:   memberTestPlaylistID,
 		Slug: "test-playlist",
