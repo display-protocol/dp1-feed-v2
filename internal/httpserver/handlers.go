@@ -67,11 +67,15 @@ const removedPlaylistGroupFilter = "the playlist-group filter was removed with D
 // that looks like a correct answer. This is the only remaining trace of playlist-groups in handler code;
 // an empty value is treated as absent, as the filter itself always did.
 func rejectRemovedPlaylistGroupFilter(c *gin.Context) bool {
-	if strings.TrimSpace(c.Query("playlist-group")) == "" {
-		return false
+	// Every occurrence, not c.Query: that reads only the first, so an empty parameter ahead of a real one
+	// (`?playlist-group=&playlist-group=x`) would let the unfiltered list through.
+	for _, v := range c.QueryArray("playlist-group") {
+		if strings.TrimSpace(v) != "" {
+			writeError(c.Writer, http.StatusBadRequest, "bad_request", removedPlaylistGroupFilter)
+			return true
+		}
 	}
-	writeError(c.Writer, http.StatusBadRequest, "bad_request", removedPlaylistGroupFilter)
-	return true
+	return false
 }
 
 // Health is a liveness endpoint (no version prefix in plan; we expose both /health and /api/v1/health).

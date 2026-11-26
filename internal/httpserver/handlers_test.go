@@ -239,6 +239,17 @@ func TestListPlaylists(t *testing.T) {
 			},
 		},
 		{
+			name:           "removed playlist-group filter is refused when a later repeat is non-empty",
+			queryParams:    "?playlist-group=&playlist-group=%20&playlist-group=retired",
+			setupMock:      func(m *mocks.MockExecutor) {},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Contains(t, resp.Message, "playlist-group filter was removed")
+			},
+		},
+		{
 			name:        "empty playlist-group value is treated as absent",
 			queryParams: "?playlist-group=%20",
 			setupMock: func(m *mocks.MockExecutor) {
@@ -655,6 +666,17 @@ func TestListPlaylistItems(t *testing.T) {
 		{
 			name:           "removed playlist-group filter is refused alongside a channel filter",
 			queryParams:    "?channel=ch&playlist-group=pg",
+			setupMock:      func(m *mocks.MockExecutor) {},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ErrorResponse
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Contains(t, resp.Message, "playlist-group filter was removed")
+			},
+		},
+		{
+			name:           "removed playlist-group filter is refused when a later repeat is non-empty",
+			queryParams:    "?playlist-group=&playlist-group=%20&playlist-group=retired",
 			setupMock:      func(m *mocks.MockExecutor) {},
 			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body []byte) {
