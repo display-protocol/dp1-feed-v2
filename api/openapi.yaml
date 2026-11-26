@@ -1162,6 +1162,13 @@ components:
             type: string
             minLength: 1
           description: Same handling and validation as PlaylistItemInput.contentReasons.
+        provenance:
+          type: object
+          description: >-
+            Provenance block. In `items[]` of a playlist document it is served as stored. The
+            `/api/v1/playlist-items` routes (list and by id) re-encode it: there `contract.seriesId` is
+            a JSON integer when it is at most 2^53-1, and a decimal string only above that or when the
+            digits have a leading zero, whichever form the document used (DP-1 core §6).
         # Additional fields...
 
     PlaylistGroupInput:
