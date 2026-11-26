@@ -419,9 +419,8 @@ who has the UUID can pass it on. The Feral File app marks every playlist a perso
 fails closed: `unlisted`, a value a later spec version defines, a different case, an empty string, or any
 non-string value. Any string is accepted on write, because the spec's vocabulary is open; a non-string
 value, `null` included, is a `400` naming the member (`models.Visibility`). A remote member ingested
-through a channel is checked by dp1-go instead: with the playlists extension enabled its schema
-refuses every non-string value, and with it disabled dp1-go refuses all but `null`, which is stored as its
-origin signed it and which the listing rule keeps out.
+through a channel is checked by dp1-go instead: the playlists extension schema refuses every non-string
+value. Channels exist only with extensions enabled, so no member is ingested without that check.
 
 | Surface | A playlist that is not listed |
 | ------- | ----------------------------- |

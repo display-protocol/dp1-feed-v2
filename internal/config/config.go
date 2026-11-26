@@ -379,8 +379,9 @@ func (c *Config) validate() error {
 	// and a channel write may spend up to fetch_timeout resolving a single remote reference. If the
 	// budget is smaller than that, the deadline cancels a fetch the operator explicitly allowed time for and
 	// the write fails with a generic error — a configuration that looks valid but cannot serve the writes it
-	// accepts. Checked for every deployment, not only those with notification clients: reference resolution
-	// needs the budget whether or not anyone is notified afterwards.
+	// accepts. Checked unconditionally, although only deployments with extensions enabled resolve references
+	// (through channel writes): a startup rule that followed that toggle would let a config pass and then
+	// fail writes once extensions were switched on.
 	if c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Server.ResponseWriteReserve {
 		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus response write reserve")
 	}
