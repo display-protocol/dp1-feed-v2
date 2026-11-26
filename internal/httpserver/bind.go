@@ -26,6 +26,8 @@ import (
 //
 // Coupling to be aware of: "unknown" means unknown to the request models in internal/models and the
 // dp1-go structs they embed, not to the DP-1 JSON Schema (whose core leaves additionalProperties open).
+// gin's setting does not reach inside a type with its own UnmarshalJSON (identity.Thumbnail since
+// dp1-go v0.9.0, for one), so checkExactMembers is what holds the rule there; do not remove it as redundant.
 // The feed is therefore stricter than the spec, by decision. The request models must stay a superset of
 // the dp1-go document structs, or a dp1-go upgrade that adds a schema member would turn into 400s for
 // every signed client; internal/models/coverage_test.go pins that superset.

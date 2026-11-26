@@ -34,7 +34,7 @@ would let a lookup resolve a value a filter could not, or vice versa.
 
 - Requests and responses use **`application/json`** unless otherwise noted.
 - Response field naming follows the **Go/json tags** used in handlers and DP-1-aligned bodies (e.g. list envelope uses **`items`**, **`hasMore`**, optional **`cursor`**). Follow existing OpenAPI schemas and `internal/httpserver` DTOs when adding fields.
-- **Document bodies are decoded strictly** (`EnableDecoderDisallowUnknownFields`, recursively), so the member set the feed accepts is exactly what the request schemas declare — a member the schema omits is a **`400`**, not a silently dropped field, because dropping it would change the bytes the client signed. The accepted set therefore tracks the `dp1-go` version in `go.mod`, and the two move together: a dependency bump that widens a document struct is also a change to `api/openapi.yaml`. As of the pinned dp1-go — **v0.8.0**, which widens no document struct over v0.7.3; the members below arrived with dp1#55, in v0.7.0 and v0.7.2 — that set includes a playlist's **`openAt`** and **`links`**, a note's **`title`** and **`author`** on the playlist and on its items, the full identity-extension **`Entity`** — `id`, `role`, `location`, `addresses`, `avatar`, `biographies`, `links` — on `curators[]`, `publisher` and a note's `author`, and, since v0.7.3 (dp1-go#17, playlists extension §3.8, dp1#63), a playlist's **`satellites[]`**.
+- **Document bodies are decoded strictly** (`EnableDecoderDisallowUnknownFields`, recursively), so the member set the feed accepts is exactly what the request schemas declare — a member the schema omits is a **`400`**, not a silently dropped field, because dropping it would change the bytes the client signed. The accepted set therefore tracks the `dp1-go` version in `go.mod`, and the two move together: a dependency bump that widens a document struct is also a change to `api/openapi.yaml`. As of the pinned dp1-go — **v0.9.0**, which widens no document struct over v0.7.3; the members below arrived with dp1#55, in v0.7.0 and v0.7.2 — that set includes a playlist's **`openAt`** and **`links`**, a note's **`title`** and **`author`** on the playlist and on its items, the full identity-extension **`Entity`** — `id`, `role`, `location`, `addresses`, `avatar`, `biographies`, `links` — on `curators[]`, `publisher` and a note's `author`, and, since v0.7.3 (dp1-go#17, playlists extension §3.8, dp1#63), a playlist's **`satellites[]`**.
 
 ---
 
@@ -297,6 +297,15 @@ Because the feed is deliberately stricter here than DP-1 itself (whose core sche
 drift from a schema this service does not own. Those sub-objects are published as `type: object` with the
 constraint stated in prose: **the member set is dp1-go's, and members outside it are rejected**. Treat the
 DP-1 schemas as the source of truth for what may appear inside them.
+
+**Integer spellings and `seriesId` (dp1-go v0.9.0).** A thumbnail's `w` / `h` is accepted in any spelling
+the schema's `integer` accepts (`100`, `100.0`, `1e2`); a fraction is still a **`400`**. Documents are
+stored and served from the submitted content, so nothing there is rewritten beyond `jsonb`'s numeric
+normalisation. `GET /api/v1/playlist-items` and `GET /api/v1/playlist-items/{id}` are different: they
+serve an item decoded and re-encoded by dp1-go, so `provenance.contract.seriesId` comes back as a JSON
+integer when it is at most 2^53−1, and as a decimal string only above that or when the digits have a
+leading zero, whichever form the document used (core §6). Do not verify a signature against an item
+taken from these two endpoints; read the playlist document.
 
 Values carried as raw JSON — `inlineManifest`, and `display.margin` — are the one exception: nothing
 inspects them here at all. With extensions **enabled**, dp1-go validates `inlineManifest` against the
