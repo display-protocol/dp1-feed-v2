@@ -15,7 +15,7 @@ import (
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
 
-// Group/channel ingest: each string in the document's "playlists" array becomes a store.IngestedPlaylist row.
+// Channel ingest: each string in the document's "playlists" array becomes a store.IngestedPlaylist row.
 // Local URLs hit the DB; remote URLs use HTTP fetch. Output order matches the input URI list, including repeated references to the same playlist.
 
 // playlistAPIPrefix is the base URL for playlists on this feed (public_base_url + "/api/v1/playlists/").
@@ -163,7 +163,7 @@ func (e *impl) resolveOnePlaylistRef(ctx context.Context, uri string) (store.Ing
 	//
 	// Ordering is the whole point. Validating first made membership depend on a document that, by contract,
 	// is ignored: once a member was stored here, its origin could rot, rotate keys, or serve something
-	// malformed, and every later group or channel referencing that URL would fail to be created even though
+	// malformed, and every later channel referencing that URL would fail to be created even though
 	// nothing about the stored playlist needed to change.
 	//
 	// This grants no new reach. A body claiming an id we already hold only earns a link to that stored
@@ -248,7 +248,7 @@ func playlistIDFromBody(body []byte) (uuid.UUID, bool) {
 // as uris (index i is the resolution of uris[i]), so membership position matches the document.
 //
 // Steps:
-//  1. Reject an empty list (groups/channels require at least one playlist).
+//  1. Reject an empty list (channels require at least one playlist).
 //  2. Reject a list longer than the configured cap, before any fetch is issued.
 //  3. Run resolveOnePlaylistRef for each index in parallel (errgroup), capped at 8 goroutines,
 //     writing into out[i] so completion order does not reorder results.
@@ -261,7 +261,7 @@ func playlistIDFromBody(body []byte) (uuid.UUID, bool) {
 // after the check so an oversized list cannot make the feed reserve memory for it either.
 func (e *impl) resolvePlaylistURIs(ctx context.Context, uris []string) ([]store.IngestedPlaylist, error) {
 	if len(uris) == 0 {
-		return nil, fmt.Errorf("%w: a group or channel must reference at least one playlist", ErrNoPlaylistReferences)
+		return nil, fmt.Errorf("%w: a channel must reference at least one playlist", ErrNoPlaylistReferences)
 	}
 	if max := e.maxRefs; max > 0 && len(uris) > max {
 		return nil, fmt.Errorf("%w: %d playlist references exceeds the maximum of %d", ErrTooManyReferences, len(uris), max)

@@ -11,7 +11,6 @@ import (
 
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 )
 
@@ -22,7 +21,7 @@ var ErrNotFound = errors.New("not found")
 // another write (or a delete and re-create) committed between the caller's read and this write.
 //
 // This exists because authorization happens on a record the executor read *before* the write — and for
-// groups and channels, remote playlist-URI resolution runs in between, widening that window. Document
+// channels, remote playlist-URI resolution runs in between, widening that window. Document
 // ids are client-assigned and reusable after a delete, so an unconditional write by id could apply a
 // decision made about the former owner's document to a different, newly created one. Conditioning every
 // post-authorization write on the observed updated_at binds it to that exact row generation.
@@ -95,16 +94,6 @@ type PlaylistRecord struct {
 	UpdatedAt time.Time
 }
 
-// PlaylistGroupRecord is a stored DP-1 playlist-group (exhibition) document.
-type PlaylistGroupRecord struct {
-	ID        uuid.UUID
-	Slug      string
-	Raw       json.RawMessage
-	Body      playlistgroup.Group
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
 // ChannelRecord is a stored DP-1 channels extension document.
 type ChannelRecord struct {
 	ID        uuid.UUID
@@ -138,30 +127,25 @@ type PlaylistItemRecord struct {
 	Item       playlist.PlaylistItem
 }
 
-// ListPlaylistsParams filters list results. It is shared by ListPlaylists, ListPlaylistGroups and
-// ListChannels; each documents which fields it reads.
-// ChannelFilter and PlaylistGroupFilter are mutually exclusive when both non-empty (HTTP returns 400).
+// ListPlaylistsParams filters list results. It is shared by ListPlaylists and ListChannels; each
+// documents which fields it reads.
 type ListPlaylistsParams struct {
 	// Limit is the maximum rows to return (validated in the store layer via ResolveListLimit).
 	Limit int
 	// Cursor is an opaque pagination token from a previous response (empty = first page).
 	Cursor string
 	// Sort is the direction (see SortAsc / SortDesc). Unfiltered lists order by created_at; lists with
-	// ChannelFilter or PlaylistGroupFilter order by membership position, i.e. the order the signed
-	// channel/group document lists its playlists.
+	// ChannelFilter order by membership position, i.e. the order the signed channel document lists its
+	// playlists.
 	Sort SortOrder
 	// ChannelFilter, if non-empty, restricts to playlists that are members of that channel (UUID or slug),
 	// ordered by their position in it. A playlist the channel lists more than once appears once per position.
 	ChannelFilter string
-	// PlaylistGroupFilter, if non-empty, restricts to playlists that are members of that group (UUID or slug),
-	// ordered by their position in it, as for ChannelFilter.
-	PlaylistGroupFilter string
 	// CuratorFilter, if non-empty, restricts to documents whose signed body names this curator: a
-	// `curators[].key` equal to it on playlists and channels, the `curator` string equal to it on
-	// playlist-groups. Matching is exact (case-sensitive, no trimming of the stored value): it reports what
-	// the document says, which is deliberately not the derived owner set (see docs/api_design.md). Ordered
-	// by created_at like an unfiltered list. On ListPlaylists it cannot be combined with ChannelFilter or
-	// PlaylistGroupFilter (ErrInvalidListFilter).
+	// `curators[].key` equal to it. Matching is exact (case-sensitive, no trimming of the stored value): it
+	// reports what the document says, which is deliberately not the derived owner set (see
+	// docs/api_design.md). Ordered by created_at like an unfiltered list. On ListPlaylists it cannot be
+	// combined with ChannelFilter (ErrInvalidListFilter).
 	CuratorFilter string
 	// PublisherFilter, if non-empty, restricts channels to those whose `publisher.key` equals it, matched
 	// as CuratorFilter. Read by ListChannels only; combined with CuratorFilter both must match.
@@ -169,17 +153,15 @@ type ListPlaylistsParams struct {
 }
 
 // ListPlaylistItemsParams lists rows from playlist_item_index for stable keyset pagination.
-// ChannelFilter and PlaylistGroupFilter are mutually exclusive when both non-empty (HTTP returns 400).
 // Sort order: (1) playlist_created_at (denormalized from playlists.created_at on the index row), (2) position, (3) item_id.
 type ListPlaylistItemsParams struct {
-	Limit               int
-	Cursor              string
-	Sort                SortOrder
-	ChannelFilter       string
-	PlaylistGroupFilter string
+	Limit         int
+	Cursor        string
+	Sort          SortOrder
+	ChannelFilter string
 }
 
-// IngestedPlaylist is a playlist row to upsert, with its item index, while committing a group or channel.
+// IngestedPlaylist is a playlist row to upsert, with its item index, while committing a channel.
 // Order in the slice is membership order; if an ID repeats, the first body is authoritative.
 // Raw is the member document verbatim (a fetched remote body or a stored local Raw), so the member's
 // own signatures survive the upsert.
@@ -197,16 +179,8 @@ type IngestedPlaylist struct {
 	SourceURI string
 }
 
-// PlaylistGroupInput is passed to Store.CreatePlaylistGroup: the group row and playlists to upsert.
-// Slice order is membership order (position = index). Raw is the signed group document.
-type PlaylistGroupInput struct {
-	ID        uuid.UUID
-	Slug      string
-	Raw       json.RawMessage
-	Playlists []IngestedPlaylist
-}
-
-// ChannelInput is passed to Store.CreateChannel (same shape as PlaylistGroupInput for the channel row).
+// ChannelInput is passed to Store.CreateChannel/UpdateChannel: the channel row and playlists to upsert.
+// Slice order is membership order (position = index). Raw is the signed channel document.
 type ChannelInput struct {
 	ID        uuid.UUID
 	Slug      string
@@ -234,14 +208,14 @@ type Store interface {
 	GetPlaylistBySourceURI(ctx context.Context, uri string) (*PlaylistRecord, error)
 	// GetPlaylistItems returns all indexed items for a playlist, ordered by position.
 	GetPlaylistItems(ctx context.Context, idOrSlug string) ([]PlaylistItemRecord, error)
-	// ListPlaylistItems returns a page of indexed items across playlists (optional channel or playlist-group filter).
+	// ListPlaylistItems returns a page of indexed items across playlists (optional channel filter).
 	ListPlaylistItems(ctx context.Context, p *ListPlaylistItemsParams) ([]PlaylistItemRecord, string, error)
 	// GetPlaylistItem returns one indexed item by its item UUID.
 	GetPlaylistItem(ctx context.Context, itemID uuid.UUID) (*PlaylistItemRecord, error)
 	// ListPlaylists returns a page of playlists: ordered by created_at when unfiltered or filtered by
-	// curator, by membership position when filtered by channel or playlist-group (direction from Sort).
-	// A curator filter combined with a container filter is ErrInvalidListFilter. Cursors are specific to
-	// the ordering that issued them, and a membership cursor also to its container and sort direction
+	// curator, by membership position when filtered by channel (direction from Sort).
+	// A curator filter combined with a channel filter is ErrInvalidListFilter. Cursors are specific to
+	// the ordering that issued them, and a membership cursor also to its channel and sort direction
 	// (ErrInvalidCursor otherwise).
 	ListPlaylists(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistRecord, string, error)
 	// UpdatePlaylist replaces the stored document bytes and rebuilds playlist_item_index from its items (same transaction).
@@ -273,20 +247,6 @@ type Store interface {
 	// error and the delete still applies. Without reportListing nil is returned and nothing is read.
 	// nil also when the delete did not apply.
 	DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time, reportListing bool) (listingChannels []uuid.UUID, err error)
-
-	// CreatePlaylistGroup upserts playlists and item indexes, inserts the group row, and creates ordered membership (single transaction).
-	CreatePlaylistGroup(ctx context.Context, in *PlaylistGroupInput) error
-	// GetPlaylistGroup loads a playlist-group by UUID or slug.
-	GetPlaylistGroup(ctx context.Context, idOrSlug string) (*PlaylistGroupRecord, error)
-	// ListPlaylistGroups returns a page ordered by created_at and Sort, optionally restricted by CuratorFilter.
-	ListPlaylistGroups(ctx context.Context, p *ListPlaylistsParams) ([]PlaylistGroupRecord, string, error)
-	// UpdatePlaylistGroup upserts playlists and item indexes, updates the group row body (and slug, as UpdatePlaylist), and replaces ordered membership (single transaction).
-	// Conditional on expectedUpdatedAt (see UpdatePlaylist); ErrConcurrentModification on mismatch.
-	UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *PlaylistGroupInput, expectedUpdatedAt time.Time) error
-	// ListPlaylistsInGroup returns full playlist rows in membership order (position 0 first). ErrNotFound if the group does not exist.
-	ListPlaylistsInGroup(ctx context.Context, idOrSlug string) ([]PlaylistRecord, error)
-	// DeletePlaylistGroup removes a playlist-group row, conditional on expectedUpdatedAt (see UpdatePlaylist).
-	DeletePlaylistGroup(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error
 
 	// CreateChannel upserts playlists and item indexes, inserts the channel row, and creates ordered membership (single transaction).
 	CreateChannel(ctx context.Context, in *ChannelInput) error

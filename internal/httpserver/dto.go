@@ -1,6 +1,6 @@
 package httpserver
 
-// Response DTOs aligned with OpenAPI (shared list envelope for playlists, groups, and channels).
+// Response DTOs aligned with OpenAPI (shared list envelope for playlists and channels).
 
 // ListResponse is the JSON envelope for GET list endpoints: items, optional cursor, hasMore.
 type ListResponse[T any] struct {

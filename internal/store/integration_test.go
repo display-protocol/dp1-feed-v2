@@ -16,6 +16,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,6 @@ import (
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
@@ -297,7 +297,7 @@ func TestIntegration_ListPlaylists_paginationCursor(t *testing.T) {
 	}
 }
 
-func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T) {
+func TestIntegration_ListPlaylists_filterByChannel(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
@@ -320,52 +320,6 @@ func TestIntegration_ListPlaylists_filterByPlaylistGroupAndChannel(t *testing.T)
 	}
 	if err := st.CreatePlaylist(ctx, plID2, "filter-pl-2", rawDoc(t, &pl2)); err != nil {
 		t.Fatal(err)
-	}
-
-	groupID := uuid.MustParse("81818181-8181-4181-8181-818181818181")
-	groupSlug := "filter-test-group"
-	groupBody := playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      groupSlug,
-		Title:     "Filter Group",
-		Playlists: []string{"filter-pl-1"},
-	}
-	groupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: groupSlug,
-		Raw:  rawDoc(t, groupBody),
-		Playlists: []store.IngestedPlaylist{
-			{ID: plID1, Slug: "filter-pl-1", Raw: rawDoc(t, pl1)},
-		},
-	}
-	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
-		t.Fatalf("CreatePlaylistGroup: %v", err)
-	}
-
-	byGroupSlug, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
-		Limit:               10,
-		Cursor:              "",
-		Sort:                store.SortAsc,
-		PlaylistGroupFilter: groupSlug,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(byGroupSlug) != 1 || byGroupSlug[0].ID != plID1 {
-		t.Fatalf("playlist-group filter by slug: got %d rows, want 1 with id %v", len(byGroupSlug), plID1)
-	}
-
-	byGroupUUID, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
-		Limit:               10,
-		Cursor:              "",
-		Sort:                store.SortAsc,
-		PlaylistGroupFilter: groupID.String(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(byGroupUUID) != 1 || byGroupUUID[0].ID != plID1 {
-		t.Fatalf("playlist-group filter by uuid: got %d rows", len(byGroupUUID))
 	}
 
 	chID := uuid.MustParse("c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1")
@@ -606,57 +560,6 @@ func TestIntegration_ListPlaylistItems_and_GetPlaylistItem(t *testing.T) {
 		}
 	})
 
-	t.Run("filter_by_playlist_group", func(t *testing.T) {
-		gid := uuid.MustParse("e3e3e3e3-e3e3-e3e3-e3e3-e3e3e3e3e3e3")
-		gbody := playlistgroup.Group{
-			ID:        gid.String(),
-			Slug:      "grp-for-items",
-			Title:     "G",
-			Playlists: []string{"pl-items-1"},
-		}
-		in := &store.PlaylistGroupInput{
-			ID:        gid,
-			Slug:      "grp-for-items",
-			Raw:       rawDoc(t, gbody),
-			Playlists: []store.IngestedPlaylist{{ID: pid1, Slug: "pl-items-1", Raw: rawDoc(t, pl1)}},
-		}
-		if err := st.CreatePlaylistGroup(ctx, in); err != nil {
-			t.Fatal(err)
-		}
-
-		filtered, cur, err := st.ListPlaylistItems(ctx, &store.ListPlaylistItemsParams{
-			Limit:               10,
-			Cursor:              "",
-			Sort:                store.SortAsc,
-			PlaylistGroupFilter: "grp-for-items",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cur != "" {
-			t.Fatalf("filtered: unexpected cursor %q", cur)
-		}
-		if len(filtered) != 2 {
-			t.Fatalf("filtered: want 2 items (pl1 has 2 items), got %d", len(filtered))
-		}
-		if filtered[0].ItemID != iid1 || filtered[1].ItemID != iid2 {
-			t.Fatalf("filtered items: want [%v, %v], got [%v, %v]", iid1, iid2, filtered[0].ItemID, filtered[1].ItemID)
-		}
-
-		filteredByUUID, _, err := st.ListPlaylistItems(ctx, &store.ListPlaylistItemsParams{
-			Limit:               10,
-			Cursor:              "",
-			Sort:                store.SortAsc,
-			PlaylistGroupFilter: gid.String(),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(filteredByUUID) != 2 {
-			t.Fatalf("filtered by UUID: want 2, got %d", len(filteredByUUID))
-		}
-	})
-
 	t.Run("filter_by_channel", func(t *testing.T) {
 		chid := uuid.MustParse("f4f4f4f4-f4f4-f4f4-f4f4-f4f4f4f4f4f4")
 		chbody := channels.Channel{
@@ -774,447 +677,10 @@ func TestIntegration_DeletePlaylist_notFound(t *testing.T) {
 }
 
 // =============================================================================
-// Playlist Group Contract Tests
+// Membership ingestion (exercised through channels)
 // =============================================================================
 
-func TestIntegration_PlaylistGroupCRUD_and_List(t *testing.T) {
-	st := newStore(t)
-	ctx := context.Background()
-
-	// Setup: Create playlists that will be referenced by the group
-	playlistID1 := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	playlistID2 := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "P1"}
-	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "P2"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "playlist-1", rawDoc(t, &pl1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "playlist-2", rawDoc(t, &pl2)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create group with upserted playlists
-	groupID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-	groupSlug := "test-group"
-	groupBody := playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      groupSlug,
-		Title:     "Test Group",
-		Playlists: []string{"playlist-1", "playlist-2"},
-	}
-	groupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: groupSlug,
-		Raw:  rawDoc(t, groupBody),
-		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "playlist-1", Raw: rawDoc(t, pl1)},
-			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
-		},
-	}
-
-	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
-		t.Fatalf("CreatePlaylistGroup: %v", err)
-	}
-
-	// Get by UUID - comprehensive assertions
-	byID, err := st.GetPlaylistGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if byID.ID != groupID {
-		t.Fatalf("Get by id: ID mismatch, want %v, got %v", groupID, byID.ID)
-	}
-	if byID.Slug != groupSlug {
-		t.Fatalf("Get by id: slug mismatch, want %q, got %q", groupSlug, byID.Slug)
-	}
-	if byID.Body.Title != "Test Group" {
-		t.Fatalf("Get by id: title mismatch, want %q, got %q", "Test Group", byID.Body.Title)
-	}
-	if len(byID.Body.Playlists) != 2 {
-		t.Fatalf("Get by id: playlists length mismatch, want 2, got %d", len(byID.Body.Playlists))
-	}
-	if byID.Body.Playlists[0] != "playlist-1" || byID.Body.Playlists[1] != "playlist-2" {
-		t.Fatalf("Get by id: playlists content mismatch, got %v", byID.Body.Playlists)
-	}
-	if byID.CreatedAt.IsZero() {
-		t.Fatal("Get by id: CreatedAt should be set")
-	}
-	if byID.UpdatedAt.IsZero() {
-		t.Fatal("Get by id: UpdatedAt should be set")
-	}
-	createdAt := byID.CreatedAt // Save for later comparison
-
-	// Get by slug - verify same record
-	bySlug, err := st.GetPlaylistGroup(ctx, groupSlug)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bySlug.ID != groupID {
-		t.Fatalf("Get by slug: ID mismatch, want %v, got %v", groupID, bySlug.ID)
-	}
-	if bySlug.Slug != groupSlug {
-		t.Fatalf("Get by slug: slug mismatch, want %q, got %q", groupSlug, bySlug.Slug)
-	}
-	assertDeepEqual(t, "Get by slug body", byID.Body, bySlug.Body)
-
-	// Verify membership before update
-	membersBefore, err := st.ListPlaylistsInGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(membersBefore) != 2 {
-		t.Fatalf("members before update: want 2, got %d", len(membersBefore))
-	}
-
-	// List includes our group
-	recs, _, err := st.ListPlaylistGroups(ctx, &store.ListPlaylistsParams{
-		Limit:  10,
-		Cursor: "",
-		Sort:   store.SortAsc,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(recs) != 1 {
-		t.Fatalf("list len: want 1, got %d", len(recs))
-	}
-	if recs[0].ID != groupID {
-		t.Fatalf("list record ID: want %v, got %v", groupID, recs[0].ID)
-	}
-
-	// Update group body and membership (reduce from 2 playlists to 1)
-	time.Sleep(5 * time.Millisecond) // Ensure updated_at changes
-	updatedGroupBody := playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      groupSlug,
-		Title:     "Updated Group",
-		Playlists: []string{"playlist-2"},
-	}
-	updatedInput := &store.PlaylistGroupInput{
-		Raw: rawDoc(t, updatedGroupBody),
-		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID2, Slug: "playlist-2", Raw: rawDoc(t, pl2)},
-		},
-	}
-	if err := st.UpdatePlaylistGroup(ctx, groupSlug, updatedInput, grpUpdatedAt(t, ctx, st, groupSlug)); err != nil {
-		t.Fatalf("UpdatePlaylistGroup: %v", err)
-	}
-
-	// Verify update worked - comprehensive checks
-	afterUpdate, err := st.GetPlaylistGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatalf("GetPlaylistGroup after update: %v", err)
-	}
-	if afterUpdate.ID != groupID {
-		t.Fatalf("after update: ID changed unexpectedly to %v", afterUpdate.ID)
-	}
-	if afterUpdate.Slug != groupSlug {
-		t.Fatalf("after update: slug changed unexpectedly to %q", afterUpdate.Slug)
-	}
-	if afterUpdate.Body.Title != "Updated Group" {
-		t.Fatalf("after update: title mismatch, want %q, got %q", "Updated Group", afterUpdate.Body.Title)
-	}
-	if len(afterUpdate.Body.Playlists) != 1 {
-		t.Fatalf("after update: playlists length, want 1, got %d", len(afterUpdate.Body.Playlists))
-	}
-	if afterUpdate.Body.Playlists[0] != "playlist-2" {
-		t.Fatalf("after update: playlist mismatch, want %q, got %q", "playlist-2", afterUpdate.Body.Playlists[0])
-	}
-	if afterUpdate.CreatedAt != createdAt {
-		t.Fatalf("after update: CreatedAt changed from %v to %v", createdAt, afterUpdate.CreatedAt)
-	}
-	if !afterUpdate.UpdatedAt.After(afterUpdate.CreatedAt) {
-		t.Fatalf("after update: UpdatedAt (%v) should be after CreatedAt (%v)", afterUpdate.UpdatedAt, afterUpdate.CreatedAt)
-	}
-
-	// Verify membership was actually replaced (old member removed)
-	membersAfter, err := st.ListPlaylistsInGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(membersAfter) != 1 {
-		t.Fatalf("members after update: want 1, got %d", len(membersAfter))
-	}
-	if membersAfter[0].ID != playlistID2 {
-		t.Fatalf("members after update: want playlist %v, got %v", playlistID2, membersAfter[0].ID)
-	}
-
-	// Delete removes row
-	if err := st.DeletePlaylistGroup(ctx, groupID.String(), grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
-		t.Fatal(err)
-	}
-	_, err = st.GetPlaylistGroup(ctx, groupID.String())
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("after delete: expected ErrNotFound, got %v", err)
-	}
-
-	// Verify membership rows were cascade-deleted
-	_, err = st.ListPlaylistsInGroup(ctx, groupID.String())
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("after delete: membership should return ErrNotFound, got %v", err)
-	}
-}
-
-func TestIntegration_GetPlaylistGroup_notFound(t *testing.T) {
-	st := newStore(t)
-	_, err := st.GetPlaylistGroup(context.Background(), uuid.New().String())
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestIntegration_UpdatePlaylistGroup_notFound(t *testing.T) {
-	st := newStore(t)
-	input := &store.PlaylistGroupInput{
-		Raw:       rawDoc(t, playlistgroup.Group{Title: "Missing"}),
-		Playlists: []store.IngestedPlaylist{},
-	}
-	err := st.UpdatePlaylistGroup(context.Background(), uuid.New().String(), input, time.Time{})
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestIntegration_DeletePlaylistGroup_notFound(t *testing.T) {
-	st := newStore(t)
-	err := st.DeletePlaylistGroup(context.Background(), "missing-slug", time.Time{})
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestIntegration_ListPlaylistsInGroup(t *testing.T) {
-	st := newStore(t)
-	ctx := context.Background()
-
-	// Create playlists
-	playlistID1 := uuid.MustParse("33333333-3333-3333-3333-333333333333")
-	playlistID2 := uuid.MustParse("44444444-4444-4444-4444-444444444444")
-	pl1 := playlist.Playlist{DPVersion: "1.1.0", Title: "First"}
-	pl2 := playlist.Playlist{DPVersion: "1.1.0", Title: "Second"}
-	if err := st.CreatePlaylist(ctx, playlistID1, "pl-first", rawDoc(t, &pl1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.CreatePlaylist(ctx, playlistID2, "pl-second", rawDoc(t, &pl2)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create group with ordered membership
-	groupID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
-	groupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: "membership-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "membership-group",
-			Title:     "Membership Test",
-			Playlists: []string{"pl-first", "pl-second"},
-		}),
-		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID1, Slug: "pl-first", Raw: rawDoc(t, pl1)},
-			{ID: playlistID2, Slug: "pl-second", Raw: rawDoc(t, pl2)},
-		},
-	}
-	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
-		t.Fatal(err)
-	}
-
-	// List members preserves order
-	members, err := st.ListPlaylistsInGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(members) != 2 {
-		t.Fatalf("expected 2 members, got %d", len(members))
-	}
-	if members[0].ID != playlistID1 {
-		t.Fatalf("first member ID mismatch: got %v", members[0].ID)
-	}
-	if members[1].ID != playlistID2 {
-		t.Fatalf("second member ID mismatch: got %v", members[1].ID)
-	}
-	assertDeepEqual(t, "first member body", pl1, members[0].Body)
-	assertDeepEqual(t, "second member body", pl2, members[1].Body)
-}
-
-func TestIntegration_ListPlaylistsInGroup_notFound(t *testing.T) {
-	st := newStore(t)
-	_, err := st.ListPlaylistsInGroup(context.Background(), "missing-group")
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestIntegration_ListPlaylistGroups_pagination(t *testing.T) {
-	st := newStore(t)
-	ctx := context.Background()
-
-	// Create two groups
-	groupID1 := uuid.MustParse("66666666-6666-6666-6666-666666666666")
-	groupID2 := uuid.MustParse("77777777-7777-7777-7777-777777777777")
-	group1 := &store.PlaylistGroupInput{
-		ID:   groupID1,
-		Slug: "group-first",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID1.String(),
-			Slug:      "group-first",
-			Title:     "First Group",
-			Playlists: []string{},
-		}),
-		Playlists: []store.IngestedPlaylist{},
-	}
-	group2 := &store.PlaylistGroupInput{
-		ID:   groupID2,
-		Slug: "group-second",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID2.String(),
-			Slug:      "group-second",
-			Title:     "Second Group",
-			Playlists: []string{},
-		}),
-		Playlists: []store.IngestedPlaylist{},
-	}
-	if err := st.CreatePlaylistGroup(ctx, group1); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	if err := st.CreatePlaylistGroup(ctx, group2); err != nil {
-		t.Fatal(err)
-	}
-
-	// First page: one row, non-empty cursor
-	page1, cur, err := st.ListPlaylistGroups(ctx, &store.ListPlaylistsParams{
-		Limit:  1,
-		Cursor: "",
-		Sort:   store.SortAsc,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page1) != 1 || cur == "" {
-		t.Fatalf("page1 len=%d cur=%q", len(page1), cur)
-	}
-
-	// Second page: other row, empty cursor
-	page2, cur2, err := st.ListPlaylistGroups(ctx, &store.ListPlaylistsParams{
-		Limit:  1,
-		Cursor: cur,
-		Sort:   store.SortAsc,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page2) != 1 {
-		t.Fatalf("page2 len %d", len(page2))
-	}
-	if page1[0].Body.Title == page2[0].Body.Title {
-		t.Fatal("expected different rows across pages")
-	}
-	if cur2 != "" {
-		t.Fatalf("expected empty next cursor on last page, got %q", cur2)
-	}
-}
-
-// =============================================================================
-// Playlist Group Edge Case Tests
-// =============================================================================
-
-func TestIntegration_PlaylistGroup_emptyPlaylists(t *testing.T) {
-	st := newStore(t)
-	ctx := context.Background()
-
-	// Create group with no playlists
-	groupID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	emptyGroupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: "empty-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "empty-group",
-			Title:     "Empty Group",
-			Playlists: []string{},
-		}),
-		Playlists: []store.IngestedPlaylist{},
-	}
-	if err := st.CreatePlaylistGroup(ctx, emptyGroupInput); err != nil {
-		t.Fatalf("CreatePlaylistGroup with empty playlists: %v", err)
-	}
-
-	// Verify it was created
-	rec, err := st.GetPlaylistGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rec.Body.Playlists) != 0 {
-		t.Fatalf("expected 0 playlists, got %d", len(rec.Body.Playlists))
-	}
-
-	// List members should return empty but not error
-	members, err := st.ListPlaylistsInGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(members) != 0 {
-		t.Fatalf("expected 0 members, got %d", len(members))
-	}
-
-	// Update to add a playlist
-	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
-	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Added Later"}
-	if err := st.CreatePlaylist(ctx, playlistID, "added-later", rawDoc(t, &pl)); err != nil {
-		t.Fatal(err)
-	}
-
-	updateInput := &store.PlaylistGroupInput{
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "empty-group",
-			Title:     "No Longer Empty",
-			Playlists: []string{"added-later"},
-		}),
-		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "added-later", Raw: rawDoc(t, pl)},
-		},
-	}
-	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), updateInput, grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
-		t.Fatalf("UpdatePlaylistGroup to add playlists: %v", err)
-	}
-
-	// Verify update worked
-	afterUpdate, _ := st.GetPlaylistGroup(ctx, groupID.String())
-	if len(afterUpdate.Body.Playlists) != 1 {
-		t.Fatalf("after update: expected 1 playlist, got %d", len(afterUpdate.Body.Playlists))
-	}
-	membersAfter, _ := st.ListPlaylistsInGroup(ctx, groupID.String())
-	if len(membersAfter) != 1 {
-		t.Fatalf("after update: expected 1 member, got %d", len(membersAfter))
-	}
-
-	// Update back to empty
-	emptyAgain := &store.PlaylistGroupInput{
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "empty-group",
-			Title:     "Empty Again",
-			Playlists: []string{},
-		}),
-		Playlists: []store.IngestedPlaylist{},
-	}
-	if err := st.UpdatePlaylistGroup(ctx, groupID.String(), emptyAgain, grpUpdatedAt(t, ctx, st, groupID.String())); err != nil {
-		t.Fatalf("UpdatePlaylistGroup to remove all playlists: %v", err)
-	}
-
-	// Verify all members removed
-	finalMembers, err := st.ListPlaylistsInGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(finalMembers) != 0 {
-		t.Fatalf("after removing all: expected 0 members, got %d", len(finalMembers))
-	}
-}
-
-func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
+func TestIntegration_Channel_duplicatePlaylists(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
@@ -1232,14 +698,14 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 		Items:     []playlist.PlaylistItem{{ID: laterItemID.String(), Source: "https://example.com/later.html"}},
 	}
 
-	// Create group with same playlist repeated (valid in DP-1 spec - position matters)
-	groupID := uuid.MustParse("00000000-0000-0000-0000-000000000004")
-	dupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: "dup-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "dup-group",
+	// Create channel with same playlist repeated (valid in DP-1 spec - position matters)
+	channelID := uuid.MustParse("00000000-0000-0000-0000-000000000004")
+	dupInput := &store.ChannelInput{
+		ID:   channelID,
+		Slug: "dup-channel",
+		Raw: rawDoc(t, channels.Channel{
+			ID:        channelID.String(),
+			Slug:      "dup-channel",
 			Title:     "Duplicate Test",
 			Playlists: []string{"repeated", "repeated", "repeated"},
 		}),
@@ -1249,12 +715,12 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 			{ID: playlistID, Slug: "repeated-later", Raw: rawDoc(t, later)},
 		},
 	}
-	if err := st.CreatePlaylistGroup(ctx, dupInput); err != nil {
-		t.Fatalf("CreatePlaylistGroup with duplicate playlists: %v", err)
+	if err := st.CreateChannel(ctx, dupInput); err != nil {
+		t.Fatalf("CreateChannel with duplicate playlists: %v", err)
 	}
 
 	// Verify all three positions were created
-	members, err := st.ListPlaylistsInGroup(ctx, groupID.String())
+	members, err := st.ListPlaylistsInChannel(ctx, channelID.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1285,11 +751,11 @@ func TestIntegration_PlaylistGroup_duplicatePlaylists(t *testing.T) {
 	}
 }
 
-// Membership ingestion may link an existing playlist but must never modify one. Group and channel
-// creation is open, so if ingest upserted, anyone able to create a group could host a document carrying a
+// Membership ingestion may link an existing playlist but must never modify one. Channel creation
+// is open, so if ingest upserted, anyone able to create a channel could host a document carrying a
 // victim's playlist id and overwrite that playlist's body, slug, owner set and item index on this feed.
 // This is that attack: a second ingest reuses the stored id with different content and a different owner.
-func TestIntegration_PlaylistGroupIngestNeverModifiesExistingPlaylist(t *testing.T) {
+func TestIntegration_ChannelIngestNeverModifiesExistingPlaylist(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 
@@ -1305,21 +771,21 @@ func TestIntegration_PlaylistGroupIngestNeverModifiesExistingPlaylist(t *testing
 			{ID: originalItemID.String(), Source: "https://example.com/original.html"},
 		},
 	}
-	groupID := uuid.MustParse("30000000-0000-4000-8000-000000000001")
-	group := playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      "remote-ingest-group",
-		Title:     "Remote ingest group",
+	channelID := uuid.MustParse("30000000-0000-4000-8000-000000000001")
+	ch := channels.Channel{
+		ID:        channelID.String(),
+		Slug:      "remote-ingest-channel",
+		Title:     "Remote ingest channel",
 		Playlists: []string{"https://origin.example/playlist.json"},
 	}
 
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-		ID:        groupID,
-		Slug:      group.Slug,
-		Raw:       rawDoc(t, group),
+	if err := st.CreateChannel(ctx, &store.ChannelInput{
+		ID:        channelID,
+		Slug:      ch.Slug,
+		Raw:       rawDoc(t, ch),
 		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "remote-ingest", Raw: rawDoc(t, original)}},
 	}); err != nil {
-		t.Fatalf("CreatePlaylistGroup: %v", err)
+		t.Fatalf("CreateChannel: %v", err)
 	}
 
 	// A playlist new to this feed is created by the ingest, index and all.
@@ -1347,11 +813,11 @@ func TestIntegration_PlaylistGroupIngestNeverModifiesExistingPlaylist(t *testing
 			{ID: spoofItemID.String(), Source: "https://attacker.example/spoof.html"},
 		},
 	}
-	if err := st.UpdatePlaylistGroup(ctx, group.Slug, &store.PlaylistGroupInput{
-		Raw:       rawDoc(t, group),
+	if err := st.UpdateChannel(ctx, ch.Slug, &store.ChannelInput{
+		Raw:       rawDoc(t, ch),
 		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: "hijacked", Raw: rawDoc(t, spoof)}},
-	}, grpUpdatedAt(t, ctx, st, group.Slug)); err != nil {
-		t.Fatalf("UpdatePlaylistGroup: %v", err)
+	}, chUpdatedAt(t, ctx, st, ch.Slug)); err != nil {
+		t.Fatalf("UpdateChannel: %v", err)
 	}
 
 	after, err := st.GetPlaylist(ctx, playlistID.String())
@@ -1380,13 +846,13 @@ func TestIntegration_PlaylistGroupIngestNeverModifiesExistingPlaylist(t *testing
 		t.Fatalf("spoof item was indexed: got %v, want ErrNotFound", err)
 	}
 
-	// The group still links the (unmodified) playlist.
-	linked, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, PlaylistGroupFilter: group.Slug})
+	// The channel still links the (unmodified) playlist.
+	linked, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, ChannelFilter: ch.Slug})
 	if err != nil {
-		t.Fatalf("ListPlaylists in group: %v", err)
+		t.Fatalf("ListPlaylists in channel: %v", err)
 	}
 	if len(linked) != 1 || linked[0].ID != playlistID {
-		t.Fatalf("group membership: %+v", linked)
+		t.Fatalf("channel membership: %+v", linked)
 	}
 }
 
@@ -1410,21 +876,21 @@ func TestIntegration_IngestRejectsTombstonedPlaylistID(t *testing.T) {
 		t.Fatalf("DeletePlaylist: %v", err)
 	}
 
-	groupID := uuid.MustParse("30000000-0000-4000-8000-0000000000aa")
-	group := playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      "tombstoned-ingest-group",
-		Title:     "Group referencing a deleted playlist",
+	channelID := uuid.MustParse("30000000-0000-4000-8000-0000000000aa")
+	ch := channels.Channel{
+		ID:        channelID.String(),
+		Slug:      "tombstoned-ingest-channel",
+		Title:     "Channel referencing a deleted playlist",
 		Playlists: []string{"https://origin.example/playlist.json"},
 	}
-	err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-		ID:        groupID,
-		Slug:      group.Slug,
-		Raw:       rawDoc(t, group),
+	err := st.CreateChannel(ctx, &store.ChannelInput{
+		ID:        channelID,
+		Slug:      ch.Slug,
+		Raw:       rawDoc(t, ch),
 		Playlists: []store.IngestedPlaylist{{ID: playlistID, Slug: doc.Slug, Raw: rawDoc(t, doc)}},
 	})
 	if !errors.Is(err, store.ErrDocumentDeleted) {
-		t.Fatalf("CreatePlaylistGroup with tombstoned member: got %v, want ErrDocumentDeleted", err)
+		t.Fatalf("CreateChannel with tombstoned member: got %v, want ErrDocumentDeleted", err)
 	}
 }
 
@@ -1439,21 +905,21 @@ func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing
 	playlistID := uuid.MustParse("00000000-0000-0000-0000-00000000000b")
 	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Ingested from a remote origin"}
 
-	groupID := uuid.MustParse("00000000-0000-0000-0000-00000000000c")
-	groupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: "sources-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID:        groupID.String(),
-			Slug:      "sources-group",
-			Title:     "Sources Group",
+	channelID := uuid.MustParse("00000000-0000-0000-0000-00000000000c")
+	channelInput := &store.ChannelInput{
+		ID:   channelID,
+		Slug: "sources-channel",
+		Raw: rawDoc(t, channels.Channel{
+			ID:        channelID.String(),
+			Slug:      "sources-channel",
+			Title:     "Sources Channel",
 			Playlists: []string{remoteURI},
 		}),
 		Playlists: []store.IngestedPlaylist{
 			{ID: playlistID, Slug: "remote-pl", Raw: rawDoc(t, pl), SourceURI: remoteURI},
 		},
 	}
-	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
+	if err := st.CreateChannel(ctx, channelInput); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1474,12 +940,12 @@ func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing
 	// text it raised "index row size exceeds maximum" and turned client input into a 500.
 	longURI := "https://elsewhere.test/" + strings.Repeat("abcdefgh", 500) + ".json"
 	longID := uuid.MustParse("00000000-0000-0000-0000-00000000000d")
-	longGroupID := uuid.MustParse("00000000-0000-0000-0000-00000000000e")
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-		ID:   longGroupID,
-		Slug: "long-uri-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID: longGroupID.String(), Slug: "long-uri-group", Title: "Long", Playlists: []string{longURI},
+	longChannelID := uuid.MustParse("00000000-0000-0000-0000-00000000000e")
+	if err := st.CreateChannel(ctx, &store.ChannelInput{
+		ID:   longChannelID,
+		Slug: "long-uri-channel",
+		Raw: rawDoc(t, channels.Channel{
+			ID: longChannelID.String(), Slug: "long-uri-channel", Title: "Long", Playlists: []string{longURI},
 		}),
 		Playlists: []store.IngestedPlaylist{
 			{ID: longID, Slug: "long-pl", Raw: rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "Long"}), SourceURI: longURI},
@@ -1494,12 +960,12 @@ func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing
 	// Re-pointing: the cache is last-known-good, so a later resolution of the same URI replaces the old
 	// one. Under the previous first-wins rule this silently kept serving the abandoned playlist.
 	repointID := uuid.MustParse("00000000-0000-0000-0000-00000000000f")
-	repointGroupID := uuid.MustParse("00000000-0000-0000-0000-000000000010")
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-		ID:   repointGroupID,
-		Slug: "repoint-group",
-		Raw: rawDoc(t, playlistgroup.Group{
-			ID: repointGroupID.String(), Slug: "repoint-group", Title: "Repoint", Playlists: []string{remoteURI},
+	repointChannelID := uuid.MustParse("00000000-0000-0000-0000-000000000010")
+	if err := st.CreateChannel(ctx, &store.ChannelInput{
+		ID:   repointChannelID,
+		Slug: "repoint-channel",
+		Raw: rawDoc(t, channels.Channel{
+			ID: repointChannelID.String(), Slug: "repoint-channel", Title: "Repoint", Playlists: []string{remoteURI},
 		}),
 		Playlists: []store.IngestedPlaylist{
 			{ID: repointID, Slug: "repointed-pl", Raw: rawDoc(t, playlist.Playlist{DPVersion: "1.1.0", Title: "Repointed"}), SourceURI: remoteURI},
@@ -1521,79 +987,6 @@ func TestIntegration_PlaylistSources_cacheResolvesRepointsAndCascades(t *testing
 	}
 	if _, err := st.GetPlaylistBySourceURI(ctx, remoteURI); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("cache row must not outlive the playlist it points at, got %v", err)
-	}
-}
-
-// A playlist owner's deletion must not be blockable by someone else's document.
-//
-// Creation is open, so any caller can self-sign a group referencing an already-stored playlist they do
-// not own. While the membership FK was ON DELETE RESTRICT that reference vetoed the playlist owner's own
-// signed DELETE, and the documented remedy — remove the references — was impossible for them, since only
-// the group's owner may edit or delete the group. Migration 000005 makes membership CASCADE instead.
-//
-// The rows are a derived index, not owned content: a group is served from its stored signed document, so
-// cascading leaves that document byte-for-byte intact (asserted below) and only drops the membership row
-// that backs the `?playlist-group=` filter.
-func TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership(t *testing.T) {
-	st := newStore(t)
-	ctx := context.Background()
-
-	playlistID := uuid.MustParse("00000000-0000-0000-0000-000000000005")
-	pl := playlist.Playlist{DPVersion: "1.1.0", Title: "Referenced"}
-	if err := st.CreatePlaylist(ctx, playlistID, "referenced-pl", rawDoc(t, &pl)); err != nil {
-		t.Fatal(err)
-	}
-
-	// The group is a third party's: it references the playlist without its owner's involvement, which is
-	// exactly the situation that used to deadlock.
-	groupID := uuid.MustParse("00000000-0000-0000-0000-000000000006")
-	groupRaw := rawDoc(t, playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      "referencing-group",
-		Title:     "Referencing Group",
-		Playlists: []string{"referenced-pl"},
-	})
-	groupInput := &store.PlaylistGroupInput{
-		ID:   groupID,
-		Slug: "referencing-group",
-		Raw:  groupRaw,
-		Playlists: []store.IngestedPlaylist{
-			{ID: playlistID, Slug: "referenced-pl", Raw: rawDoc(t, pl)},
-		},
-	}
-	if err := st.CreatePlaylistGroup(ctx, groupInput); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := st.DeletePlaylist(ctx, playlistID.String(), plUpdatedAt(t, ctx, st, playlistID.String()), false); err != nil {
-		t.Fatalf("a playlist owner's delete must not be blocked by a third party's reference: %v", err)
-	}
-
-	if _, err := st.GetPlaylist(ctx, playlistID.String()); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("playlist should be gone after delete, got %v", err)
-	}
-
-	// The referencing group survives untouched. Its document is signed, so the feed must not edit it: it
-	// still lists the deleted playlist's URI, and its bytes must be unchanged.
-	grp, err := st.GetPlaylistGroup(ctx, groupID.String())
-	if err != nil {
-		t.Fatalf("third party's group must survive the playlist delete: %v", err)
-	}
-	if !jsonEqual(t, grp.Raw, groupRaw) {
-		t.Fatalf("group document must be untouched by another resource's deletion:\n got %s\nwant %s", grp.Raw, groupRaw)
-	}
-
-	// The membership row is gone, so the group filter no longer offers a playlist that no longer exists.
-	items, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{
-		Limit:               10,
-		Sort:                store.SortAsc,
-		PlaylistGroupFilter: groupID.String(),
-	})
-	if err != nil {
-		t.Fatalf("list by group filter: %v", err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("membership should have cascaded away, got %d rows", len(items))
 	}
 }
 
@@ -2030,8 +1423,9 @@ func TestIntegration_Channel_emptyPlaylists(t *testing.T) {
 	}
 }
 
-// Channel counterpart of TestIntegration_PlaylistGroup_deletingReferencedPlaylistCascadesMembership:
-// a channel owned by someone else must not be able to block the playlist owner's delete either.
+// A playlist owner's deletion must not be blockable by someone else's document. Creation is open, so any
+// caller can self-sign a channel referencing an already-stored playlist they do not own; migration 000005
+// makes membership CASCADE so that reference cannot veto the playlist owner's signed DELETE.
 func TestIntegration_Channel_deletingReferencedPlaylistCascadesMembership(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
@@ -2110,15 +1504,6 @@ func plUpdatedAt(t testing.TB, ctx context.Context, st store.Store, idOrSlug str
 	rec, err := st.GetPlaylist(ctx, idOrSlug)
 	if err != nil {
 		t.Fatalf("read playlist updated_at for %q: %v", idOrSlug, err)
-	}
-	return rec.UpdatedAt
-}
-
-func grpUpdatedAt(t testing.TB, ctx context.Context, st store.Store, idOrSlug string) time.Time {
-	t.Helper()
-	rec, err := st.GetPlaylistGroup(ctx, idOrSlug)
-	if err != nil {
-		t.Fatalf("read playlist_group updated_at for %q: %v", idOrSlug, err)
 	}
 	return rec.UpdatedAt
 }
@@ -2325,32 +1710,6 @@ func TestIntegration_Create_liveCollisions(t *testing.T) {
 	t.Run("playlist slug", func(t *testing.T) {
 		other := uuid.MustParse("dddddddd-dddd-dddd-dddd-ddddddddddd2")
 		err := st.CreatePlaylist(ctx, other, "collide-playlist", rawDoc(t, &pl))
-		assertAlreadyExists(t, err, "slug")
-	})
-
-	groupID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddde1")
-	group := playlistgroup.Group{
-		ID:        groupID.String(),
-		Slug:      "collide-group",
-		Title:     "Collide group",
-		Playlists: []string{"collide-playlist"},
-	}
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-		ID:        groupID,
-		Slug:      "collide-group",
-		Raw:       rawDoc(t, &group),
-		Playlists: []store.IngestedPlaylist{},
-	}); err != nil {
-		t.Fatalf("CreatePlaylistGroup: %v", err)
-	}
-
-	t.Run("playlist-group slug", func(t *testing.T) {
-		err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-			ID:        uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddde2"),
-			Slug:      "collide-group",
-			Raw:       rawDoc(t, &group),
-			Playlists: []store.IngestedPlaylist{},
-		})
 		assertAlreadyExists(t, err, "slug")
 	})
 
@@ -2635,46 +1994,20 @@ func TestIntegration_ListPlaylists_channelFilterOrdersByMembershipPosition(t *te
 		t.Fatalf("channel cursor presented against another channel: want ErrInvalidCursor, got %v", err)
 	}
 
-	// The playlist-group filter follows the same rule.
-	gID := uuid.MustParse("09000000-0000-4000-8000-000000000001")
-	gBody := playlistgroup.Group{ID: gID.String(), Slug: "pos-group", Title: "Position Group", Playlists: []string{slugs[2], slugs[0]}}
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: gID, Slug: "pos-group", Raw: rawDoc(t, gBody), Playlists: []store.IngestedPlaylist{members[2], members[0]}}); err != nil {
-		t.Fatalf("CreatePlaylistGroup: %v", err)
-	}
-	rows, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, PlaylistGroupFilter: "pos-group"})
+	// A cursor issued while playlist-groups existed carries the retired "playlist-group" kind. Presented
+	// against this channel, with the channel's own id, direction and revision, it must still be refused:
+	// its position was a boundary in a group's membership, not this channel's.
+	chRec, err := st.GetChannel(ctx, chID.String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0].ID != ids[2] || rows[1].ID != ids[0] {
-		t.Fatalf("group filter order: got %v, want [%v %v]", rows, ids[2], ids[0])
+	retired, err := json.Marshal(map[string]any{"kind": "playlist-group", "cid": chID, "sort": "asc", "rev": chRec.UpdatedAt, "pos": 0})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Same decoy rule for groups on the item list: a group whose slug is the real group's UUID.
-	decoyGID := uuid.MustParse("09000000-0000-4000-8000-000000000002")
-	decoyG := playlistgroup.Group{ID: decoyGID.String(), Slug: gID.String(), Title: "Decoy Group", Playlists: []string{"decoy-pl"}}
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{ID: decoyGID, Slug: gID.String(), Raw: rawDoc(t, decoyG), Playlists: []store.IngestedPlaylist{decoyMember}}); err != nil {
-		t.Fatalf("CreatePlaylistGroup(decoy): %v", err)
-	}
-	if seen := itemPlaylists(&store.ListPlaylistItemsParams{Limit: 50, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); seen[decoyPlID] || len(seen) != 2 {
-		t.Fatalf("items by group uuid with a slug decoy present: playlists %v, want exactly the 2 real members", seen)
-	}
-	if rows, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); err != nil || len(rows) != 2 {
-		t.Fatalf("playlists by group uuid with a slug decoy present: %d rows, err %v, want 2", len(rows), err)
-	}
-
-	// A channel cursor presented against a group (other container kind), and a group cursor against the
-	// channel, are both refused.
-	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: cur1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
-		t.Fatalf("channel cursor presented against a group: want ErrInvalidCursor, got %v", err)
-	}
-	_, gCur, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Sort: store.SortAsc, PlaylistGroupFilter: gID.String()})
-	if err != nil || gCur == "" {
-		t.Fatalf("group first page: cursor %q, err %v", gCur, err)
-	}
-	if rows, next, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, PlaylistGroupFilter: "09000000-0000-4000-8000-0000000000ff"}); err != nil || len(rows) != 0 || next != "" {
-		t.Fatalf("group cursor against an unknown group uuid: got %d rows (next %q, err %v), want empty page", len(rows), next, err)
-	}
-	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: gCur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
-		t.Fatalf("group cursor presented against a channel: want ErrInvalidCursor, got %v", err)
+	retiredCur := base64.RawURLEncoding.EncodeToString(retired)
+	if _, _, err := st.ListPlaylists(ctx, &store.ListPlaylistsParams{Limit: 1, Cursor: retiredCur, Sort: store.SortAsc, ChannelFilter: chID.String()}); !errors.Is(err, store.ErrInvalidCursor) {
+		t.Fatalf("retired playlist-group cursor presented against a channel: want ErrInvalidCursor, got %v", err)
 	}
 }
 

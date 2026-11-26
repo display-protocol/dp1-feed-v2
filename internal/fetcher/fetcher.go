@@ -51,7 +51,7 @@ func (e *StatusError) Transient() bool {
 // only about bounding work, not safety.
 const maxFetchRedirects = 5
 
-// Fetcher retrieves remote playlist JSON (e.g. when a group/channel references a URI not yet stored locally).
+// Fetcher retrieves remote playlist JSON (e.g. when a channel references a URI not yet stored locally).
 type Fetcher interface {
 	// FetchPlaylist performs an HTTP GET and returns the response body capped by the fetcher max size.
 	FetchPlaylist(ctx context.Context, uri string) ([]byte, error)
@@ -71,7 +71,7 @@ type options struct{ allowPrivate bool }
 // AllowPrivateDestinations permits fetching from loopback and other normally-blocked addresses.
 //
 // This exists for tests and local development, where playlists are served from 127.0.0.1. It must stay
-// off in production: group and channel creation is open to any client, so an attacker who can name a URL
+// off in production: channel creation is open to any client, so an attacker who can name a URL
 // can make the feed issue requests on its behalf. Leaving this enabled turns that into a probe of
 // whatever the feed can reach — the loopback interface, link-local metadata endpoints, internal services.
 func AllowPrivateDestinations(allow bool) Option {

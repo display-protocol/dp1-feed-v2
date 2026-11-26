@@ -1,6 +1,6 @@
 # Architecture
 
-DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 playlists, playlist-groups, and channels. It runs as a single process: Go, Gin, PostgreSQL—no message queues.
+DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 playlists and channels. It runs as a single process: Go, Gin, PostgreSQL—no message queues.
 
 **Design philosophy:** simplicity first—one process, synchronous request handling, and a small set of packages with clear roles.
 
@@ -19,7 +19,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 | **Transport** | `internal/httpserver` | Gin server: routes, middleware, DTOs, HTTP errors, pagination helpers. |
 | **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
 | **DP-1 protocol adapter** | `internal/dp1svc` | Wraps [dp1-go](https://github.com/display-protocol/dp1-go): schema validation and v1.1+ multisig signing. |
-| **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
+| **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving channel membership. |
 | **Outbound notifications** | `internal/notification` | Transport-neutral client contract, P-256 signed webhook delivery, and best-effort multi-client dispatch for channel lifecycle events. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL implementation, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
@@ -32,7 +32,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 ## Domain / service / store / transport boundaries
 
 - **Transport (`internal/httpserver`):** HTTP only—parse bodies, auth for mutating methods, call the executor, map errors to API responses, JSON encode. No DP-1 signing or schema logic here.
-- **Application (`internal/executor`):** Owns feed workflows: create/replace/update/delete documents, list and index reads, transactional ingest when groups/channels reference playlists (local resolution vs fetch). Depends on `dp1svc`, `store`, `fetcher`, and `models`; it does not speak HTTP.
+- **Application (`internal/executor`):** Owns feed workflows: create/replace/update/delete documents, list and index reads, transactional ingest when channels reference playlists (local resolution vs fetch). Depends on `dp1svc`, `store`, `fetcher`, and `models`; it does not speak HTTP.
 - **Domain / protocol (`internal/dp1svc` + dp1-go):** Validation against embedded JSON Schema and signing canonical payloads (JCS, SHA-256 digest, Ed25519). The executor treats `dp1svc.ValidatorSigner` as the boundary to the spec.
 - **Store (`internal/store`):** Persistence and queries—IDs, slugs, JSONB bodies, membership tables, playlist-item index, cursor pagination. The store does not validate DP-1 or sign.
 
@@ -51,7 +51,7 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 
 - **Application background jobs:** none by design. Every feed operation completes in the request path; there are no domain workers or queues. The logger owns one bounded in-memory delivery goroutine when Cloudflare streaming is enabled; it flushes at process shutdown and has no durable retry semantics.
 - **Channel notifications:** every mutating route establishes one application deadline at request entry, before authentication and body parsing. The deadline is `server.write_timeout - server.response_write_reserve`; resolution, final persistence, and post-commit notification share its remaining budget, leaving the reserve for response encoding and socket writes. After a channel create, replace, or delete commits, the executor sends the canonical channel URL to configured clients in the same request path. After a **playlist replace or delete** commits, it sends `channel.updated` for **every channel that lists that playlist**. The executor asks the store for those channels only when it can act on the answer — extensions enabled and a notification client configured — so a deployment that delivers nothing pays nothing for recipient discovery. When asked, the store reports them with a best-effort read that never fails the write and never spends its budget — one the store cannot finish just notifies nobody: after the replace commits, on its own connection; for a delete, on its own connection *concurrently* with the write transaction: the delete begins its transaction as on main, then takes a spare connection for the read — waiting at most a small fixed bound (`listingReadBound`), so a busy or single-connection pool means capture is skipped, never that the delete waits for a second connection it does not need — and only then takes the playlist's advisory lock (so it never waits on the pool while holding the lock, which the transactions blocked on that lock would hold up); the query is issued once the lock is held (so no ingest that listed the playlist can be missed), and the delete waits only for the read to *start* — a round trip or two on that connection, independent of how many channels list the playlist, and again under the same bound — so the read's snapshot predates the cascade and keeps seeing the rows it removes; the listing is collected after commit, and the delete transaction itself is the same conditional delete every document uses. Delivery is eight at a time under the same deadline; channels not reached before it expires are not notified (best-effort, and the count of listing channels is unbounded because channel creation is open, so the deadline rather than a cap bounds the work). With extensions disabled, playlist writes neither notify nor require a deadline. Slug-targeted mutations resolve once and write by UUID so the committed row and notification identity cannot diverge if a slug is concurrently reused. Final persistence becomes mutation-owned once it begins: it preserves request values and the route deadline while ignoring later client cancellation. A request canceled before that boundary does not start persistence. Post-commit delivery preserves the same deadline while detaching cancellation, and notification fan-out applies its shorter aggregate timeout. Playlist fetch timeout remains per remote request; resolution runs eight fetches concurrently and may span multiple batches. Configuration enforces a minimum write budget for one fetch, notification delivery, and the response reserve, while operators must increase it for larger expected batches. Webhook endpoints are credential-free, query-free HTTP(S) URLs with a hostname, redirects are refused, and authentication comes only from the event signature. Public channel URLs also require a hostname and must not use loopback or unspecified bind addresses, including scoped IPv6 forms, when notification clients are enabled. Delivery is best-effort: failures are logged and do not change the successful mutation response. This avoids duplicate create retries caused by returning an error after commit. Guaranteed retry across process failure or the route deadline would require a durable outbox and an explicit background-job owner.
-- **Transactions:** multi-step writes (e.g. playlist-group or channel create with resolved playlists and membership) are owned by **`internal/executor`**, which uses the store’s transactional APIs so ingest + persist commit or roll back together. The HTTP layer does not start or manage database transactions.
+- **Transactions:** multi-step writes (e.g. channel create with resolved playlists and membership) are owned by **`internal/executor`**, which uses the store’s transactional APIs so ingest + persist commit or roll back together. The HTTP layer does not start or manage database transactions.
 
 ---
 
@@ -66,13 +66,21 @@ Client → HTTP → dp1-feed-v2 → PostgreSQL
 ## Persistence strategy
 
 - **Engine:** PostgreSQL via `pgx`.
-- **Documents:** JSONB columns for playlist, playlist-group, and channel bodies (flexible schema-aligned storage with validated write path).
-- **Relationships:** junction tables (e.g. group/channel membership); appropriate indexes for id, slug, and key pagination patterns.
+- **Documents:** JSONB columns for playlist and channel bodies (flexible schema-aligned storage with validated write path).
+- **Relationships:** junction tables (e.g. channel membership); appropriate indexes for id, slug, and key pagination patterns.
 - **Migrations:** `golang-migrate` (SQL under `db/migrations/`). `updated_at` on the document tables is trigger-maintained and strictly increasing per row (000008); it is the generation token for conditional replace/delete and for membership-ordered list cursors. The `curator` / `publisher` list filters query `body` directly through expression indexes (000009); each index expression must stay textually identical to its predicate in `internal/store/pg/store.go`, which `TestIntegration_Migration000009_attributionFilterIndexes` pins.
 - **Playlist visibility:** directories (the unfiltered and curator-filtered playlist lists, the unscoped item list, the item reverse lookup) and slug resolution apply one predicate over the stored `body`, `listedPlaylistSQL` in `internal/store/pg/store.go`: listed only when `visibility` is absent or exactly `public`. No column or index backs it and no write path maintains it, so a replace changes the listing in the same commit. Lookups by UUID and container membership reads do not apply it. See `docs/api_design.md`, Playlist visibility.
 - **Timekeeping:** `updated_at` maintained with database triggers where applicable.
 
-Core tables (conceptually): `playlists`, `playlist_groups`, `channels`, membership tables, and indexed playlist items—see migrations for the authoritative schema.
+Core tables (conceptually): `playlists`, `channels`, `channel_members`, and indexed playlist items—see migrations for the authoritative schema.
+
+### Retired playlist-group tables (storage only)
+
+DP-1 removed the beta Playlist-Group (Exhibition) object on 2026-07-31; Channels supersede it, and this feed no longer serves, reads or writes playlist-groups. The schema is deliberately left as it was: `playlist_groups` and `playlist_group_members` (with their triggers, indexes — including the 000009 `curator` hash index — and the 000005 membership cascade) stay in place, kept purely for storage. There is **no** migration dropping them and **no** code that deletes or rewrites their rows.
+
+Why: self-hosted deployments run migrations on startup (`cmd/server`, unless `-skip-migrate`), and their tables may hold group rows an operator wants to keep or export. A drop migration would destroy that data on the next restart of an upgraded binary, with no chance to object. Leaving the tables costs nothing at runtime — no query touches them — and an operator who wants them gone can drop them deliberately.
+
+Consequences that still hold at the database level: deleting a playlist still cascades its rows out of `playlist_group_members` (000005), and tombstones recorded for deleted groups (`deleted_documents.resource_type = 'playlist_groups'`) remain. Neither is observable through the API.
 
 ---
 
@@ -101,11 +109,11 @@ GET /api/v1/playlists/:id
 
 ## Authentication
 
-- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace but never removed; groups and channels are single-owner). DELETE carries a signed delete-intent body.
+- **Writes:** signatures only — there is no API key. `RequireSignatures` rejects any POST/PUT/DELETE whose body lacks a `signatures[]` array; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace but never removed; channels are single-owner). DELETE carries a signed delete-intent body.
 - **Reads:** public unless restricted by deployment.
 - **Cryptographic signatures:** Ed25519 (v1.1+ multisig) via `dp1svc`; documents carry curator/publisher and feed-operator proof, not end-user OAuth.
 
-Ownership is derived from each document itself — its declared `curators`/`publisher` keys when present, else the signers carrying the owner role (`curator` for playlists and groups, `publisher` for channels) — and an authorizing signature must come from an owner key *and* carry that role. The rules live in `internal/executor/ownership.go`. There is no global key allowlist: since anyone can create (and thereby own) a resource, production may front the service with a gateway or reverse proxy to restrict who may create. See `docs/api_design.md` for the full authorization posture.
+Ownership is derived from each document itself — its declared `curators`/`publisher` keys when present, else the signers carrying the owner role (`curator` for playlists, `publisher` for channels) — and an authorizing signature must come from an owner key *and* carry that role. The rules live in `internal/executor/ownership.go`. There is no global key allowlist: since anyone can create (and thereby own) a resource, production may front the service with a gateway or reverse proxy to restrict who may create. See `docs/api_design.md` for the full authorization posture.
 
 ---
 

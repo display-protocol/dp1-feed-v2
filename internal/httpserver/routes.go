@@ -20,9 +20,10 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 	// Unmatched paths answer in the documented error shape rather than gin's plain-text default.
 	//
 	// Every other response this API produces is {"error","message"}, so a client parsing errors uniformly
-	// hit a wall exactly where it least expects one. It matters more now that a documented endpoint has
-	// been removed: a caller still requesting /api/v1/registry/channels should get the same machine-
-	// readable not_found every other missing resource returns, not a bare string.
+	// hit a wall exactly where it least expects one. It matters more now that documented endpoints have
+	// been removed: a caller still requesting /api/v1/registry/channels, or any /api/v1/playlist-groups
+	// route (DP-1 dropped playlist-groups on 2026-07-31; Channels supersede them), should get the same
+	// machine-readable not_found every other missing resource returns, not a bare string or a bespoke 410.
 	r.NoRoute(func(c *gin.Context) {
 		writeError(c.Writer, http.StatusNotFound, "not_found", "no such endpoint")
 	})
@@ -37,15 +38,15 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 		v1.GET("", h.APIInfo)
 		v1.GET("/health", h.HealthAPI)
 
-		// Every mutation carries the same aggregate deadline. Group and channel writes need it to bound
-		// reference resolution (a document naming many slow-but-reachable hosts would otherwise hold the
-		// handler for the sum of every fetch); channel writes and playlist replace/delete need it because
-		// they notify — a playlist write emits channel.updated for every channel that lists the playlist,
-		// and the executor refuses a notified mutation without a deadline. Applying it uniformly, including
-		// to routes that today neither fetch nor notify, is deliberate: "which routes carry the deadline"
-		// used to be a per-route decision, and that is exactly how groups were missed once and playlists
-		// were missed again. The budget is write_timeout - response_write_reserve, so the deadline lands
-		// one reserve ahead of the socket write timeout it shadows.
+		// Every mutation carries the same aggregate deadline. Channel writes need it to bound reference
+		// resolution (a document naming many slow-but-reachable hosts would otherwise hold the handler for
+		// the sum of every fetch); channel writes and playlist replace/delete need it because they notify —
+		// a playlist write emits channel.updated for every channel that lists the playlist, and the executor
+		// refuses a notified mutation without a deadline. Applying it uniformly, including to routes that
+		// today neither fetch nor notify, is deliberate: "which routes carry the deadline" used to be a
+		// per-route decision, and that is exactly how routes were missed twice. The budget is
+		// write_timeout - response_write_reserve, so the deadline lands one reserve ahead of the socket
+		// write timeout it shadows.
 		mutationDeadline := RequestDeadline(cfg.Server.WriteTimeout - cfg.Server.ResponseWriteReserve)
 
 		v1.GET("/playlists", h.ListPlaylists)
@@ -53,12 +54,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, cfg *config.Config, log *zap.Logg
 		v1.POST("/playlists", mutationDeadline, RequireSignatures(log), h.CreatePlaylist)
 		v1.PUT("/playlists/:id", mutationDeadline, RequireSignatures(log), h.ReplacePlaylist)
 		v1.DELETE("/playlists/:id", mutationDeadline, RequireSignatures(log), h.DeletePlaylist)
-
-		v1.GET("/playlist-groups", h.ListPlaylistGroups)
-		v1.GET("/playlist-groups/:id", h.GetPlaylistGroup)
-		v1.POST("/playlist-groups", mutationDeadline, RequireSignatures(log), h.CreatePlaylistGroup)
-		v1.PUT("/playlist-groups/:id", mutationDeadline, RequireSignatures(log), h.ReplacePlaylistGroup)
-		v1.DELETE("/playlist-groups/:id", mutationDeadline, RequireSignatures(log), h.DeletePlaylistGroup)
 
 		if cfg.Extensions.Enabled {
 			v1.GET("/channels", h.ListChannels)

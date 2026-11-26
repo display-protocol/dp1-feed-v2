@@ -20,7 +20,6 @@ import (
 	dp1 "github.com/display-protocol/dp1-go"
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/display-protocol/dp1-go/sign"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/executor"
@@ -135,7 +134,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "cursor1", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -152,7 +151,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?limit=50&sort=desc",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "", "").
+					ListPlaylists(gomock.Any(), 50, "", store.SortDesc, "", "").
 					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -168,7 +167,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?cursor=abc123",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "", "").
+					ListPlaylists(gomock.Any(), 100, "abc123", store.SortAsc, "", "").
 					Return([]store.PlaylistRecord{playlistRec(playlist.Playlist{DPVersion: "1.1.0"})}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -205,7 +204,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?channel=my-channel",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "my-channel", "").
 					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -216,30 +215,42 @@ func TestListPlaylists(t *testing.T) {
 			},
 		},
 		{
-			name:        "success with playlist-group filter",
-			queryParams: "?playlist-group=my-group",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "my-group", "").
-					Return([]store.PlaylistRecord{}, "", nil)
-			},
-			expectedStatus: http.StatusOK,
+			name:           "removed playlist-group filter is refused, not ignored",
+			queryParams:    "?playlist-group=my-group",
+			setupMock:      func(m *mocks.MockExecutor) {}, // must not reach the executor
+			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body []byte) {
-				var resp ListResponse[playlist.Playlist]
+				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Len(t, resp.Items, 0)
+				assert.Equal(t, "bad_request", resp.Error)
+				assert.Contains(t, resp.Message, "playlist-group filter was removed")
+				assert.Contains(t, resp.Message, "channel")
 			},
 		},
 		{
-			name:           "both filters provided",
+			name:           "removed playlist-group filter is refused alongside a channel filter",
 			queryParams:    "?channel=ch&playlist-group=pg",
 			setupMock:      func(m *mocks.MockExecutor) {},
 			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body []byte) {
 				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-				assert.Contains(t, resp.Message, "cannot be used together")
+				assert.Contains(t, resp.Message, "playlist-group filter was removed")
+			},
+		},
+		{
+			name:        "empty playlist-group value is treated as absent",
+			queryParams: "?playlist-group=%20",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
+					Return([]store.PlaylistRecord{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[playlist.Playlist]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
 			},
 		},
 		{
@@ -247,7 +258,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "?curator=%20did:key:zCurator%20",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "did:key:zCurator").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "did:key:zCurator").
 					Return([]store.PlaylistRecord{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -270,22 +281,11 @@ func TestListPlaylists(t *testing.T) {
 			},
 		},
 		{
-			name:           "curator with playlist-group filter",
-			queryParams:    "?curator=did:key:zC&playlist-group=pg",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Contains(t, resp.Message, "curator filter cannot be combined")
-			},
-		},
-		{
 			name:        "store refuses curator with container filter",
 			queryParams: "?curator=did:key:zC",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "did:key:zC").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "did:key:zC").
 					Return(nil, "", fmt.Errorf("%w: test", store.ErrInvalidListFilter))
 			},
 			expectedStatus: http.StatusBadRequest,
@@ -300,7 +300,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return(nil, "", store.ErrNotFound)
 			},
 			expectedStatus: http.StatusNotFound,
@@ -315,7 +315,7 @@ func TestListPlaylists(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "", "").
+					ListPlaylists(gomock.Any(), 100, "", store.SortAsc, "", "").
 					Return(nil, "", errors.New("db connection failed"))
 			},
 			expectedStatus: http.StatusInternalServerError,
@@ -614,7 +614,7 @@ func TestListPlaylistItems(t *testing.T) {
 			queryParams: "",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylistItems(gomock.Any(), 100, "", store.SortAsc, "", "").
+					ListPlaylistItems(gomock.Any(), 100, "", store.SortAsc, "").
 					Return([]playlist.PlaylistItem{{ID: "item1"}}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -629,7 +629,7 @@ func TestListPlaylistItems(t *testing.T) {
 			queryParams: "?channel=my-channel",
 			setupMock: func(m *mocks.MockExecutor) {
 				m.EXPECT().
-					ListPlaylistItems(gomock.Any(), 100, "", store.SortAsc, "my-channel", "").
+					ListPlaylistItems(gomock.Any(), 100, "", store.SortAsc, "my-channel").
 					Return([]playlist.PlaylistItem{}, "", nil)
 			},
 			expectedStatus: http.StatusOK,
@@ -640,30 +640,42 @@ func TestListPlaylistItems(t *testing.T) {
 			},
 		},
 		{
-			name:        "success with playlist-group filter",
-			queryParams: "?playlist-group=my-group",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ListPlaylistItems(gomock.Any(), 100, "", store.SortAsc, "", "my-group").
-					Return([]playlist.PlaylistItem{}, "", nil)
-			},
-			expectedStatus: http.StatusOK,
+			name:           "removed playlist-group filter is refused, not ignored",
+			queryParams:    "?playlist-group=my-group",
+			setupMock:      func(m *mocks.MockExecutor) {}, // must not reach the executor
+			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body []byte) {
-				var resp ListResponse[playlist.PlaylistItem]
+				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Len(t, resp.Items, 0)
+				assert.Equal(t, "bad_request", resp.Error)
+				assert.Contains(t, resp.Message, "playlist-group filter was removed")
+				assert.Contains(t, resp.Message, "channel")
 			},
 		},
 		{
-			name:           "both filters provided",
+			name:           "removed playlist-group filter is refused alongside a channel filter",
 			queryParams:    "?channel=ch&playlist-group=pg",
 			setupMock:      func(m *mocks.MockExecutor) {},
 			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body []byte) {
 				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-				assert.Contains(t, resp.Message, "cannot be used together")
+				assert.Contains(t, resp.Message, "playlist-group filter was removed")
+			},
+		},
+		{
+			name:        "empty playlist-group value is treated as absent",
+			queryParams: "?playlist-group=%20",
+			setupMock: func(m *mocks.MockExecutor) {
+				m.EXPECT().
+					ListPlaylistItems(gomock.Any(), 100, "", store.SortAsc, "").
+					Return([]playlist.PlaylistItem{}, "", nil)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var resp ListResponse[playlist.PlaylistItem]
+				require.NoError(t, json.Unmarshal(body, &resp))
+				assert.Len(t, resp.Items, 0)
 			},
 		},
 		{
@@ -1083,390 +1095,6 @@ func TestDeletePlaylist_strictDecoding(t *testing.T) {
 			var resp ErrorResponse
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 			assert.Equal(t, "bad_request", resp.Error)
-		})
-	}
-}
-
-func TestListPlaylistGroups(t *testing.T) {
-	tests := []struct {
-		name           string
-		queryParams    string
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name:        "success",
-			queryParams: "",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc, "").
-					Return([]store.PlaylistGroupRecord{groupRec(playlistgroup.Group{Title: "Test Group"})}, "", nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ListResponse[playlistgroup.Group]
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Len(t, resp.Items, 1)
-			},
-		},
-		{
-			name:        "success with curator filter",
-			queryParams: "?curator=Gallery%20Curator",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ListPlaylistGroups(gomock.Any(), 100, "", store.SortAsc, "Gallery Curator").
-					Return([]store.PlaylistGroupRecord{}, "", nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ListResponse[playlistgroup.Group]
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Len(t, resp.Items, 0)
-			},
-		},
-		{
-			name:           "invalid sort",
-			queryParams:    "?sort=invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/playlist-groups"+tt.queryParams, nil)
-
-			h.ListPlaylistGroups(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestCreatePlaylistGroup(t *testing.T) {
-	validBody := models.PlaylistGroupCreateRequest{
-		Title:     "Test Group",
-		Playlists: []string{"http://example.com/api/v1/playlists/test"},
-	}
-
-	tests := []struct {
-		name           string
-		body           any
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					CreatePlaylistGroup(gomock.Any(), gomock.Any()).
-					Return(groupRecPtr(playlistgroup.Group{Title: "Test Group"}), nil)
-			},
-			expectedStatus: http.StatusCreated,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp playlistgroup.Group
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "Test Group", resp.Title)
-			},
-		},
-		{
-			name:           "invalid JSON",
-			body:           "invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-		{
-			name: "nil body from executor",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					CreatePlaylistGroup(gomock.Any(), gomock.Any()).
-					Return(nil, nil)
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			bodyBytes, _ := json.Marshal(tt.body)
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/playlist-groups", bytes.NewReader(bodyBytes))
-			c.Request.Header.Set("Content-Type", "application/json")
-
-			h.CreatePlaylistGroup(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestGetPlaylistGroup(t *testing.T) {
-	groupID := uuid.New().String()
-
-	tests := []struct {
-		name           string
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					GetPlaylistGroup(gomock.Any(), groupID).
-					Return(groupRecPtr(playlistgroup.Group{Title: "Test Group"}), nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp playlistgroup.Group
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "Test Group", resp.Title)
-			},
-		},
-		{
-			name: "not found",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					GetPlaylistGroup(gomock.Any(), groupID).
-					Return(nil, store.ErrNotFound)
-			},
-			expectedStatus: http.StatusNotFound,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "not_found", resp.Error)
-			},
-		},
-		{
-			name: "nil body from executor",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					GetPlaylistGroup(gomock.Any(), groupID).
-					Return(nil, nil)
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/playlist-groups/"+groupID, nil)
-			c.Params = gin.Params{{Key: "id", Value: groupID}}
-
-			h.GetPlaylistGroup(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			if tt.expectedStatus == http.StatusOK {
-				assert.NotEmpty(t, w.Header().Get("ETag"))
-			}
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestReplacePlaylistGroup(t *testing.T) {
-	groupID := uuid.New().String()
-	validBody := models.PlaylistGroupReplaceRequest{
-		Title:     "Updated Group",
-		Playlists: []string{"http://example.com/api/v1/playlists/test"},
-	}
-
-	tests := []struct {
-		name           string
-		body           any
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-		checkResponse  func(*testing.T, []byte)
-	}{
-		{
-			name: "success",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any(), gomock.Any()).
-					Return(groupRecPtr(playlistgroup.Group{Title: "Updated Group"}), nil)
-			},
-			expectedStatus: http.StatusOK,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp playlistgroup.Group
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "Updated Group", resp.Title)
-			},
-		},
-		{
-			name:           "invalid JSON",
-			body:           "invalid",
-			setupMock:      func(m *mocks.MockExecutor) {},
-			expectedStatus: http.StatusBadRequest,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "bad_request", resp.Error)
-			},
-		},
-		{
-			name: "nil body from executor",
-			body: validBody,
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					ReplacePlaylistGroup(gomock.Any(), groupID, gomock.Any(), gomock.Any()).
-					Return(nil, nil)
-			},
-			expectedStatus: http.StatusInternalServerError,
-			checkResponse: func(t *testing.T, body []byte) {
-				var resp ErrorResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "internal_error", resp.Error)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			bodyBytes := putEnvelope(tt.body, models.IntentTargetPlaylistGroup, groupID, "slug")
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/playlist-groups/"+groupID, bytes.NewReader(bodyBytes))
-			c.Request.Header.Set("Content-Type", "application/json")
-			c.Params = gin.Params{{Key: "id", Value: groupID}}
-
-			h.ReplacePlaylistGroup(c)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-			tt.checkResponse(t, w.Body.Bytes())
-		})
-	}
-}
-
-func TestDeletePlaylistGroup(t *testing.T) {
-	groupID := uuid.New().String()
-
-	tests := []struct {
-		name           string
-		setupMock      func(*mocks.MockExecutor)
-		expectedStatus int
-	}{
-		{
-			name: "success",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					DeletePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(nil)
-			},
-			expectedStatus: http.StatusNoContent,
-		},
-		{
-			name: "not found",
-			setupMock: func(m *mocks.MockExecutor) {
-				m.EXPECT().
-					DeletePlaylistGroup(gomock.Any(), groupID, gomock.Any()).
-					Return(store.ErrNotFound)
-			},
-			expectedStatus: http.StatusNotFound,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockExec := mocks.NewMockExecutor(ctrl)
-			tt.setupMock(mockExec)
-
-			h := &Handler{
-				Exec: mockExec,
-				Log:  zaptest.NewLogger(t),
-			}
-
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/playlist-groups/"+groupID, deleteIntentBody(models.IntentTargetPlaylistGroup, groupID, "slug"))
-			c.Params = gin.Params{{Key: "id", Value: groupID}}
-
-			h.DeletePlaylistGroup(c)
-
-			// For success case with no body, check Gin writer's status
-			if tt.expectedStatus == http.StatusNoContent {
-				assert.Equal(t, tt.expectedStatus, c.Writer.Status())
-			} else {
-				assert.Equal(t, tt.expectedStatus, w.Code)
-			}
 		})
 	}
 }

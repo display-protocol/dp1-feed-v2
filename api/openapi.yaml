@@ -3,29 +3,30 @@ info:
   title: DP-1 Feed V2
   version: 0.1.0
   description: |
-    REST API for DP-1 playlists, playlist-groups, and channels.
+    REST API for DP-1 playlists and channels.
     
     This service provides:
     - DP-1 playlist management with v1.1+ multisig support
-    - Playlist-group (exhibition) composition
     - Channel management (requires extensions enabled)
     - Playlist item indexing and querying
+
+    Playlist-groups (exhibitions) are not served. DP-1 removed the beta Playlist-Group object on
+    2026-07-31 in favor of Channels; every `/api/v1/playlist-groups` route answers the generic `404`
+    `not_found`, and a non-empty `playlist-group` query filter on the list endpoints is a `400`.
 
     Authentication: signatures only — there is no API key. Every mutating request is authorized by the
     cryptographic signatures it carries. A document's **owner set** is its declared `curators[].key`
     (playlists) or `publisher.key` (channels) when present; otherwise the document must carry **exactly
-    one** signature in the **owner role** — `curator` for playlists and playlist-groups, `publisher` for
-    channels — and that key is its sole owner (two or more without a declaration is `400`: signing is
+    one** signature in the **owner role** — `curator` for playlists, `publisher` for channels —
+    and that key is its sole owner (two or more without a declaration is `400`: signing is
     permissionless, so the feed cannot tell a co-author from a relayer who appended a signature, and it
-    does not guess). Groups have no key field (their `curator` is a display name), so a group always has
-    exactly one owner. An authorizing signature must be from an owner key **and** carry the owner
+    does not guess). An authorizing signature must be from an owner key **and** carry the owner
     role: a key listed in `curators` that signs only as `licensor`, `institution` or `agent` is not acting
     as the author. POST (create) is open to any document so signed. PUT (replace) and DELETE are
     owner-bound: the request must be signed, in the owner role, by a key in the *stored* document's owner
     set. On replace a playlist's owner set may grow but never shrink, and every key being added must
-    itself sign the document in the owner role; playlist-groups and channels are strictly single-owner
-    (a group cannot declare owners and `publisher` is a single entity), so their owner can never change
-    or be joined. The feed always adds its own `feed` signature. There is no PATCH.
+    itself sign the document in the owner role; channels are strictly single-owner (`publisher` is a
+    single entity), so their owner can never change or be joined. The feed always adds its own `feed` signature. There is no PATCH.
 
     Limit to know: `role` is not covered by the signature (it lives in the signature entry, outside the
     signed bytes), so the role rule is spec conformance and mistake detection, not a cryptographic
@@ -73,8 +74,6 @@ tags:
     description: Health check endpoints
   - name: playlists
     description: DP-1 playlist management
-  - name: playlist-groups
-    description: DP-1 playlist-group (exhibition) management
   - name: channels
     description: DP-1 channel management (extensions)
   - name: playlist-items
@@ -155,16 +154,16 @@ paths:
       summary: List playlists
       description: >-
         Returns a paginated list of playlists. Unfiltered, the list is ordered by created_at. With a
-        channel or playlist-group filter it is ordered by membership position, i.e. the order the signed
-        channel/group document lists its playlists (a playlist listed at several positions appears once
+        channel filter it is ordered by membership position, i.e. the order the signed channel document
+        lists its playlists (a playlist listed at several positions appears once
         per position). With a curator filter it is ordered by created_at. Cursors are specific to the
         ordering that issued them.
 
 
         Unfiltered and curator-filtered, this list is a directory and leaves out every playlist whose
         signed `visibility` is anything other than absent or exactly `public` (playlists extension §3.7;
-        see docs/api_design.md, Playlist visibility). A channel or playlist-group filter lists the
-        members that container's signed document names, unlisted ones included.
+        see docs/api_design.md, Playlist visibility). A channel filter lists the members that
+        channel's signed document names, unlisted ones included.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -176,8 +175,8 @@ paths:
             (e.g. a did:key). Attribution as the document states it, not the derived owner set: a playlist
             that declares no `curators` never matches, even though its single `curator`-role signer owns
             it. Matching is exact and case-sensitive against the stored key; the query value is trimmed.
-            Ordered by created_at. Cannot be combined with `channel` or `playlist-group` (400). Unknown key
-            yields an empty list.
+            Ordered by created_at. Cannot be combined with `channel` (400). Unknown key yields an empty
+            list.
           schema:
             type: string
         - name: channel
@@ -187,13 +186,7 @@ paths:
             channel yields an empty list. Requires extensions when used. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
-        - name: playlist-group
-          in: query
-          description: >-
-            Filter by playlist-group UUID or slug (mutually exclusive with channel), ordered by position
-            in the group. Unknown group yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
-          schema:
-            type: string
+        - $ref: '#/components/parameters/RemovedPlaylistGroupFilter'
       responses:
         '200':
           description: List of playlists
@@ -333,7 +326,7 @@ paths:
         Deletes a playlist. The request body is a signed delete-intent (`PlaylistDeleteRequest`) that must
         target this playlist and be signed, as `curator`, by one of its owners within the freshness window.
 
-        References from groups or channels do **not** block this: creation is open, so any third party
+        References from channels do **not** block this: creation is open, so any third party
         could otherwise veto an owner's deletion indefinitely. Their membership links are removed with the
         playlist. Those documents are signed and therefore left untouched — they keep listing the deleted
         playlist's URI, which now resolves to `404`, and a later PUT of one will fail to resolve it until
@@ -350,172 +343,6 @@ paths:
       responses:
         '204':
           description: Playlist deleted
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '413':
-          $ref: '#/components/responses/PayloadTooLarge'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /api/v1/playlist-groups:
-    get:
-      tags: [playlist-groups]
-      summary: List playlist-groups
-      description: Returns paginated list of playlist-groups (exhibitions)
-      parameters:
-        - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Sort'
-        - name: curator
-          in: query
-          description: >-
-            Filter to playlist-groups whose `curator` string equals this value exactly (case-sensitive;
-            the query value is trimmed). DP-1 core defines `curator` as a display name, so this matches
-            whatever text the document carries — a name or a key — and the feed does not require a key it
-            names to have signed the group. Groups without `curator` never match. Unknown value yields an
-            empty list.
-          schema:
-            type: string
-      responses:
-        '200':
-          description: List of playlist-groups
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/ListResponse'
-                  - type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/PlaylistGroup'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-
-    post:
-      tags: [playlist-groups]
-      summary: Create playlist-group
-      description: >-
-        Creates a new playlist-group with resolved playlist references. Open to any client: the body must
-        carry a non-empty `signatures` array with exactly one valid `curator`-role signature; that signer
-        is the group's single owner (`curator` is a display name, not a key, so a group cannot declare
-        co-owners; a second `curator`-role signature is 400). Other roles may co-sign freely.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PlaylistGroupInput'
-      responses:
-        '201':
-          description: Playlist-group created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PlaylistGroup'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '409':
-          $ref: '#/components/responses/CreateConflict'
-        '413':
-          $ref: '#/components/responses/PayloadTooLarge'
-
-  /api/v1/playlist-groups/{id}:
-    get:
-      tags: [playlist-groups]
-      summary: Get playlist-group
-      description: |
-        Returns a single playlist-group by UUID or slug.
-
-        Strong ETag and optional conditional GET (`If-None-Match` → 304) apply as for single-resource GETs;
-        list endpoints do not emit ETag in API v1.
-      parameters:
-        - $ref: '#/components/parameters/IdOrSlug'
-        - $ref: '#/components/parameters/IfNoneMatch'
-      responses:
-        '200':
-          description: Playlist-group document
-          headers:
-            ETag:
-              $ref: '#/components/headers/IndividualGETETag'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PlaylistGroup'
-        '304':
-          description: Not Modified — If-None-Match matched the current ETag; response body is empty
-          headers:
-            ETag:
-              $ref: '#/components/headers/IndividualGETETag'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    put:
-      tags: [playlist-groups]
-      summary: Replace playlist-group
-      description: >-
-        Fully replaces a playlist-group. The body is a `PlaylistGroupReplaceRequest`: the full re-signed
-        `document` plus an `authorization` intent bound to its `payloadHash`. Owner-bound: the document and
-        the intent must both carry a `curator`-role signature from the stored owner (the stored document's
-        single `curator`-role signer), and the identity must equal the stored resource's. A group cannot
-        declare owners, so it has exactly one; a second `curator`-role signature is 400. The `curator`
-        display name may change. 403 if the signer is not the owner or the owner is dropped; 409 if the
-        resource changed since it was authorized.
-      parameters:
-        - $ref: '#/components/parameters/IdOrSlug'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PlaylistGroupReplaceRequest'
-      responses:
-        '200':
-          description: Playlist-group replaced
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PlaylistGroup'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '413':
-          $ref: '#/components/responses/PayloadTooLarge'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      tags: [playlist-groups]
-      summary: Delete playlist-group
-      description: >-
-        Deletes a playlist-group (cascades membership). The request body is a signed delete-intent
-        (`PlaylistGroupDeleteRequest`) that must target this group and be signed, as `curator`, by one of
-        its owners within the freshness window.
-      parameters:
-        - $ref: '#/components/parameters/IdOrSlug'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PlaylistGroupDeleteRequest'
-      responses:
-        '204':
-          description: Playlist-group deleted
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -721,7 +548,7 @@ paths:
       description: >-
         Returns paginated indexed items across playlists, optionally filtered. Unscoped, it is a directory
         and leaves out the items of every unlisted playlist (see `GET /api/v1/playlists`). Scoped by
-        `channel` or `playlist-group`, it includes the items of every member that container names.
+        `channel`, it includes the items of every member that channel names.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
@@ -733,13 +560,7 @@ paths:
             404 extensions_disabled. With extensions enabled, an unknown channel yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
           schema:
             type: string
-        - name: playlist-group
-          in: query
-          description: >-
-            Filter by playlist-group UUID or slug (mutually exclusive with channel). Unknown group
-            yields an empty list. A value that parses as a UUID is looked up by id only; anything else is a slug. There is no fallback from a missing id to a slug of the same text, so a slug that is itself a UUID string is reachable only by the resource's id.
-          schema:
-            type: string
+        - $ref: '#/components/parameters/RemovedPlaylistGroupFilter'
       responses:
         '200':
           description: List of playlist items
@@ -833,11 +654,24 @@ components:
       in: query
       description: >-
         Sort direction. Applies to created_at (including under `curator` / `publisher` filters), except on
-        GET /api/v1/playlists filtered by channel or playlist-group, where it applies to membership position.
+        GET /api/v1/playlists filtered by channel, where it applies to membership position.
       schema:
         type: string
         enum: [asc, desc]
         default: asc
+
+    RemovedPlaylistGroupFilter:
+      name: playlist-group
+      in: query
+      deprecated: true
+      description: >-
+        Removed. DP-1 dropped the beta Playlist-Group (Exhibition) object on 2026-07-31 in favor of
+        Channels, and this feed no longer serves playlist-groups. Any non-empty value is refused with
+        `400 bad_request` (the message points at the `channel` filter) rather than ignored, because
+        ignoring it would silently return the unfiltered list. An empty or whitespace-only value is
+        treated as absent.
+      schema:
+        type: string
 
     IfNoneMatch:
       name: If-None-Match
@@ -853,8 +687,8 @@ components:
   headers:
     IndividualGETETag:
       description: >
-        Strong entity-tag: a quoted hexadecimal SHA-256 digest. For playlists, playlist-groups and
-        playlist-items it is computed over the exact UTF-8 JSON response bytes. For channels it also covers
+        Strong entity-tag: a quoted hexadecimal SHA-256 digest. For playlists and playlist-items it is
+        computed over the exact UTF-8 JSON response bytes. For channels it also covers
         the channel's current member state, so it changes when a listed playlist is replaced or deleted
         even though the channel document does not. Opaque: send the same value back in If-None-Match for
         conditional GETs and never recompute it from the body.
@@ -1074,7 +908,7 @@ components:
             Two distinct size limits apply. Inbound request bodies are capped by
             `server.max_request_bytes` (default 5 MiB); exceeding it is `413`. Separately,
             `playlist.fetch_max_body_bytes` (default 4 MiB) caps playlists this feed *fetches* when
-            ingesting a group or channel by URL — so a playlist with large inline manifests can be
+            ingesting a channel by URL — so a playlist with large inline manifests can be
             publishable directly yet too large for another deployment to ingest.
         contentRating:
           type: string
@@ -1169,104 +1003,6 @@ components:
             `/api/v1/playlist-items` routes (list and by id) re-encode it: there `contract.seriesId` is
             a JSON integer when it is at most 2^53-1, and a decimal string only above that or when the
             digits have a leading zero, whichever form the document used (DP-1 core §6).
-        # Additional fields...
-
-    PlaylistGroupInput:
-      type: object
-      additionalProperties: false
-      description: >-
-        Create (POST) / replace (PUT) body for a playlist-group. Signature-only: `id`, `created`, `slug`,
-        and exactly one `curator`-role signature in `signatures` are required and stored verbatim. That
-        signer is the group's single owner; `curator` is a display name (DP-1 core) and takes no part in
-        authorization. A group has no owner declaration, so it can never have more than one owner and the
-        owner cannot change on PUT: the identity (`id`, `slug`, document `created`) is immutable and the
-        replacement must carry the same key's `curator`-role signature. Additional signatures in other
-        roles are accepted and preserved.
-      required:
-        - id
-        - created
-        - slug
-        - title
-        - playlists
-        - signatures
-      properties:
-        id:
-          type: string
-          format: uuid
-          description: Client-assigned UUID; part of the signed document and identity.
-        created:
-          type: string
-          format: date-time
-          description: RFC3339 timestamp, not in the future; part of the signed document.
-        slug:
-          type: string
-          description: URL identifier, taken verbatim (not derived); immutable on PUT.
-        title:
-          type: string
-        playlists:
-          type: array
-          minItems: 1
-          description: >-
-            Playlist URIs or slugs. The maximum count is set per deployment by
-            `playlist.max_playlist_references` (default 1000) and is therefore deliberately not fixed
-            here: hard-coding a number would misdescribe any deployment configured differently. Every
-            reference this feed does not already store becomes an outbound fetch, so the count is bounded
-            before resolution; over the configured cap is a `400`.
-          items:
-            type: string
-            maxLength: 2048
-        curator:
-          type: string
-          description: >-
-            Name of the curator who created this exhibition (DP-1 core). Attribution only — unless it is the
-            kid of one of the document's client signers (any role but `feed`), in which case it must be the
-            `curator`-role signer (400 otherwise), and it is what identifies the owner of rows stored before
-            role-aware ownership. The feed's own `feed` signature never takes part in ownership.
-        summary:
-          type: string
-        coverImage:
-          type: string
-          format: uri
-        signature:
-          type: string
-          deprecated: true
-          description: >-
-            Deprecated v1.0.x single signature. Accepted so a document carrying one is not rejected by
-            strict decoding; it is preserved verbatim and never stripped (DP-1 §7.1.3 has players prefer
-            `signatures` when both are present).
-        signatures:
-          type: array
-          minItems: 1
-          description: >-
-            Signatures over the document. Exactly one must carry role `curator`; its signer owns the group
-            (a second `curator`-role signature is `400`, since a group cannot declare co-owners). Other
-            roles may co-sign freely. The feed appends its own `feed` signature after verification.
-          items:
-            $ref: '#/components/schemas/Signature'
-
-    PlaylistGroup:
-      type: object
-      description: DP-1 playlist-group document
-      properties:
-        id:
-          type: string
-          format: uuid
-        slug:
-          type: string
-        title:
-          type: string
-        playlists:
-          type: array
-          minItems: 1
-          description: >-
-            Playlist URIs or slugs. The maximum count is set per deployment by
-            `playlist.max_playlist_references` (default 1000) and is therefore deliberately not fixed
-            here: hard-coding a number would misdescribe any deployment configured differently. Every
-            reference this feed does not already store becomes an outbound fetch, so the count is bounded
-            before resolution; over the configured cap is a `400`.
-          items:
-            type: string
-            maxLength: 2048
         # Additional fields...
 
     ChannelInput:
@@ -1515,90 +1251,6 @@ components:
           enum: ["delete"]
         target:
           $ref: '#/components/schemas/PlaylistIntentTarget'
-        created:
-          type: string
-          format: date-time
-          description: RFC3339; within `auth.intent_max_clock_skew` of server time.
-          example: "2025-06-01T12:00:00Z"
-        signatures:
-          type: array
-          minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
-          items:
-            $ref: '#/components/schemas/Signature'
-
-    PlaylistGroupIntentTarget:
-      type: object
-      additionalProperties: false
-      description: Identifies the playlist-group this intent acts on; every field is checked against the stored row.
-      required: [type, id, slug]
-      properties:
-        type:
-          type: string
-          enum: ["playlist-group"]
-        id:
-          type: string
-          format: uuid
-        slug:
-          type: string
-
-    PlaylistGroupReplaceIntent:
-      type: object
-      additionalProperties: false
-      description: >-
-        Authorizes replacing this playlist-group. Must be signed, in the owner role, by a key in the stored resource's
-        owner set, and `created` must be within `auth.intent_max_clock_skew`.
-      required: [action, target, payloadHash, created, signatures]
-      properties:
-        action:
-          type: string
-          enum: ["replace"]
-        target:
-          $ref: '#/components/schemas/PlaylistGroupIntentTarget'
-        payloadHash:
-          type: string
-          description: >-
-            DP-1 signing digest of the accompanying `document`, binding this intent to that exact content
-            so a captured intent cannot be reused to install different bytes. Required for replace.
-          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        created:
-          type: string
-          format: date-time
-          description: RFC3339; inside the signed payload, so it cannot be forged on a replayed body.
-          example: "2025-06-01T12:00:00Z"
-        signatures:
-          type: array
-          minItems: 1
-          description: Owner signatures over the intent (JCS with `signatures` removed); at least one must carry the owner role.
-          items:
-            $ref: '#/components/schemas/Signature'
-
-    PlaylistGroupReplaceRequest:
-      type: object
-      additionalProperties: false
-      description: >-
-        PUT body for a playlist-group: the full re-signed document plus the intent authorizing its installation.
-        Both halves are verified independently — one without the other authorizes nothing.
-      required: [document, authorization]
-      properties:
-        document:
-          $ref: '#/components/schemas/PlaylistGroupInput'
-        authorization:
-          $ref: '#/components/schemas/PlaylistGroupReplaceIntent'
-
-    PlaylistGroupDeleteRequest:
-      type: object
-      additionalProperties: false
-      description: >-
-        DELETE body for a playlist-group: a signed intent with no `payloadHash`, since a delete carries no
-        document. Must be signed by a stored owner in the owner role and be fresh.
-      required: [action, target, created, signatures]
-      properties:
-        action:
-          type: string
-          enum: ["delete"]
-        target:
-          $ref: '#/components/schemas/PlaylistGroupIntentTarget'
         created:
           type: string
           format: date-time

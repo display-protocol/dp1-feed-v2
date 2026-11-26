@@ -8,7 +8,6 @@ import (
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 )
 
 // The ownership rules are pure functions over key sets and signature entries, so they are exercised
@@ -364,66 +363,6 @@ func TestRequireUnambiguousOwner(t *testing.T) {
 			t.Parallel()
 			err := requireUnambiguousOwner(tc.declared, playlist.RoleCurator, tc.sigs)
 			if tc.wantErr != (err != nil) || (err != nil && !errors.Is(err, ErrAmbiguousOwner)) {
-				t.Fatalf("got %v, wantErr=%v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestStoredGroupOwnerSet(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		group   playlistgroup.Group
-		want    keySet
-		wantErr bool
-	}{
-		{name: "single signer owns", group: playlistgroup.Group{Curator: "Name", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor)}}, want: keys("A")},
-		{name: "no curator-role signer: empty, not an error", group: playlistgroup.Group{Signatures: []playlist.Signature{sig("L", playlist.RoleLicensor)}}, want: keys()},
-		{name: "legacy: several signers, curator names one", group: playlistgroup.Group{Curator: " B ", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, want: keys("B")},
-		{name: "legacy: several signers, curator is a name", group: playlistgroup.Group{Curator: "Name", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, wantErr: true},
-		{name: "legacy: several signers, curator names a non-signer", group: playlistgroup.Group{Curator: "C", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("B", playlist.RoleCurator)}}, wantErr: true},
-		{name: "legacy mixed roles: curator names the licensor-signed owner, not the curator-role co-signer", group: playlistgroup.Group{Curator: "A", Signatures: []playlist.Signature{sig("A", playlist.RoleLicensor), sig("B", playlist.RoleCurator)}}, want: keys("A")},
-		{name: "legacy: curator names the only curator-role signer among others", group: playlistgroup.Group{Curator: "A", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor)}}, want: keys("A")},
-		{name: "curator equals the feed key: the feed's own signature never makes it the owner", group: playlistgroup.Group{Curator: "F", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("F", playlist.RoleFeed)}}, want: keys("A")},
-		{name: "a client entry labeled feed is excluded from legacy inference too", group: playlistgroup.Group{Curator: "X", Signatures: []playlist.Signature{sig("A", playlist.RoleCurator), sig("X", playlist.RoleFeed)}}, want: keys("A")},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			g := tc.group
-			got, err := storedGroupOwnerSet(&g)
-			if tc.wantErr {
-				if !errors.Is(err, ErrNotResourceOwner) {
-					t.Fatalf("want fail-closed ErrNotResourceOwner, got %v", err)
-				}
-				return
-			}
-			if err != nil || !sameKeys(got, tc.want) {
-				t.Fatalf("got %v, %v; want %v", got, err, tc.want)
-			}
-		})
-	}
-}
-
-func TestRequireGroupCuratorConsistent(t *testing.T) {
-	t.Parallel()
-	sigs := []playlist.Signature{sig("A", playlist.RoleCurator), sig("L", playlist.RoleLicensor), sig("F", playlist.RoleFeed)}
-	for _, tc := range []struct {
-		name, curator string
-		wantErr       bool
-	}{
-		{name: "display name", curator: "Someone"},
-		{name: "empty", curator: ""},
-		{name: "names the curator-role signer", curator: " A "},
-		{name: "names a non-signer key", curator: "did:key:zStranger"},
-		{name: "names the licensor co-signer", curator: "L", wantErr: true},
-		{name: "names a feed-role entry: treated as a display name", curator: "F"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := requireGroupCuratorConsistent(tc.curator, sigs)
-			if tc.wantErr != (err != nil) || (err != nil && !errors.Is(err, ErrGroupCuratorMismatch)) {
 				t.Fatalf("got %v, wantErr=%v", err, tc.wantErr)
 			}
 		})

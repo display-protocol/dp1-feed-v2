@@ -15,7 +15,6 @@ import (
 
 	channels "github.com/display-protocol/dp1-go/extension/channels"
 	playlist "github.com/display-protocol/dp1-go/playlist"
-	playlistgroup "github.com/display-protocol/dp1-go/playlistgroup"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -88,21 +87,6 @@ func (mr *MockValidatorSignerMockRecorder) SignPlaylist(raw, ts any) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SignPlaylist", reflect.TypeOf((*MockValidatorSigner)(nil).SignPlaylist), raw, ts)
 }
 
-// SignPlaylistGroup mocks base method.
-func (m *MockValidatorSigner) SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SignPlaylistGroup", raw, ts)
-	ret0, _ := ret[0].([]byte)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// SignPlaylistGroup indicates an expected call of SignPlaylistGroup.
-func (mr *MockValidatorSignerMockRecorder) SignPlaylistGroup(raw, ts any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SignPlaylistGroup", reflect.TypeOf((*MockValidatorSigner)(nil).SignPlaylistGroup), raw, ts)
-}
-
 // ValidateChannel mocks base method.
 func (m *MockValidatorSigner) ValidateChannel(raw []byte) (*channels.Channel, error) {
 	m.ctrl.T.Helper()
@@ -131,21 +115,6 @@ func (m *MockValidatorSigner) ValidatePlaylist(raw []byte) (*playlist.Playlist, 
 func (mr *MockValidatorSignerMockRecorder) ValidatePlaylist(raw any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidatePlaylist", reflect.TypeOf((*MockValidatorSigner)(nil).ValidatePlaylist), raw)
-}
-
-// ValidatePlaylistGroup mocks base method.
-func (m *MockValidatorSigner) ValidatePlaylistGroup(raw []byte) (*playlistgroup.Group, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ValidatePlaylistGroup", raw)
-	ret0, _ := ret[0].(*playlistgroup.Group)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ValidatePlaylistGroup indicates an expected call of ValidatePlaylistGroup.
-func (mr *MockValidatorSignerMockRecorder) ValidatePlaylistGroup(raw any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidatePlaylistGroup", reflect.TypeOf((*MockValidatorSigner)(nil).ValidatePlaylistGroup), raw)
 }
 
 // ValidatePlaylistWithExtension mocks base method.
@@ -177,22 +146,6 @@ func (m *MockValidatorSigner) VerifyChannelSignatures(raw []byte) (bool, []playl
 func (mr *MockValidatorSignerMockRecorder) VerifyChannelSignatures(raw any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifyChannelSignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifyChannelSignatures), raw)
-}
-
-// VerifyPlaylistGroupSignatures mocks base method.
-func (m *MockValidatorSigner) VerifyPlaylistGroupSignatures(raw []byte) (bool, []playlist.Signature, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "VerifyPlaylistGroupSignatures", raw)
-	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].([]playlist.Signature)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// VerifyPlaylistGroupSignatures indicates an expected call of VerifyPlaylistGroupSignatures.
-func (mr *MockValidatorSignerMockRecorder) VerifyPlaylistGroupSignatures(raw any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "VerifyPlaylistGroupSignatures", reflect.TypeOf((*MockValidatorSigner)(nil).VerifyPlaylistGroupSignatures), raw)
 }
 
 // VerifyPlaylistSignatures mocks base method.

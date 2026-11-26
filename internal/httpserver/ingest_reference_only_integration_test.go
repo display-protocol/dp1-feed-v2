@@ -41,7 +41,7 @@ func serveSignedPlaylist(t *testing.T, priv []byte, doc playlist.Playlist) strin
 }
 
 // TestIntegration_IngestCannotHijackAnotherOwnersPlaylist is the attack that reference-only ingestion
-// closes. Creating a group is open, so before this change an attacker could host a document carrying a
+// closes. Creating a channel is open, so before this change an attacker could host a document carrying a
 // victim's playlist id and have the feed upsert it — overwriting the victim's body, slug, owner set and
 // item index. Ingestion may now only *link* a playlist that already exists.
 func TestIntegration_IngestCannotHijackAnotherOwnersPlaylist(t *testing.T) {
@@ -69,7 +69,7 @@ func TestIntegration_IngestCannotHijackAnotherOwnersPlaylist(t *testing.T) {
 	// byte-identical). Comparing GET to GET keeps this a strict byte comparison of what is stored.
 	stored := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+victim.Slug, nil, http.StatusOK)
 
-	// Attacker B hosts a different document reusing the victim's id, and references it from a group it
+	// Attacker B hosts a different document reusing the victim's id, and references it from a channel it
 	// creates. The spoof is validly self-signed — by B's own key — so signature checks alone would pass it.
 	bpriv, bkid := newCuratorKeypair(t)
 	spoofItem := uuid.MustParse("6c000000-1111-4222-8333-444444444444")
@@ -87,14 +87,14 @@ func TestIntegration_IngestCannotHijackAnotherOwnersPlaylist(t *testing.T) {
 	}
 	spoofURL := serveSignedPlaylist(t, bpriv, spoof)
 
-	groupBody := signedGroupBody(t, bpriv, bkid,
+	channelBody := signedChannelBody(t, bpriv, bkid,
 		uuid.MustParse("6d000000-1111-4222-8333-444444444444").String(),
-		"attacker-group",
-		"Attacker's group",
+		"attacker-channel",
+		"Attacker's channel",
 		"2020-01-02T03:04:05Z",
 		[]string{spoofURL},
 	)
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channelBody, http.StatusCreated)
 
 	// The victim's playlist is byte-for-byte what it was: ingestion linked it, it did not rewrite it.
 	after := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+victim.Slug, nil, http.StatusOK)
@@ -150,14 +150,14 @@ func TestIntegration_IngestRejectsUnsignedRemotePlaylist(t *testing.T) {
 	defer origin.Close()
 
 	gpriv, gkid := newCuratorKeypair(t)
-	groupBody := signedGroupBody(t, gpriv, gkid,
+	channelBody := signedChannelBody(t, gpriv, gkid,
 		uuid.MustParse("70000000-1111-4222-8333-444444444444").String(),
-		"unsigned-remote-group",
-		"Group over an unsigned remote playlist",
+		"unsigned-remote-channel",
+		"Channel over an unsigned remote playlist",
 		"2020-01-02T03:04:05Z",
 		[]string{origin.URL + "/playlist.json"},
 	)
-	doRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusBadRequest)
+	doRaw(t, srv, http.MethodPost, "/api/v1/channels", channelBody, http.StatusBadRequest)
 
 	// Nothing was published as a side effect of the rejected request.
 	doRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+unsigned.Slug, nil, http.StatusNotFound)

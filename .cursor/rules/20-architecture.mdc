@@ -12,7 +12,7 @@ alwaysApply: true
 
 **Canonical detail:** `docs/architecture.md` (diagrams, deployment commands, links). When architecture changes, update **both** that doc and this rule so agents and humans stay aligned.
 
-DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 playlists, playlist-groups, and channels. Single process: Go, Gin, PostgreSQL—no message queues.
+DP-1 Feed is an HTTP service that validates, signs (Ed25519), and stores DP-1 playlists and channels. Single process: Go, Gin, PostgreSQL—no message queues.
 
 **Design philosophy:** simplicity first—one process, synchronous request handling, a small set of packages with clear roles.
 
@@ -26,7 +26,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 | **Transport** | `internal/httpserver` | Gin: routes, middleware, DTOs, HTTP errors, pagination. |
 | **Application / orchestration** | `internal/executor` | Use cases: validate, sign, coordinate store and ingest of referenced playlists. |
 | **DP-1 protocol adapter** | `internal/dp1svc` | dp1-go: schema validation and v1.1+ multisig signing. |
-| **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving group/channel membership. |
+| **Ingress for remote refs** | `internal/fetcher` | HTTP fetch for playlist URIs when resolving channel membership. |
 | **Outbound notifications** | `internal/notification` | Client contract and best-effort channel lifecycle delivery after commits. |
 | **Persistence** | `internal/store`, `internal/store/pg` | Store interface, PostgreSQL, migrations, pagination types. |
 | **Shared shapes** | `internal/models` | Request/response models shared by HTTP and executor. |
@@ -37,7 +37,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 ## Domain / service / store / transport boundaries
 
 - **Transport (`internal/httpserver`):** HTTP only—parse bodies, auth on mutating methods, call executor, map errors to API responses, JSON encode. No DP-1 signing or schema logic in handlers.
-- **Application (`internal/executor`):** Owns feed workflows: CRUD, list/index reads, transactional ingest when groups/channels reference playlists (local resolution vs fetch). Depends on `dp1svc`, `store`, `fetcher`, `models`; no HTTP.
+- **Application (`internal/executor`):** Owns feed workflows: CRUD, list/index reads, transactional ingest when channels reference playlists (local resolution vs fetch). Depends on `dp1svc`, `store`, `fetcher`, `models`; no HTTP.
 - **Domain / protocol (`internal/dp1svc` + dp1-go):** JSON Schema validation and signing (JCS, SHA-256 digest, Ed25519). Executor uses `dp1svc.ValidatorSigner` as the spec boundary.
 - **Store (`internal/store`):** Persistence and queries—IDs, slugs, JSONB, membership, playlist-item index, cursor pagination. No DP-1 validation or signing.
 
@@ -52,7 +52,7 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 
 - **Application background jobs:** none by design. Request-path only; no domain workers or queues. Cloudflare logging may own one bounded, memory-only delivery goroutine with explicit shutdown flush.
 - **Channel notifications:** configured clients are called concurrently under one aggregate timeout after channel commits, and — because a member edit is observable at its channels — `channel.updated` is sent for every channel listing a playlist that was replaced or deleted (eight at a time within the route deadline every mutating route carries). Failures are logged and do not fail the already-committed mutation; durable retry remains out of scope without an outbox/job owner.
-- **Transactions:** multi-step writes (e.g. playlist-group/channel create with resolved playlists and membership) are owned by **`internal/executor`**, using the store’s transactional APIs so ingest + persist commit or roll back together. **HTTP does not start or own DB transactions.**
+- **Transactions:** multi-step writes (e.g. channel create with resolved playlists and membership) are owned by **`internal/executor`**, using the store’s transactional APIs so ingest + persist commit or roll back together. **HTTP does not start or own DB transactions.**
 
 ## Observability expectations
 
@@ -63,13 +63,13 @@ Flow: `Client → HTTP → dp1-feed-v2 → PostgreSQL` (validate + sign).
 ## Persistence strategy
 
 - **Engine:** PostgreSQL via `pgx`.
-- **Documents:** JSONB for playlist, playlist-group, channel bodies (validated write path).
+- **Documents:** JSONB for playlist and channel bodies (validated write path).
 - **Relationships:** junction tables; indexes for id, slug, pagination.
 - **Migrations:** golang-migrate; SQL under `db/migrations/`.
 - **Playlist visibility:** directories and slug resolution apply `listedPlaylistSQL` (store/pg) over the stored body: listed only when `visibility` is absent or exactly `public`. No column, index or write-path copy. UUID lookups and container membership reads skip it.
 - **Timekeeping:** `updated_at` via DB triggers where applicable.
 
-Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_groups`, `channels`, membership, indexed playlist items.
+Authoritative schema: migrations. Conceptual tables: `playlists`, `channels`, membership, indexed playlist items. `playlist_groups` / `playlist_group_members` remain in the schema for storage only (DP-1 removed playlist-groups 2026-07-31): no migration drops them and no code reads or writes them, because self-hosted deployments migrate on startup and may hold rows. See `docs/architecture.md`.
 
 ## Request flow (illustrative)
 
@@ -78,9 +78,9 @@ Authoritative schema: migrations. Conceptual tables: `playlists`, `playlist_grou
 
 ## Authentication
 
-- **Writes:** signatures only — no API key. `RequireSignatures` rejects any POST/PUT/DELETE without a `signatures[]` body; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace, never removed; groups and channels are single-owner). DELETE carries a signed delete-intent body.
+- **Writes:** signatures only — no API key. `RequireSignatures` rejects any POST/PUT/DELETE without a `signatures[]` body; the executor verifies authenticity and ownership (create open; replace/delete owner-bound; a playlist's owners may be added on replace, never removed; channels are single-owner). DELETE carries a signed delete-intent body.
 - **Reads:** public unless deployment restricts.
-- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (owner + feed operator), not end-user OAuth. Ownership is derived from the document itself — declared `curators`/`publisher` keys when present, else the signers carrying the owner role (`curator` for playlists and groups, `publisher` for channels) — and an authorizing signature must be from an owner key *and* carry that role. Rules live in `internal/executor/ownership.go`; `docs/api_design.md` is canonical. There is no global key allowlist.
+- **Signatures:** Ed25519 v1.1+ multisig via `dp1svc` (owner + feed operator), not end-user OAuth. Ownership is derived from the document itself — declared `curators`/`publisher` keys when present, else the signers carrying the owner role (`curator` for playlists, `publisher` for channels) — and an authorizing signature must be from an owner key *and* carry that role. Rules live in `internal/executor/ownership.go`; `docs/api_design.md` is canonical. There is no global key allowlist.
 
 ## Technology stack
 

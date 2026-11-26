@@ -72,7 +72,7 @@ type ServerConfig struct {
 }
 
 // DefaultMaxRequestBytes is the inbound request-body cap used when config leaves it unset. It comfortably
-// holds a signed playlist/group/channel document while bounding pre-auth memory use.
+// holds a signed playlist/channel document while bounding pre-auth memory use.
 const DefaultMaxRequestBytes = 5 << 20 // 5 MiB
 
 // DatabaseConfig holds PostgreSQL connection settings.
@@ -119,23 +119,23 @@ type ExtensionsConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// PlaylistConfig controls outbound fetch when ingesting remote playlists (group/channel updates).
+// PlaylistConfig controls outbound fetch when ingesting remote playlists (channel updates).
 type PlaylistConfig struct {
 	FetchTimeout      time.Duration `yaml:"fetch_timeout"`
 	FetchMaxBodyBytes int64         `yaml:"fetch_max_body_bytes"`
 	SigningKeyHex     string        `yaml:"signing_key_hex"` // Ed25519 seed (64 bytes = 128 hex) or full private key hex; required
 	// SigningKid is set at load time from the signing key (did:key:…).
 	SigningKid    string `yaml:"-"`
-	PublicBaseURL string `yaml:"public_base_url"` // Used to build playlist URIs referenced from groups
+	PublicBaseURL string `yaml:"public_base_url"` // Used to build playlist URIs referenced from channels
 	// AllowPrivateFetchDestinations lets playlist ingestion reach loopback and other private addresses.
 	//
-	// Off by default and intended for tests and local development only. Group and channel creation is open
+	// Off by default and intended for tests and local development only. Channel creation is open
 	// to any client, so whoever names a playlist URL decides where the feed sends a request; with this on,
 	// that becomes a probe of everything the feed can reach (loopback, cloud metadata, internal services).
 	AllowPrivateFetchDestinations bool `yaml:"allow_private_fetch_destinations"`
-	// MaxPlaylistReferences caps how many playlist URIs one group or channel may reference.
+	// MaxPlaylistReferences caps how many playlist URIs one channel may reference.
 	//
-	// This is a fan-out bound, not a modeling preference. Group and channel creation is open to any
+	// This is a fan-out bound, not a modeling preference. Channel creation is open to any
 	// client, and every reference the document lists becomes an outbound fetch for URIs this feed does not
 	// already store. Without a cap the only limit is the request-body size, so a single valid,
 	// self-signed request near MaxRequestBytes can name six figures' worth of URIs and turn one inbound
@@ -143,7 +143,7 @@ type PlaylistConfig struct {
 	// does nothing about how many there are. Zero falls back to DefaultMaxPlaylistReferences.
 	MaxPlaylistReferences int `yaml:"max_playlist_references"`
 	// MaxResolvedBytes caps the total size of resolved playlist documents held in memory for one
-	// group/channel mutation.
+	// channel mutation.
 	//
 	// The reference count and the per-fetch size cap do not bound memory between them, they multiply:
 	// resolution keeps every resolved body until the whole set is ready to persist, so the default 1000
@@ -163,7 +163,7 @@ type PlaylistConfig struct {
 // modest deployment can absorb, including the copy made at persistence time.
 const DefaultMaxResolvedBytes = 64 << 20 // 64 MiB
 
-// DefaultMaxPlaylistReferences bounds playlist references per group/channel when config leaves it unset.
+// DefaultMaxPlaylistReferences bounds playlist references per channel when config leaves it unset.
 // Chosen to sit far above any realistic curated collection while keeping worst-case fan-out per request
 // to something a deployment can absorb.
 const DefaultMaxPlaylistReferences = 1000
@@ -376,11 +376,11 @@ func (c *Config) validate() error {
 		return fmt.Errorf("server write timeout must exceed response write reserve")
 	}
 	// The request deadline handed to reference-resolving mutations is write_timeout - response_write_reserve,
-	// and a group or channel write may spend up to fetch_timeout resolving a single remote reference. If the
+	// and a channel write may spend up to fetch_timeout resolving a single remote reference. If the
 	// budget is smaller than that, the deadline cancels a fetch the operator explicitly allowed time for and
 	// the write fails with a generic error — a configuration that looks valid but cannot serve the writes it
-	// accepts. Checked for every deployment, not only those with notification clients: groups fan out the
-	// same way channels do.
+	// accepts. Checked for every deployment, not only those with notification clients: reference resolution
+	// needs the budget whether or not anyone is notified afterwards.
 	if c.Server.WriteTimeout <= c.Playlist.FetchTimeout+c.Server.ResponseWriteReserve {
 		return fmt.Errorf("server write timeout must exceed playlist fetch timeout plus response write reserve")
 	}
@@ -388,7 +388,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("max playlist references must not be negative")
 	}
 	// A budget below one document's fetch cap could not resolve even a single reference, so the deployment
-	// would reject every group/channel write that fetches. Checked here rather than discovered in
+	// would reject every channel write that fetches. Checked here rather than discovered in
 	// production. The budget is deliberately NOT required to cover references x fetch cap: that product is
 	// the unbounded figure this budget exists to replace, and requiring it would force an unusably small
 	// reference limit.

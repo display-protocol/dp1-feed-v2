@@ -38,23 +38,23 @@ var (
 	// stored resource. Identity is immutable and is validated, never silently replaced: substituting stored
 	// values would change bytes the client signed and orphan the signature.
 	ErrSignedDocumentMismatch = errors.New("signed document does not match the stored resource")
-	// ErrTooManyReferences is returned when a group or channel lists more playlist URIs than the feed will
+	// ErrTooManyReferences is returned when a channel lists more playlist URIs than the feed will
 	// resolve for one request. This is a fan-out bound rather than a schema rule: each unstored reference
 	// becomes an outbound fetch, and creation is open, so the count has to be capped before resolution
 	// begins. The client chose the list, so it is a 400.
 	ErrTooManyReferences = errors.New("too many playlist references")
-	// ErrResolvedTooLarge is returned when the playlists a group or channel references add up to more bytes
+	// ErrResolvedTooLarge is returned when the playlists a channel references add up to more bytes
 	// than one request may hold in memory. Distinct from ErrTooManyReferences: the count can be well within
 	// the cap while the documents behind it are not, which is the combination that made the reference cap
 	// alone an insufficient bound. The client chose the references, so it is a 400.
 	ErrResolvedTooLarge = errors.New("referenced playlists are too large to resolve in one request")
-	// ErrPlaylistURITooLong is returned when a group or channel reference exceeds maxPlaylistURILen. The
+	// ErrPlaylistURITooLong is returned when a channel reference exceeds maxPlaylistURILen. The
 	// document sets the URI, so this is client input being wrong: 400.
 	ErrPlaylistURITooLong = errors.New("playlist reference URI is too long")
-	// ErrNoPlaylistReferences is returned when a group or channel document lists no playlists. The document
+	// ErrNoPlaylistReferences is returned when a channel document lists no playlists. The document
 	// is the client's, so this is a correctable submission error (400) rather than an internal fault; it
 	// previously fell through the error mapper as an unclassified 500.
-	ErrNoPlaylistReferences = errors.New("group or channel references no playlists")
+	ErrNoPlaylistReferences = errors.New("channel references no playlists")
 	// errMissingRawBody means the HTTP layer did not attach the request bytes to a submission (programming error).
 	errMissingRawBody = errors.New("signed submission is missing the raw request body")
 )
@@ -289,7 +289,6 @@ func IsBlockedFetchDestinationError(err error) bool {
 // stored resource). Maps to 400.
 func IsInvalidSubmissionError(err error) bool {
 	return err != nil && (errors.Is(err, ErrAmbiguousOwner) ||
-		errors.Is(err, ErrGroupCuratorMismatch) ||
 		errors.Is(err, ErrSlugRequired) ||
 		errors.Is(err, ErrItemIDRequired) ||
 		errors.Is(err, ErrTooManyReferences) ||

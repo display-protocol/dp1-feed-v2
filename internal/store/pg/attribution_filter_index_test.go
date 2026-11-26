@@ -20,6 +20,10 @@ import (
 //   - the indexes must accept values far larger than a btree entry can hold, since entity keys and the
 //     group `curator` string are client-supplied and unbounded — a btree here would turn an oversized but
 //     valid document into a failed insert.
+//
+// The playlist_groups index is still created by the migration (the table is kept for storage after DP-1
+// removed playlist-groups), so its oversized insert stays; the application no longer reads that table,
+// so there is no store predicate left whose plan could drift from it.
 func TestIntegration_Migration000009_attributionFilterIndexes(t *testing.T) {
 	ctx := context.Background()
 
@@ -64,7 +68,6 @@ func TestIntegration_Migration000009_attributionFilterIndexes(t *testing.T) {
 		{"playlist curators", "playlists", "idx_playlists_curators", playlistDirectoryFilters(long)},
 		{"channel curators", "channels", "idx_channels_curators", []docFilter{curatorsKeyFilter(long)}},
 		{"channel publisher", "channels", "idx_channels_publisher_key", []docFilter{publisherKeyFilter(long)}},
-		{"group curator", "playlist_groups", "idx_playlist_groups_curator", []docFilter{groupCuratorFilter(long)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, args, err := createdAtListQuery(tc.table, 10, store.SortAsc, "", tc.filters)

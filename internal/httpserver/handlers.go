@@ -22,10 +22,6 @@ func playlistDocuments(recs []store.PlaylistRecord) []json.RawMessage {
 	return documents(recs, func(r *store.PlaylistRecord) json.RawMessage { return r.Raw })
 }
 
-func playlistGroupDocuments(recs []store.PlaylistGroupRecord) []json.RawMessage {
-	return documents(recs, func(r *store.PlaylistGroupRecord) json.RawMessage { return r.Raw })
-}
-
 func channelDocuments(recs []store.ChannelRecord) []json.RawMessage {
 	return documents(recs, func(r *store.ChannelRecord) json.RawMessage { return r.Raw })
 }
@@ -56,6 +52,26 @@ func bindDeleteRequest(c *gin.Context) (*models.SignedDeleteRequest, error) {
 	}
 	req.Raw = raw
 	return &req, nil
+}
+
+// removedPlaylistGroupFilter is the message for a list request that still names the playlist-group
+// filter. DP-1 removed the beta Playlist-Group (Exhibition) object on 2026-07-31 in favor of Channels,
+// and this feed removed its routes with it (they now answer the NoRoute 404).
+const removedPlaylistGroupFilter = "the playlist-group filter was removed with DP-1 playlist-groups; use the channel filter instead"
+
+// rejectRemovedPlaylistGroupFilter answers 400 when the request carries a non-empty `playlist-group`
+// query parameter, and reports whether it did.
+//
+// Why a 400 rather than ignoring an unknown parameter as gin otherwise would: the filter narrowed a list,
+// so dropping it silently would hand a client that still sends it the unfiltered directory, with a 200
+// that looks like a correct answer. This is the only remaining trace of playlist-groups in handler code;
+// an empty value is treated as absent, as the filter itself always did.
+func rejectRemovedPlaylistGroupFilter(c *gin.Context) bool {
+	if strings.TrimSpace(c.Query("playlist-group")) == "" {
+		return false
+	}
+	writeError(c.Writer, http.StatusBadRequest, "bad_request", removedPlaylistGroupFilter)
+	return true
 }
 
 // Health is a liveness endpoint (no version prefix in plan; we expose both /health and /api/v1/health).
@@ -90,21 +106,19 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	chF := strings.TrimSpace(c.Query("channel"))
-	pgF := strings.TrimSpace(c.Query("playlist-group"))
-	curF := strings.TrimSpace(c.Query("curator"))
-	if chF != "" && pgF != "" {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel and playlist-group filters cannot be used together")
+	if rejectRemovedPlaylistGroupFilter(c) {
 		return
 	}
-	// A container filter orders by membership position and a curator filter by created_at; one page
+	chF := strings.TrimSpace(c.Query("channel"))
+	curF := strings.TrimSpace(c.Query("curator"))
+	// A channel filter orders by membership position and a curator filter by created_at; one page
 	// cannot follow both keysets, so the combination is refused rather than one filter dropped.
-	if curF != "" && (chF != "" || pgF != "") {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", "curator filter cannot be combined with channel or playlist-group filters")
+	if curF != "" && chF != "" {
+		writeError(c.Writer, http.StatusBadRequest, "bad_request", "curator filter cannot be combined with the channel filter")
 		return
 	}
 
-	pl, next, err := h.Exec.ListPlaylists(c.Request.Context(), limit, cursor, sortOrder, chF, pgF, curF)
+	pl, next, err := h.Exec.ListPlaylists(c.Request.Context(), limit, cursor, sortOrder, chF, curF)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -167,14 +181,12 @@ func (h *Handler) ListPlaylistItems(c *gin.Context) {
 		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	chF := strings.TrimSpace(c.Query("channel"))
-	pgF := strings.TrimSpace(c.Query("playlist-group"))
-	if chF != "" && pgF != "" {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", "channel and playlist-group filters cannot be used together")
+	if rejectRemovedPlaylistGroupFilter(c) {
 		return
 	}
+	chF := strings.TrimSpace(c.Query("channel"))
 
-	items, next, err := h.Exec.ListPlaylistItems(c.Request.Context(), limit, cursor, sortOrder, chF, pgF)
+	items, next, err := h.Exec.ListPlaylistItems(c.Request.Context(), limit, cursor, sortOrder, chF)
 	if err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
@@ -242,110 +254,6 @@ func (h *Handler) DeletePlaylist(c *gin.Context) {
 		return
 	}
 	if err := h.Exec.DeletePlaylist(c.Request.Context(), id, req); err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
-// ListPlaylistGroups GET /api/v1/playlist-groups.
-func (h *Handler) ListPlaylistGroups(c *gin.Context) {
-	limit, err := ParseListLimitQuery(c.Query("limit"))
-	if err != nil {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	cursor := c.Query("cursor")
-	sortOrder, err := store.ParseSortOrder(c.DefaultQuery("sort", "asc"))
-	if err != nil {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	curF := strings.TrimSpace(c.Query("curator"))
-	bodies, next, err := h.Exec.ListPlaylistGroups(c.Request.Context(), limit, cursor, sortOrder, curF)
-	if err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	writeDocumentList(c, playlistGroupDocuments(bodies), next)
-}
-
-// CreatePlaylistGroup POST /api/v1/playlist-groups.
-func (h *Handler) CreatePlaylistGroup(c *gin.Context) {
-	var req models.PlaylistGroupCreateRequest
-	raw, err := bindDocument(c, &req)
-	if err != nil {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	req.Raw = raw
-	body, err := h.Exec.CreatePlaylistGroup(c.Request.Context(), &req)
-	if err != nil {
-		h.Log.Debug("create playlist group", zap.Error(err))
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	if body == nil {
-		h.Log.Error("create playlist group: nil body")
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
-		return
-	}
-	created(c, body.Raw)
-}
-
-// GetPlaylistGroup GET /api/v1/playlist-groups/:id.
-func (h *Handler) GetPlaylistGroup(c *gin.Context) {
-	id := c.Param("id")
-	body, err := h.Exec.GetPlaylistGroup(c.Request.Context(), id)
-	if err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	if body == nil {
-		h.Log.Error("get playlist group: nil body")
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
-		return
-	}
-	writeBytesIndividualGET(c, body.Raw)
-}
-
-// ReplacePlaylistGroup PUT /api/v1/playlist-groups/:id.
-func (h *Handler) ReplacePlaylistGroup(c *gin.Context) {
-	id := c.Param("id")
-	var req models.PlaylistGroupReplaceRequest
-	raw, intent, err := bindSignedReplace(c, &req)
-	if err != nil {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	req.Raw = raw
-	body, err := h.Exec.ReplacePlaylistGroup(c.Request.Context(), id, &req, intent)
-	if err != nil {
-		st, code, msg := mapExecutorError(err)
-		writeError(c.Writer, st, code, msg)
-		return
-	}
-	if body == nil {
-		h.Log.Error("replace playlist group: nil body")
-		writeError(c.Writer, http.StatusInternalServerError, "internal_error", "empty document")
-		return
-	}
-	writeDocument(c, http.StatusOK, body.Raw)
-}
-
-// DeletePlaylistGroup DELETE /api/v1/playlist-groups/:id. Body is a signed delete-intent.
-func (h *Handler) DeletePlaylistGroup(c *gin.Context) {
-	id := c.Param("id")
-	req, err := bindDeleteRequest(c)
-	if err != nil {
-		writeError(c.Writer, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	if err := h.Exec.DeletePlaylistGroup(c.Request.Context(), id, req); err != nil {
 		st, code, msg := mapExecutorError(err)
 		writeError(c.Writer, st, code, msg)
 		return

@@ -193,12 +193,12 @@ func TestIntegration_InlineManifestCuratorSignedPublish(t *testing.T) {
 	assertPlaylistInlineManifest(t, "curator-signed GET playlist", gotRaw, itemID)
 }
 
-// TestIntegration_InlineManifestSurvivesLocalGroupIngest covers the local branch of group ingest:
+// TestIntegration_InlineManifestSurvivesLocalChannelIngest covers the local branch of channel ingest:
 // the URI points at this feed, so resolveOnePlaylistRef loads the stored document and
 // upsertPlaylistsBatch writes it back and rebuilds the item index from that body. The remote
 // branch, where the document is new to this feed, is
-// TestIntegration_InlineManifestSurvivesRemoteGroupIngest.
-func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
+// TestIntegration_InlineManifestSurvivesRemoteChannelIngest.
+func TestIntegration_InlineManifestSurvivesLocalChannelIngest(t *testing.T) {
 	srv := newIntegrationServer(t)
 
 	itemID := uuid.MustParse("66666666-2222-4333-8444-555555555555")
@@ -223,30 +223,30 @@ func TestIntegration_InlineManifestSurvivesLocalGroupIngest(t *testing.T) {
 
 	// publicBaseURL of the integration server, so the executor resolves this from the DB rather
 	// than over HTTP — the local-ingest branch of resolveOnePlaylistRef.
-	gpriv, gkid := newCuratorKeypair(t)
-	groupBody := signedGroupBody(t, gpriv, gkid,
+	cpriv, ckid := newCuratorKeypair(t)
+	channelBody := signedChannelBody(t, cpriv, ckid,
 		uuid.MustParse("6b000000-2222-4333-8444-555555555555").String(),
-		"inline-manifest-ingested-group",
-		"Group over an inline-manifest playlist",
+		"inline-manifest-ingested-channel",
+		"Channel over an inline-manifest playlist",
 		created,
 		[]string{"http://example.com/api/v1/playlists/" + slug},
 	)
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channelBody, http.StatusCreated)
 
 	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+slug, nil, http.StatusOK)
-	assertPlaylistInlineManifest(t, "playlist after group ingest", gotRaw, itemID)
+	assertPlaylistInlineManifest(t, "playlist after channel ingest", gotRaw, itemID)
 
 	var itemPage ListResponse[playlist.PlaylistItem]
 	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlist-items", nil, http.StatusOK, &itemPage)
-	assertItemInlineManifest(t, "item index after group ingest", itemPage.Items, itemID)
+	assertItemInlineManifest(t, "item index after channel ingest", itemPage.Items, itemID)
 }
 
-// TestIntegration_InlineManifestSurvivesRemoteGroupIngest covers the branch that matters for a
+// TestIntegration_InlineManifestSurvivesRemoteChannelIngest covers the branch that matters for a
 // third party's document: the URI is outside publicBaseURL, so the feed fetches it, re-validates
 // it, and stores a playlist it did not author. That store step re-marshals the document, and the
 // inline manifest is covered by the remote curator's signature with no refHash counterpart — so a
 // member dropped in transit would invalidate a signature this feed cannot re-create.
-func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
+func TestIntegration_InlineManifestSurvivesRemoteChannelIngest(t *testing.T) {
 	remoteID := uuid.MustParse("77777777-2222-4333-8444-555555555555")
 	itemID := uuid.MustParse("88888888-2222-4333-8444-555555555555")
 
@@ -289,15 +289,15 @@ func TestIntegration_InlineManifestSurvivesRemoteGroupIngest(t *testing.T) {
 
 	srv := newIntegrationServerWithFetcher(t, fetcher.NewHTTPFetcher(10*time.Second, 4<<20, fetcher.AllowPrivateDestinations(true)))
 
-	gpriv, gkid := newCuratorKeypair(t)
-	groupBody := signedGroupBody(t, gpriv, gkid,
+	cpriv, ckid := newCuratorKeypair(t)
+	channelBody := signedChannelBody(t, cpriv, ckid,
 		uuid.MustParse("79000000-2222-4333-8444-555555555555").String(),
-		"remote-inline-manifest-group",
-		"Group over a remote inline-manifest playlist",
+		"remote-inline-manifest-channel",
+		"Channel over a remote inline-manifest playlist",
 		"2020-01-02T03:04:05Z",
 		[]string{origin.URL + "/remote.json"},
 	)
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups", groupBody, http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels", channelBody, http.StatusCreated)
 
 	gotRaw := mustDoRaw(t, srv, http.MethodGet, "/api/v1/playlists/"+remote.Slug, nil, http.StatusOK)
 	assertPlaylistInlineManifest(t, "remotely ingested playlist", gotRaw, itemID)

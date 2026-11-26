@@ -1,4 +1,4 @@
-// Package pg implements store.Store on PostgreSQL using pgxpool (CRUD, keyset pagination, transactional group/channel ingest).
+// Package pg implements store.Store on PostgreSQL using pgxpool (CRUD, keyset pagination, transactional channel ingest).
 package pg
 
 import (
@@ -16,7 +16,6 @@ import (
 
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -63,8 +62,8 @@ const (
 // owner delete, which is precisely the guarantee tombstones exist to provide. Taking the lock *before*
 // the check makes check and write atomic with respect to each other.
 //
-// Deadlock safety: a transaction takes at most one container lock (its own new group/channel id, unique
-// to it) and then playlist locks in sorted order, so no two transactions can hold each other's next lock.
+// Deadlock safety: a transaction takes at most one container lock (its own new channel id, unique to
+// it) and then playlist locks in sorted order, so no two transactions can hold each other's next lock.
 // The lock is advisory and transaction-scoped, so it is released on commit or rollback either way.
 const documentLockKey = `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2::text, 0))`
 
@@ -453,13 +452,12 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 	}
 
 	chF := strings.TrimSpace(p.ChannelFilter)
-	pgF := strings.TrimSpace(p.PlaylistGroupFilter)
 
 	order := p.Sort.SQLOrder()
 	tupleOp := p.Sort.TupleAfterCursorOp()
 
 	// A malformed cursor is a 400 whatever it is presented against, so it is decoded before the
-	// container filter can short-circuit to an empty page.
+	// channel filter can short-circuit to an empty page.
 	var plCreated time.Time
 	var pos int
 	var iid uuid.UUID
@@ -473,26 +471,20 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 	args := []any{limit + 1}
 
 	// Unscoped, this list is a directory across every playlist, so it leaves out items of unlisted
-	// playlists. Scoped to a container it is not: the container's own signed document names its members,
-	// unlisted ones included (playlists extension §3.7), and the container filter replaces this predicate.
+	// playlists. Scoped to a channel it is not: the channel's own signed document names its members,
+	// unlisted ones included (playlists extension §3.7), and the channel filter replaces this predicate.
 	filterSQL := ` AND EXISTS (
 			SELECT 1 FROM playlists p
 			WHERE p.id = i.playlist_id
 			AND ` + listedPlaylistSQL("p.") + `
 		)`
 
-	// The container filter resolves to exactly one container (resolveContainer), and an unknown one is
-	// the documented empty page. The filter itself stays an EXISTS on membership rather than a join so
-	// a playlist the container lists at several positions contributes its items once: this list is
-	// ordered by the playlist's created_at, not by position, and stays that way (documented).
-	if chF != "" || pgF != "" {
-		containerTable, memberTable, containerColumn := "channels", "channel_members", "channel_id"
-		key := chF
-		if chF == "" {
-			containerTable, memberTable, containerColumn = "playlist_groups", "playlist_group_members", "playlist_group_id"
-			key = pgF
-		}
-		containerID, _, found, err := resolveContainer(ctx, s.pool, containerTable, key)
+	// The channel filter resolves to exactly one channel (resolveChannel), and an unknown one is the
+	// documented empty page. The filter itself stays an EXISTS on membership rather than a join so a
+	// playlist the channel lists at several positions contributes its items once: this list is ordered by
+	// the playlist's created_at, not by position, and stays that way (documented).
+	if chF != "" {
+		channelID, _, found, err := resolveChannel(ctx, s.pool, chF)
 		if err != nil {
 			return nil, "", err
 		}
@@ -500,11 +492,11 @@ func (s *Store) ListPlaylistItems(ctx context.Context, p *store.ListPlaylistItem
 			return nil, "", nil
 		}
 		filterSQL = fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM %s m
+			SELECT 1 FROM channel_members m
 			WHERE m.playlist_id = i.playlist_id
-			AND m.%s = $%d::uuid
-		)`, memberTable, containerColumn, len(args)+1)
-		args = append(args, containerID)
+			AND m.channel_id = $%d::uuid
+		)`, len(args)+1)
+		args = append(args, channelID)
 	}
 
 	var cursorSQL string
@@ -605,8 +597,8 @@ LIMIT 1`
 //
 //   - Unfiltered or filtered by curator: created_at then id, direction from p.Sort. Cursor is
 //     (created_at, id) of the last row (see createdAtListQuery).
-//   - Filtered by channel or playlist-group: membership position (the order the signed document lists
-//     its playlists), direction from p.Sort. Cursor is the last row's position. A document that
+//   - Filtered by channel: membership position (the order the signed channel document lists its
+//     playlists), direction from p.Sort. Cursor is the last row's position. A document that
 //     repeats a playlist URI stores one membership row per position, and this list mirrors that — the
 //     playlist appears at every position it holds — because the endpoint answers "what does this
 //     channel play, in order", and the channel document is the authority on that order.
@@ -614,9 +606,9 @@ LIMIT 1`
 // The filtered list used to reuse the created_at ordering with an EXISTS-on-membership predicate. That
 // made the order depend on when each member was published rather than on the channel, so a playlist
 // republished under a new id jumped to the end of every channel that carried it. Position is what a
-// player rendering a channel needs, and it is already how ListPlaylistsInChannel/InGroup answer.
+// player rendering a channel needs, and it is already how ListPlaylistsInChannel answers.
 //
-// A curator filter is refused together with a container filter (ErrInvalidListFilter): it has no
+// A curator filter is refused together with a channel filter (ErrInvalidListFilter): it has no
 // meaning under membership order that a client could page reliably, and silently dropping either filter
 // would answer a different question than the one asked.
 //
@@ -636,13 +628,12 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 	}
 
 	chF := strings.TrimSpace(p.ChannelFilter)
-	pgF := strings.TrimSpace(p.PlaylistGroupFilter)
 	curF := strings.TrimSpace(p.CuratorFilter)
-	if chF != "" || pgF != "" {
+	if chF != "" {
 		if curF != "" {
-			return nil, "", fmt.Errorf("%w: a curator filter cannot be combined with a channel or playlist-group filter", store.ErrInvalidListFilter)
+			return nil, "", fmt.Errorf("%w: a curator filter cannot be combined with a channel filter", store.ErrInvalidListFilter)
 		}
-		return s.listPlaylistsByMembership(ctx, p, limit, chF, pgF)
+		return s.listPlaylistsByMembership(ctx, p, limit, chF)
 	}
 
 	q, args, err := createdAtListQuery("playlists", limit, p.Sort, p.Cursor, playlistDirectoryFilters(curF))
@@ -668,7 +659,7 @@ func (s *Store) ListPlaylists(ctx context.Context, p *store.ListPlaylistsParams)
 // expr holds a single %s placeholder that createdAtListQuery fills with the predicate's bind parameter, or,
 // when arg is nil, no placeholder at all: a fixed predicate such as listedPlaylistSQL that binds nothing.
 // The body expression on its left must stay textually identical to the index expression in migration
-// 000009 (`body -> 'curators'`, `body ->> 'curator'`, `body -> 'publisher' ->> 'key'`), or the planner
+// 000009 (`body -> 'curators'`, `body -> 'publisher' ->> 'key'`), or the planner
 // cannot use the index and every filtered list becomes a sequential scan over all bodies.
 type docFilter struct {
 	expr string
@@ -719,12 +710,6 @@ func curatorsKeyFilter(key string) docFilter {
 	return docFilter{expr: `body -> 'curators' @> %s::jsonb`, arg: string(probe)}
 }
 
-// groupCuratorFilter matches a playlist-group whose `curator` string equals name exactly. DP-1 core defines
-// that field as a display name, so this is attribution only (see docs/api_design.md).
-func groupCuratorFilter(name string) docFilter {
-	return docFilter{expr: `body ->> 'curator' = %s`, arg: name}
-}
-
 // publisherKeyFilter matches a channel whose `publisher.key` equals key exactly.
 func publisherKeyFilter(key string) docFilter {
 	return docFilter{expr: `body -> 'publisher' ->> 'key' = %s`, arg: key}
@@ -771,51 +756,48 @@ func createdAtListQuery(table string, limit int, sort store.SortOrder, cursor st
 	return b.String(), args, nil
 }
 
-// rowQuerier is the one method resolveContainer needs, satisfied by both the pool and a pgx.Tx so a
+// rowQuerier is the one method resolveChannel needs, satisfied by both the pool and a pgx.Tx so a
 // caller can resolve inside the same snapshot it reads membership from.
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// resolveContainer turns a channel / playlist-group filter value into the container's id and its
-// updated_at, the way GetChannel and ListPlaylistsInChannel resolve it: a value that parses as a UUID
-// is looked up by id, anything else by slug. found is false when no such container exists — for a
-// UUID too, because callers decide "unknown container" (empty page, and no cursor binding check) from
-// found, and a parseable id that matches no row is exactly as unknown as a slug that matches none. It
-// must be one or the other, never `id::text = $n OR slug = $n`: create is open and slugs are
-// client-chosen, so a second container whose slug equals the first one's UUID string is creatable,
-// and matching both would merge two containers' membership — interleaving rows in a position-ordered
-// list, and leaking a decoy's items into a UUID-filtered item list. containerTable is one of the two
-// table-name literals the callers own; the only parameter is the key.
+// resolveChannel turns a channel filter value into the channel's id and its updated_at, the way
+// GetChannel and ListPlaylistsInChannel resolve it: a value that parses as a UUID is looked up by id,
+// anything else by slug. found is false when no such channel exists — for a UUID too, because callers
+// decide "unknown channel" (empty page, and no cursor binding check) from found, and a parseable id that
+// matches no row is exactly as unknown as a slug that matches none. It must be one or the other, never
+// `id::text = $n OR slug = $n`: create is open and slugs are client-chosen, so a second channel whose
+// slug equals the first one's UUID string is creatable, and matching both would merge two channels'
+// membership — interleaving rows in a position-ordered list, and leaking a decoy's items into a
+// UUID-filtered item list.
 //
-// updatedAt is the container row's updated_at, which listPlaylistsByMembership uses as the membership
+// updatedAt is the channel row's updated_at, which listPlaylistsByMembership uses as the membership
 // revision a cursor is bound to. It is a sound generation because the trigger (migration 000008)
 // stores a value strictly greater than the previous one on every update, whatever the transactions'
 // timing — a plain now() could repeat across two rapid replaces, or go backwards when an earlier
 // transaction commits later, and a stale cursor would then pass the equality check.
-func resolveContainer(ctx context.Context, q rowQuerier, containerTable, key string) (id uuid.UUID, updatedAt time.Time, found bool, err error) {
+func resolveChannel(ctx context.Context, q rowQuerier, key string) (id uuid.UUID, updatedAt time.Time, found bool, err error) {
 	if parsed, perr := uuid.Parse(key); perr == nil {
-		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE id = $1`, containerTable), parsed).Scan(&id, &updatedAt)
+		err = q.QueryRow(ctx, `SELECT id, updated_at FROM channels WHERE id = $1`, parsed).Scan(&id, &updatedAt)
 	} else {
-		err = q.QueryRow(ctx, fmt.Sprintf(`SELECT id, updated_at FROM %s WHERE slug = $1`, containerTable), key).Scan(&id, &updatedAt)
+		err = q.QueryRow(ctx, `SELECT id, updated_at FROM channels WHERE slug = $1`, key).Scan(&id, &updatedAt)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, time.Time{}, false, nil
 	}
 	if err != nil {
-		return uuid.Nil, time.Time{}, false, fmt.Errorf("resolve %s %q: %w", containerTable, key, err)
+		return uuid.Nil, time.Time{}, false, fmt.Errorf("resolve channel %q: %w", key, err)
 	}
 	return id, updatedAt, true, nil
 }
 
-// listPlaylistsByMembership is ListPlaylists for a channel or playlist-group filter: one row per
-// membership position, ordered by position. Exactly one of chF / pgF is non-empty (the HTTP layer
-// rejects both; the channel filter wins here if a caller passes both). An unknown container yields an
-// empty page, not ErrNotFound, matching the previous EXISTS-based behavior — the list endpoint is a
+// listPlaylistsByMembership is ListPlaylists for a channel filter: one row per membership position,
+// ordered by position. An unknown channel yields an empty page, not ErrNotFound, matching the previous EXISTS-based behavior — the list endpoint is a
 // filter, not a lookup, and GET /api/v1/channels/{id} is the place that distinguishes "no such channel" from
 // "no members".
 //
-// The container is resolved up front (resolveContainer) so that exactly one container feeds the
+// The channel is resolved up front (resolveChannel) so that exactly one container feeds the
 // query. position is unique only WITHIN a container (it is half of the membership primary key), so
 // with a single container it is a complete keyset — no id tie-break — but across two it has ties,
 // and LIMIT plus a position cursor would then skip or repeat rows.
@@ -833,13 +815,8 @@ func resolveContainer(ctx context.Context, q rowQuerier, containerTable, key str
 // The revision is read in the same REPEATABLE READ snapshot as the membership rows, so a replace that
 // commits between the two statements cannot pass the check with the old revision and then page the
 // new rows.
-func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlaylistsParams, limit int, chF, pgF string) ([]store.PlaylistRecord, string, error) {
-	kind, memberTable, containerColumn, containerTable := membershipKindPlaylistGroup, "playlist_group_members", "playlist_group_id", "playlist_groups"
-	container := pgF
-	if chF != "" {
-		kind, memberTable, containerColumn, containerTable = membershipKindChannel, "channel_members", "channel_id", "channels"
-		container = chF
-	}
+func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlaylistsParams, limit int, channel string) ([]store.PlaylistRecord, string, error) {
+	const kind = membershipKindChannel
 
 	// The zero SortOrder orders ascending everywhere else in this store (SQLOrder / TupleAfterCursorOp
 	// treat it as ASC), so it must be canonicalized before it is written into a cursor or compared
@@ -868,7 +845,7 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	containerID, revision, found, err := resolveContainer(ctx, tx, containerTable, container)
+	containerID, revision, found, err := resolveChannel(ctx, tx, channel)
 	if err != nil {
 		return nil, "", err
 	}
@@ -878,11 +855,11 @@ func (s *Store) listPlaylistsByMembership(ctx context.Context, p *store.ListPlay
 
 	order := sort.SQLOrder()
 	cursorOp := sort.TupleAfterCursorOp()
-	base := fmt.Sprintf(`
+	const base = `
 SELECT p.id, p.slug, p.body, p.created_at, p.updated_at, m.position
-FROM %s m
+FROM channel_members m
 JOIN playlists p ON p.id = m.playlist_id
-WHERE m.%s = $2::uuid`, memberTable, containerColumn)
+WHERE m.channel_id = $2::uuid`
 
 	var q string
 	var args []any
@@ -1216,7 +1193,7 @@ WHERE id = $1 AND updated_at = $3 RETURNING created_at`
 //
 // Ordering is load-bearing: begin → resolve → acquire read connection (bounded) → lock → read started →
 // delete. The read connection is taken before the lock so the delete never waits on the pool while
-// holding it (see listingRead), and the query is issued only after the lock. A concurrent group/channel
+// holding it (see listingRead), and the query is issued only after the lock. A concurrent channel
 // ingest that references this playlist takes the same advisory lock before inserting membership
 // (insertMissingPlaylistsBatch), so it either committed before our lock — and its rows are in the read's
 // snapshot — or blocks until we commit and then fails on the tombstone we wrote; no channel that ever
@@ -1272,8 +1249,8 @@ func (s *Store) DeletePlaylist(ctx context.Context, idOrSlug string, expectedUpd
 	return <-read.result, nil
 }
 
-// deleteDocumentRow is the shared conditional delete for playlist-groups and channels (playlists have
-// their own, see DeletePlaylist). It resolves the row id (accepting a UUID or a slug), deletes only when
+// deleteDocumentRow is the conditional delete for channels (playlists have their own, see
+// DeletePlaylist). It resolves the row id (accepting a UUID or a slug), deletes only when
 // updated_at still matches what the caller authorized against, and classifies a zero-row delete as
 // ErrConcurrentModification or ErrNotFound.
 //
@@ -1321,12 +1298,12 @@ func deleteLockedDocument(ctx context.Context, tx pgx.Tx, table string, rowID uu
 }
 
 // =============================================================================
-// Playlist groups (same row shape as playlists; membership in playlist_group_members)
+// Referenced-playlist ingestion (shared by channel create and replace)
 // =============================================================================
 
 // insertMissingPlaylistsBatch inserts the referenced playlists this feed does not have yet and builds the
 // item index for exactly those rows. Membership ingestion may *link* a playlist but must never *modify*
-// one: group/channel creation is open, so an ON CONFLICT DO UPDATE here would let anyone who can create a
+// one: channel creation is open, so an ON CONFLICT DO UPDATE here would let anyone who can create a
 // channel host a document carrying a victim's playlist id and overwrite that playlist's body, slug, owner
 // set and item index on this feed. A referenced id that already exists is therefore left exactly as
 // stored, and the remote document's contents are ignored (cross-feed divergence is reconciled elsewhere).
@@ -1425,288 +1402,12 @@ FROM playlist_items, jsonb_array_elements(playlist_items.items) WITH ORDINALITY 
 	return recordPlaylistSources(ctx, tx, playlists)
 }
 
-// insertPlaylistGroupMembersBatch writes membership rows in playlist order.
-// unnest($2::uuid[]) preserves order; WITH ORDINALITY gives 1-based ord → position ord-1.
-func insertPlaylistGroupMembersBatch(ctx context.Context, tx pgx.Tx, groupID uuid.UUID, playlists []store.IngestedPlaylist) error {
-	const q = `
-INSERT INTO playlist_group_members (playlist_group_id, playlist_id, position)
-SELECT $1, x.playlist_id, (x.ord - 1)::int
-FROM unnest($2::uuid[]) WITH ORDINALITY AS x(playlist_id, ord)`
-
-	if len(playlists) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(playlists))
-	for i, p := range playlists {
-		ids[i] = p.ID
-	}
-	_, err := tx.Exec(ctx, q, groupID, ids)
-	return err
-}
-
-// CreatePlaylistGroup implements store.Store.
-//
-// Process (single tx): batch-upsert all referenced playlists, insert the group row, and create membership (delete not needed - new group).
-func (s *Store) CreatePlaylistGroup(ctx context.Context, in *store.PlaylistGroupInput) error {
-	const insertGroup = `
-INSERT INTO playlist_groups (id, slug, body)
-VALUES ($1, $2, $3::jsonb)`
-
-	if in == nil {
-		return fmt.Errorf("nil playlist group input")
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if err := lockDocumentID(ctx, tx, "playlist_groups", in.ID); err != nil {
-		return err
-	}
-	if err := requireNotTombstoned(ctx, tx, "playlist_groups", in.ID); err != nil {
-		return err
-	}
-
-	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
-	}
-
-	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
-		return err
-	}
-	groupJSON := []byte(in.Raw)
-
-	if _, err := tx.Exec(ctx, insertGroup, in.ID, in.Slug, groupJSON); err != nil {
-		if conflict := createConflict(err, "playlist-group"); conflict != nil {
-			return conflict
-		}
-		return fmt.Errorf("insert playlist_group: %w", err)
-	}
-
-	if err := insertPlaylistGroupMembersBatch(ctx, tx, in.ID, in.Playlists); err != nil {
-		return fmt.Errorf("insert playlist_group_members: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
-}
-
-// GetPlaylistGroup implements store.Store.
-func (s *Store) GetPlaylistGroup(ctx context.Context, idOrSlug string) (*store.PlaylistGroupRecord, error) {
-	const (
-		byID = `
-SELECT id, slug, body, created_at, updated_at
-FROM playlist_groups
-WHERE id = $1`
-
-		bySlug = `
-SELECT id, slug, body, created_at, updated_at
-FROM playlist_groups
-WHERE slug = $1`
-	)
-
-	id, err := uuid.Parse(idOrSlug)
-	var row pgx.Row
-	if err == nil {
-		row = s.pool.QueryRow(ctx, byID, id)
-	} else {
-		row = s.pool.QueryRow(ctx, bySlug, idOrSlug)
-	}
-
-	var rec store.PlaylistGroupRecord
-	var raw []byte
-	if err := row.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("%w", store.ErrNotFound)
-		}
-		return nil, fmt.Errorf("select playlist_group: %w", err)
-	}
-	if rec.Raw, rec.Body, err = scanDocument[playlistgroup.Group](raw, "playlist-group body"); err != nil {
-		return nil, err
-	}
-	return &rec, nil
-}
-
-// ListPlaylistGroups implements store.Store (same created_at pagination as an unfiltered ListPlaylists;
-// CuratorFilter matches the group's `curator` string).
-func (s *Store) ListPlaylistGroups(ctx context.Context, p *store.ListPlaylistsParams) ([]store.PlaylistGroupRecord, string, error) {
-	if p == nil {
-		return nil, "", fmt.Errorf("nil list params")
-	}
-	limit, err := store.ResolveListLimit(p.Limit)
-	if err != nil {
-		return nil, "", err
-	}
-	var filters []docFilter
-	if f := strings.TrimSpace(p.CuratorFilter); f != "" {
-		filters = append(filters, groupCuratorFilter(f))
-	}
-	q, args, err := createdAtListQuery("playlist_groups", limit, p.Sort, p.Cursor, filters)
-	if err != nil {
-		return nil, "", err
-	}
-	rows, err := s.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, "", fmt.Errorf("list playlist_groups: %w", err)
-	}
-	defer rows.Close()
-
-	var out []store.PlaylistGroupRecord
-	for rows.Next() {
-		var rec store.PlaylistGroupRecord
-		var raw []byte
-		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
-			return nil, "", fmt.Errorf("scan: %w", err)
-		}
-		if rec.Raw, rec.Body, err = scanDocument[playlistgroup.Group](raw, "playlist-group body"); err != nil {
-			return nil, "", err
-		}
-		out = append(out, rec)
-	}
-
-	nextCursor := ""
-	if len(out) > limit {
-		last := out[limit-1]
-		out = out[:limit]
-		nextCursor = encodeCursor(last.CreatedAt, last.ID)
-	}
-	return out, nextCursor, rows.Err()
-}
-
-// UpdatePlaylistGroup implements store.Store (updated_at set by trigger; membership replaced).
-//
-// Process (single tx): batch-upsert all referenced playlists, update the group body, clear and rebuild membership.
-func (s *Store) UpdatePlaylistGroup(ctx context.Context, idOrSlug string, in *store.PlaylistGroupInput, expectedUpdatedAt time.Time) error {
-	const (
-		updateByID     = `UPDATE playlist_groups SET body = $2::jsonb, slug = COALESCE(NULLIF($2::jsonb->>'slug', ''), slug) WHERE id = $1 AND updated_at = $3`
-		selectIDBySlug = `SELECT id FROM playlist_groups WHERE slug = $1`
-		clearMembers   = `DELETE FROM playlist_group_members WHERE playlist_group_id = $1`
-	)
-
-	if in == nil {
-		return fmt.Errorf("nil playlist group input")
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Resolve row ID
-	var rowID uuid.UUID
-	if id, perr := uuid.Parse(idOrSlug); perr == nil {
-		rowID = id
-	} else {
-		if err := tx.QueryRow(ctx, selectIDBySlug, idOrSlug).Scan(&rowID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w", store.ErrNotFound)
-			}
-			return fmt.Errorf("lookup playlist_group slug: %w", err)
-		}
-	}
-
-	// Upsert playlists
-	if err := insertMissingPlaylistsBatch(ctx, tx, in.Playlists); err != nil {
-		return fmt.Errorf("upsert playlists: %w", err)
-	}
-
-	// Update group body
-	if err := requireDocument(in.Raw, "playlist group body"); err != nil {
-		return err
-	}
-	groupJSON := []byte(in.Raw)
-
-	ct, err := tx.Exec(ctx, updateByID, rowID, groupJSON, expectedUpdatedAt)
-	if err != nil {
-		return fmt.Errorf("update playlist_group: %w", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return classifyConditionalWrite(ctx, tx, "playlist_groups", rowID)
-	}
-
-	// Replace membership
-	if _, err := tx.Exec(ctx, clearMembers, rowID); err != nil {
-		return fmt.Errorf("clear playlist_group_members: %w", err)
-	}
-	if err := insertPlaylistGroupMembersBatch(ctx, tx, rowID, in.Playlists); err != nil {
-		return fmt.Errorf("insert playlist_group_members: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
-}
-
-// ListPlaylistsInGroup implements store.Store.
-func (s *Store) ListPlaylistsInGroup(ctx context.Context, idOrSlug string) ([]store.PlaylistRecord, error) {
-	// First verify the group exists
-	if _, err := s.GetPlaylistGroup(ctx, idOrSlug); err != nil {
-		return nil, err
-	}
-
-	const (
-		byID = `
-SELECT p.id, p.slug, p.body, p.created_at, p.updated_at
-FROM playlist_group_members m
-JOIN playlists p ON p.id = m.playlist_id
-WHERE m.playlist_group_id = $1
-ORDER BY m.position`
-
-		bySlug = `
-SELECT p.id, p.slug, p.body, p.created_at, p.updated_at
-FROM playlist_group_members m
-JOIN playlists p ON p.id = m.playlist_id
-JOIN playlist_groups g ON g.id = m.playlist_group_id
-WHERE g.slug = $1
-ORDER BY m.position`
-	)
-
-	id, err := uuid.Parse(idOrSlug)
-	var rows pgx.Rows
-	if err == nil {
-		rows, err = s.pool.Query(ctx, byID, id)
-	} else {
-		rows, err = s.pool.Query(ctx, bySlug, idOrSlug)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("list playlists in group: %w", err)
-	}
-	defer rows.Close()
-
-	var out []store.PlaylistRecord
-	for rows.Next() {
-		var rec store.PlaylistRecord
-		var raw []byte
-		if err := rows.Scan(&rec.ID, &rec.Slug, &raw, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
-		}
-		if rec.Raw, rec.Body, err = scanDocument[playlist.Playlist](raw, "playlist body"); err != nil {
-			return nil, err
-		}
-		out = append(out, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// DeletePlaylistGroup implements store.Store.
-func (s *Store) DeletePlaylistGroup(ctx context.Context, idOrSlug string, expectedUpdatedAt time.Time) error {
-	return s.deleteDocumentRow(ctx, "playlist_groups", idOrSlug, expectedUpdatedAt)
-}
-
 // =============================================================================
 // Channels (channels extension document + channel_members)
 // =============================================================================
 
-// insertChannelMembersBatch writes membership rows in playlist order (same unnest pattern as playlist groups).
+// insertChannelMembersBatch writes membership rows in playlist order (unnest preserves order; WITH ORDINALITY
+// gives 1-based ord → position ord-1).
 func insertChannelMembersBatch(ctx context.Context, tx pgx.Tx, channelID uuid.UUID, playlists []store.IngestedPlaylist) error {
 	const q = `
 INSERT INTO channel_members (channel_id, playlist_id, position)
@@ -1726,7 +1427,7 @@ FROM unnest($2::uuid[]) WITH ORDINALITY AS x(playlist_id, ord)`
 
 // CreateChannel implements store.Store.
 //
-// Process mirrors CreatePlaylistGroup: batch-upsert playlists, insert channel row, create channel_members from slice order.
+// Process (single tx): batch-upsert playlists, insert channel row, create channel_members from slice order.
 func (s *Store) CreateChannel(ctx context.Context, in *store.ChannelInput) error {
 	const insertChannel = `
 INSERT INTO channels (id, slug, body)
@@ -2014,15 +1715,14 @@ type cursorPayload struct {
 	ID        uuid.UUID `json:"id"`
 }
 
-// Membership container kinds, carried in a membership cursor so a channel token cannot page a group.
-const (
-	membershipKindChannel       = "channel"
-	membershipKindPlaylistGroup = "playlist-group"
-)
+// membershipKindChannel is the container kind a membership cursor carries. Channels are the only
+// membership container left, but the kind stays on the wire: tokens issued while playlist-groups existed
+// carry "playlist-group", and keeping the field lets decodeMembershipCursor refuse those as the
+// documented 400 instead of paging a channel with a group's position.
+const membershipKindChannel = "channel"
 
-// membershipCursorPayload is the token for a membership-ordered playlist list (channel or
-// playlist-group filter): the container it was issued for, the sort direction, and the position of
-// the last row served. Its key set is disjoint from cursorPayload's on purpose so the two decoders can
+// membershipCursorPayload is the token for a membership-ordered playlist list (channel filter): the
+// container it was issued for, the sort direction, and the position of the last row served. Its key set is disjoint from cursorPayload's on purpose so the two decoders can
 // tell the shapes apart (see decodeCursor). Kind, container and direction are carried because
 // position is meaningful only relative to all three (see listPlaylistsByMembership).
 type membershipCursorPayload struct {
@@ -2074,7 +1774,7 @@ func decodeCursor(s string) (time.Time, uuid.UUID, error) {
 		return time.Time{}, uuid.Nil, err
 	}
 	if _, ok := raw["pos"]; ok {
-		return time.Time{}, uuid.Nil, fmt.Errorf("cursor belongs to a channel- or playlist-group-filtered list")
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor belongs to a channel-filtered list")
 	}
 	if err := requireCursorFields(raw, "t", "id"); err != nil {
 		return time.Time{}, uuid.Nil, err
@@ -2122,7 +1822,7 @@ func decodeMembershipCursor(s string) (membershipCursorPayload, error) {
 	if err := json.Unmarshal(b, &p); err != nil {
 		return p, err
 	}
-	if p.Kind != membershipKindChannel && p.Kind != membershipKindPlaylistGroup {
+	if p.Kind != membershipKindChannel {
 		return p, fmt.Errorf("cursor names an unknown container kind %q", p.Kind)
 	}
 	if p.Container == uuid.Nil {
