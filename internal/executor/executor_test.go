@@ -1114,7 +1114,7 @@ func TestReplacePlaylist_success(t *testing.T) {
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}]}`)
+	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"name":"Curator","key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}],` + storedSignatures(playlist.RoleCurator, testCuratorKid) + `}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(&store.PlaylistRecord{
 		ID:   id,
 		Slug: "test-playlist",
@@ -1165,7 +1165,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 	expectIntentOK(mockDP1)
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}]}`)
+	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"name":"Curator","key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}],` + storedSignatures(playlist.RoleCurator, testCuratorKid) + `}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(&store.PlaylistRecord{
 		ID:   id,
 		Slug: "test-playlist",
@@ -1205,7 +1205,7 @@ func TestReplacePlaylist_withSignatures_success(t *testing.T) {
 func storedPlaylistRecord(t *testing.T, id uuid.UUID, slug string) *store.PlaylistRecord {
 	t.Helper()
 	// Identity is immutable on replace, so the stored record must carry exactly what validCreateReq sends.
-	existing := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `","title":"Old","created":"` + testCreatedRFC + `","curators":[{"key":"` + testCuratorKid + `"}],"items":[{"id":"` + testItemID + `","source":"https://old"}]}`)
+	existing := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"` + slug + `","title":"Old","created":"` + testCreatedRFC + `","curators":[{"name":"Curator","key":"` + testCuratorKid + `"}],"items":[{"id":"` + testItemID + `","source":"https://old"}],` + storedSignatures(playlist.RoleCurator, testCuratorKid) + `}`)
 	return &store.PlaylistRecord{ID: id, Slug: slug, Raw: existing, Body: mustDecodePlaylist(t, existing)}
 }
 
@@ -1264,7 +1264,7 @@ func TestReplaceChannel_ownerImmutable(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 
 	id := uuid.MustParse("44444444-4444-4444-4444-444444444444")
-	existing := []byte(`{"id":"` + id.String() + `","slug":"chan","title":"Old","version":"1.0.0","created":"2026-01-01T00:00:00Z","publisher":{"key":"` + testPublisherKid + `"},"playlists":[],"signatures":[{"alg":"ed25519","kid":"` + testPublisherKid + `","ts":"2020-01-02T03:04:05Z","payload_hash":"h","role":"publisher","sig":"s"}]}`)
+	existing := []byte(`{"id":"` + id.String() + `","slug":"chan","title":"Old","version":"1.0.0","created":"2026-01-01T00:00:00Z","publisher":{"name":"Publisher","key":"` + testPublisherKid + `"},"playlists":["https://feed.example/api/v1/playlists/pl-ch"],` + storedSignatures(channels.RolePublisher, testPublisherKid) + `}`)
 	mockStore.EXPECT().GetChannel(gomock.Any(), "chan").Return(&store.ChannelRecord{ID: id, Slug: "chan", Raw: existing, Body: mustDecodeChannel(t, existing)}, nil)
 
 	e := executor.New(mockStore, mockDP1, true, nil, "")
@@ -1288,7 +1288,7 @@ func TestReplacePlaylist_preservesItemDisplayAtWithCoreValidation(t *testing.T) 
 	mockDP1.EXPECT().VerifyPlaylistSignatures(gomock.Any()).Return(true, nil, nil).AnyTimes()
 
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}]}`)
+	existing := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-1111-1111-111111111111","slug":"test-playlist","title":"Old","created":"2026-01-01T00:00:00Z","curators":[{"name":"Curator","key":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"items":[{"source":"https://old"}],` + storedSignatures(playlist.RoleCurator, testCuratorKid) + `}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "daily").Return(&store.PlaylistRecord{
 		ID:   id,
 		Slug: "test-playlist",
@@ -3820,7 +3820,7 @@ func TestPlaylist_undeclaredTwoCuratorsRejected(t *testing.T) {
 	mockDP1 := mocks.NewMockValidatorSigner(ctrl)
 	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	storedUndeclared := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"test-playlist","title":"Old","created":"` + testCreatedRFC + `","items":[{"id":"` + testItemID + `","source":"https://old"}],` +
-		`"signatures":[{"alg":"ed25519","kid":"` + testCuratorKid + `","ts":"t","payload_hash":"h","role":"curator","sig":"s"}]}`)
+		storedSignatures(playlist.RoleCurator, testCuratorKid) + `}`)
 	mockStore.EXPECT().GetPlaylist(gomock.Any(), "keep-me").Return(&store.PlaylistRecord{ID: id, Slug: "test-playlist", Raw: storedUndeclared, Body: mustDecodePlaylist(t, storedUndeclared)}, nil)
 
 	e := executor.New(mockStore, mockDP1, false, nil, "")
@@ -3845,7 +3845,7 @@ func TestReplacePlaylist_declaredUndeclaredSwitch(t *testing.T) {
 	coreOnlyStored := func() *store.PlaylistRecord {
 		// Stored without curators[]: owners are its curator-role signers {testCuratorKid, other}.
 		existing := []byte(`{"dpVersion":"1.1.0","id":"` + id.String() + `","slug":"test-playlist","title":"Old","created":"` + testCreatedRFC + `","items":[{"id":"` + testItemID + `","source":"https://old"}],` +
-			`"signatures":[{"alg":"ed25519","kid":"` + testCuratorKid + `","ts":"t","payload_hash":"h","role":"curator","sig":"s"},{"alg":"ed25519","kid":"` + other + `","ts":"t","payload_hash":"h","role":"curator","sig":"s"}]}`)
+			storedSignatures(playlist.RoleCurator, testCuratorKid, other) + `}`)
 		return &store.PlaylistRecord{ID: id, Slug: "test-playlist", Raw: existing, Body: mustDecodePlaylist(t, existing)}
 	}
 	tests := []struct {

@@ -96,6 +96,8 @@ signatures it carries; the middleware (`RequireSignatures`) rejects any POST/PUT
 `signatures` array, and the executor verifies authenticity and ownership. The feed **always adds** its own
 `feed` signature after verification (JCS canonicalization, SHA-256 payload hash, Ed25519). Each signature
 carries `alg`, `kid`, `ts`, `payload_hash`, `role`, `sig` (see the `Signature` schema in OpenAPI).
+On the feed's own entry, `ts` is the time the feed signed, on create and on replace — not the document's
+`created` (DP-1 §7.1).
 
 **Who owns a document.** DP-1 core has no signed owner field, only a signature chain whose entries carry
 a `role`; the extensions add optional entity fields whose `key`s are identity claims. The feed derives
