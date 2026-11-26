@@ -311,7 +311,7 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 		return nil, fmt.Errorf("curator signature verification: %w", err)
 	}
 
-	signed, pl, err := e.signAndValidatePlaylist(req.Raw, si.created)
+	signed, pl, err := e.signAndValidatePlaylist(req.Raw)
 	if err != nil {
 		return nil, err
 	}
@@ -323,8 +323,11 @@ func (e *impl) CreatePlaylist(ctx context.Context, req *models.PlaylistCreateReq
 
 // signAndValidatePlaylist appends the feed signature to raw and validates the result (core or
 // core+extension). Only the "signatures" array changes; every other byte stays the client's.
-func (e *impl) signAndValidatePlaylist(raw []byte, ts time.Time) ([]byte, *playlist.Playlist, error) {
-	signed, err := e.dp1.SignPlaylist(raw, ts)
+//
+// The feed entry's "ts" is the moment of signing (DP-1 §7.1), on create and replace alike — never the
+// document's client-supplied "created". The helper takes no timestamp so no caller can pass one.
+func (e *impl) signAndValidatePlaylist(raw []byte) ([]byte, *playlist.Playlist, error) {
+	signed, err := e.dp1.SignPlaylist(raw, time.Now())
 	if err != nil {
 		return nil, nil, fmt.Errorf("feed sign: %w", err)
 	}
@@ -445,7 +448,7 @@ func (e *impl) ReplacePlaylist(ctx context.Context, idOrSlug string, req *models
 
 	// 3) Feed co-signs the same bytes, validate, persist by stable UUID (never the caller-supplied slug:
 	// authorization was established for rec.ID). The store rebuilds playlist_item_index from items[].
-	signed, pl, err := e.signAndValidatePlaylist(req.Raw, time.Now())
+	signed, pl, err := e.signAndValidatePlaylist(req.Raw)
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +772,7 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 
 	// Validate before resolving URIs, so a document that cannot be stored never costs outbound fetches
 	// (see CreatePlaylistGroup).
-	signed, ch, err := e.signAndValidateChannel(req.Raw, si.created)
+	signed, ch, err := e.signAndValidateChannel(req.Raw)
 	if err != nil {
 		return nil, err
 	}
@@ -794,8 +797,9 @@ func (e *impl) CreateChannel(ctx context.Context, req *models.ChannelCreateReque
 }
 
 // signAndValidateChannel appends the feed signature and validates (channels schema requires signatures).
-func (e *impl) signAndValidateChannel(raw []byte, ts time.Time) ([]byte, *channels.Channel, error) {
-	signed, err := e.dp1.SignChannel(raw, ts)
+// "ts" is the moment of signing, as in signAndValidatePlaylist.
+func (e *impl) signAndValidateChannel(raw []byte) ([]byte, *channels.Channel, error) {
+	signed, err := e.dp1.SignChannel(raw, time.Now())
 	if err != nil {
 		return nil, nil, fmt.Errorf("feed sign: %w", err)
 	}
@@ -899,7 +903,7 @@ func (e *impl) ReplaceChannel(ctx context.Context, idOrSlug string, req *models.
 
 	// 3. Feed co-signs the same bytes and validates, ahead of resolution so an invalid document costs no
 	// outbound fetches.
-	signed, ch, err := e.signAndValidateChannel(req.Raw, time.Now())
+	signed, ch, err := e.signAndValidateChannel(req.Raw)
 	if err != nil {
 		return nil, err
 	}
