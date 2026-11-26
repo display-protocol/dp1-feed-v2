@@ -45,8 +45,8 @@ func TestCursorDecoders_roundTrip(t *testing.T) {
 	if err != nil || !gotT.Equal(wantT) || gotID != wantID {
 		t.Fatalf("created_at cursor round trip: got (%v, %v, %v)", gotT, gotID, err)
 	}
-	m, err := decodeMembershipCursor(encodeMembershipCursor(membershipKindPlaylistGroup, testContainer, store.SortDesc, testRev, 38))
-	if err != nil || m.Pos != 38 || m.Kind != membershipKindPlaylistGroup || m.Container != testContainer || m.Sort != "desc" || !m.Rev.Equal(testRev) {
+	m, err := decodeMembershipCursor(encodeMembershipCursor(membershipKindChannel, testContainer, store.SortDesc, testRev, 38))
+	if err != nil || m.Pos != 38 || m.Kind != membershipKindChannel || m.Container != testContainer || m.Sort != "desc" || !m.Rev.Equal(testRev) {
 		t.Fatalf("membership cursor round trip: got (%+v, %v)", m, err)
 	}
 }
@@ -86,14 +86,16 @@ func TestCursorDecoders_rejectIncompleteFields(t *testing.T) {
 		"bad rev type":  `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":5,"pos":1}`,
 		"missing kind":  `{"cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
 		"unknown kind":  `{"kind":"playlist","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"missing cid":   `{"kind":"channel","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"null cid":      `{"kind":"channel","cid":null,"sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"nil cid":       `{"kind":"channel","cid":"00000000-0000-0000-0000-000000000000","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"missing sort":  `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"bad sort":      `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"up","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"empty sort":    `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
-		"empty object":  `{}`,
-		"position only": `{"pos":1}`,
+		// Issued while playlist-groups existed; a channel list must refuse it rather than page by its position.
+		"retired group kind": `{"kind":"playlist-group","cid":"0c000000-0000-4000-8000-000000000001","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"missing cid":        `{"kind":"channel","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"null cid":           `{"kind":"channel","cid":null,"sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"nil cid":            `{"kind":"channel","cid":"00000000-0000-0000-0000-000000000000","sort":"asc","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"missing sort":       `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"bad sort":           `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"up","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"empty sort":         `{"kind":"channel","cid":"0c000000-0000-4000-8000-000000000001","sort":"","rev":"2026-09-10T05:00:00.123456Z","pos":1}`,
+		"empty object":       `{}`,
+		"position only":      `{"pos":1}`,
 	} {
 		if _, err := decodeMembershipCursor(tok(j)); err == nil {
 			t.Errorf("decodeMembershipCursor(%s): want error", name)

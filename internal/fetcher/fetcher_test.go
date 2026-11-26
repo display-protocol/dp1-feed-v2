@@ -92,7 +92,7 @@ func TestHTTPFetcher_FetchPlaylist_invalidURL(t *testing.T) {
 	}
 }
 
-// The guard below is the reason group/channel ingest cannot be turned into an SSRF primitive: creation is
+// The guard below is the reason channel ingest cannot be turned into an SSRF primitive: creation is
 // open, so whoever names a playlist URL decides where the feed sends a request.
 
 func TestBlockedIP_classification(t *testing.T) {

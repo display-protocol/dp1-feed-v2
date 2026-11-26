@@ -12,7 +12,6 @@ import (
 	dp1 "github.com/display-protocol/dp1-go"
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/display-protocol/dp1-go/sign"
 )
 
@@ -35,11 +34,6 @@ type ValidatorSigner interface {
 	// including a legacy top-level "signature" — is preserved byte-for-byte (see appendFeedSignature).
 	SignPlaylist(raw []byte, ts time.Time) ([]byte, error)
 
-	// ValidatePlaylistGroup validates a signed playlist-group document and returns the parsed document (dp1-go ParseAndValidatePlaylistGroup).
-	ValidatePlaylistGroup(raw []byte) (*playlistgroup.Group, error)
-	// SignPlaylistGroup is SignPlaylist for playlist-group documents.
-	SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error)
-
 	// ValidateChannel validates a signed channels extension document and returns the parsed document (dp1-go ParseAndValidateChannel).
 	ValidateChannel(raw []byte) (*channels.Channel, error)
 	// SignChannel is SignPlaylist for channel documents.
@@ -48,13 +42,11 @@ type ValidatorSigner interface {
 	// VerifyPlaylistSignatures verifies all signatures in a signed playlist document.
 	// Returns ok=true when all signatures verify. On failure, ok=false and failed contains signature entries that did not verify.
 	VerifyPlaylistSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
-	// VerifyPlaylistGroupSignatures verifies all signatures in a signed playlist-group document.
-	VerifyPlaylistGroupSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
 	// VerifyChannelSignatures verifies all signatures in a signed channel document.
 	VerifyChannelSignatures(raw []byte) (ok bool, failed []playlist.Signature, err error)
 	// VerifySignatures verifies the top-level "signatures" array of an arbitrary signed JSON payload,
 	// applying the same DP-1 §7.1 digest and payload_hash rules as the document verifiers but without any
-	// schema validation. It exists for payloads that are not playlists/groups/channels — for example the
+	// schema validation. It exists for payloads that are not playlists/channels — for example the
 	// signed delete-intent used to authorize DELETE — so callers can check authorship over a small
 	// hand-built object. Returns ok=true when every entry verifies; on failure ok=false and failed lists
 	// the entries that did not verify.
@@ -202,23 +194,6 @@ func (s *Service) SignPlaylist(raw []byte, ts time.Time) ([]byte, error) {
 	return s.appendFeedSignature(raw, ts)
 }
 
-// ValidatePlaylistGroup implements ValidatorSigner.
-func (s *Service) ValidatePlaylistGroup(raw []byte) (*playlistgroup.Group, error) {
-	g, err := dp1.ParseAndValidatePlaylistGroup(raw)
-	if err != nil {
-		return nil, err
-	}
-	if g == nil {
-		return nil, fmt.Errorf("dp1: ParseAndValidatePlaylistGroup returned nil document")
-	}
-	return g, nil
-}
-
-// SignPlaylistGroup implements ValidatorSigner (feed role per playlist-group examples).
-func (s *Service) SignPlaylistGroup(raw []byte, ts time.Time) ([]byte, error) {
-	return s.appendFeedSignature(raw, ts)
-}
-
 // ValidateChannel implements ValidatorSigner.
 func (s *Service) ValidateChannel(raw []byte) (*channels.Channel, error) {
 	ch, err := dp1.ParseAndValidateChannel(raw)
@@ -240,11 +215,6 @@ func (s *Service) SignChannel(raw []byte, ts time.Time) ([]byte, error) {
 // Returns ok=true when all signatures verify; ok=false with failed[] on any verification failure.
 func (s *Service) VerifyPlaylistSignatures(raw []byte) (bool, []playlist.Signature, error) {
 	return sign.VerifyPlaylistSignatures(raw)
-}
-
-// VerifyPlaylistGroupSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyPlaylistGroupSignatures.
-func (s *Service) VerifyPlaylistGroupSignatures(raw []byte) (bool, []playlist.Signature, error) {
-	return sign.VerifyPlaylistGroupSignatures(raw)
 }
 
 // VerifyChannelSignatures implements ValidatorSigner; delegates to dp1-go sign.VerifyChannelSignatures.

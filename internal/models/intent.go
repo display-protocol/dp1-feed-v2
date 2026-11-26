@@ -29,9 +29,8 @@ const (
 // Target types enumerate the resource kinds an intent may name; each maps to one route family and is
 // checked against the route the request arrived on, so an intent signed for one kind cannot act on another.
 const (
-	IntentTargetPlaylist      = "playlist"
-	IntentTargetPlaylistGroup = "playlist-group"
-	IntentTargetChannel       = "channel"
+	IntentTargetPlaylist = "playlist"
+	IntentTargetChannel  = "channel"
 )
 
 // IntentTarget binds an intent to exactly one stored resource. Both id and slug are checked against the

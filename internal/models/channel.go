@@ -8,7 +8,7 @@ import (
 )
 
 // ChannelCreateRequest is the JSON body for POST /api/v1/channels (extensions).
-// Playlists is an ordered list of playlist URIs, resolved the same way as for playlist-groups.
+// Playlists is an ordered list of playlist URIs, resolved to stored playlist rows by the executor.
 // Publisher is optional (channels extension); when present it is the single owner, otherwise the
 // publisher-role signers own the channel. Curators are attribution only.
 type ChannelCreateRequest struct {

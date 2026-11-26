@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/display-protocol/dp1-go/extension/channels"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
@@ -279,14 +278,6 @@ func TestIntegration_Visibility_containersListTheMembersTheyName(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
-	grpID := uuid.MustParse("d3000000-0000-4000-8000-000000000002")
-	if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-		ID: grpID, Slug: "vis-group",
-		Raw:       rawDoc(t, playlistgroup.Group{ID: grpID.String(), Slug: "vis-group", Title: "Group", Playlists: uris, Created: "2026-01-01T00:00:00Z"}),
-		Playlists: members,
-	}); err != nil {
-		t.Fatalf("CreatePlaylistGroup: %v", err)
-	}
 
 	wantMembers := []string{"member-unlisted", "member-listed", "member-ingested"}
 	for _, tc := range []struct {
@@ -294,7 +285,6 @@ func TestIntegration_Visibility_containersListTheMembersTheyName(t *testing.T) {
 		p    store.ListPlaylistsParams
 	}{
 		{"channel filter", store.ListPlaylistsParams{Limit: 100, ChannelFilter: "vis-channel"}},
-		{"playlist-group filter", store.ListPlaylistsParams{Limit: 100, PlaylistGroupFilter: "vis-group"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, _, err := st.ListPlaylists(ctx, &tc.p)
@@ -321,11 +311,6 @@ func TestIntegration_Visibility_containersListTheMembersTheyName(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertDeepEqual(t, "channel members", wantMembers, playlistSlugs(inChannel))
-		inGroup, err := st.ListPlaylistsInGroup(ctx, "vis-group")
-		if err != nil {
-			t.Fatal(err)
-		}
-		assertDeepEqual(t, "group members", wantMembers, playlistSlugs(inGroup))
 	})
 
 	t.Run("directories still leave the members out", func(t *testing.T) {

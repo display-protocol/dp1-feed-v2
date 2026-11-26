@@ -16,9 +16,20 @@
 
 ## Resource naming and URL shape
 
-- **Plural resource segments:** `/api/v1/playlists`, `/api/v1/playlist-groups`, `/api/v1/channels`, `/api/v1/playlist-items`.
-- **Multi-word segments** use **kebab-case** (e.g. `playlist-items`, `playlist-groups`).
-- **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for groups and channels).
+- **Plural resource segments:** `/api/v1/playlists`, `/api/v1/channels`, `/api/v1/playlist-items`.
+- **Multi-word segments** use **kebab-case** (e.g. `playlist-items`).
+- **Single resource:** `/api/v1/playlists/{id}` where `{id}` is UUID or **slug** (same pattern for channels).
+
+**Playlist-groups are gone.** DP-1 removed the beta Playlist-Group (Exhibition) object on 2026-07-31;
+Channels supersede it. Every `/api/v1/playlist-groups` route (list, read, create, replace, delete) is
+unregistered and answers the generic **`404` `not_found`** through the router's NoRoute handler — no
+`410` and no bespoke handler, so a removed route reads exactly like any other missing endpoint. The one
+remaining trace is the `playlist-group` list filter: a non-empty `?playlist-group=` on
+`GET /api/v1/playlists` or `GET /api/v1/playlist-items` is a **`400` `bad_request`** whose message points
+at `channel`. It is refused rather than ignored because an ignored filter would hand back the unfiltered
+list with a `200` that looks correct. Rows already stored in `playlist_groups` / `playlist_group_members`
+stay in the database for storage only: the application never reads or writes them, though deleting a
+playlist still cascades its membership rows out of `playlist_group_members` (see `docs/architecture.md`).
 
 Path parameter name in OpenAPI for collections is `id` (UUID or slug), not two separate path params.
 **Feed-wide resolution rule:** a value that parses as a UUID is an id and is looked up by id only;
@@ -43,16 +54,15 @@ would let a lookup resolve a value a filter could not, or vice versa.
 **Scope (API v1):** Strong **ETag** support applies only to **GET** of a **single** resource by path:
 
 - `GET /api/v1/playlists/{id}`
-- `GET /api/v1/playlist-groups/{id}`
 - `GET /api/v1/channels/{id}` (when extensions are enabled)
 - `GET /api/v1/playlist-items/{id}`
 
-**Not in scope for v1:** Paginated **list** GETs (`/playlists`, `/playlist-groups`, `/channels`, `/playlist-items`) and metadata endpoints (`/health`, **`GET /api/v1`**) do **not** send `ETag`. Clients should not rely on conditional requests for those routes until explicitly documented in a future revision.
+**Not in scope for v1:** Paginated **list** GETs (`/playlists`, `/channels`, `/playlist-items`) and metadata endpoints (`/health`, **`GET /api/v1`**) do **not** send `ETag`. Clients should not rely on conditional requests for those routes until explicitly documented in a future revision.
 
 **Semantics:**
 
 - **`ETag` response header:** Strong entity-tag, a quoted **SHA-256** hexadecimal digest.
-  - For **playlists, playlist-groups and playlist-items** it is computed over the **exact UTF-8 JSON bytes** of the response body, so it changes exactly when the encoded JSON would change.
+  - For **playlists and playlist-items** it is computed over the **exact UTF-8 JSON bytes** of the response body, so it changes exactly when the encoded JSON would change.
   - For **channels** it is computed over those bytes **plus the channel's current member state** — each listed playlist's id and stored generation, in membership order. A channel document lists its members by URL only and is served byte-for-byte as signed, so the bytes alone cannot reflect a member being replaced or deleted; the tag does. Consequence: after a member `PUT` or `DELETE`, a conditional `GET` with the old tag returns **`200`** with a **byte-identical** body and a **new** tag. That `200` is the signal to re-check the channel's members; do not treat an unchanged body as "nothing changed". The channel's own `updated_at`-based generation (the `409` check and the membership cursor) does **not** move on a member edit.
 - **`If-None-Match` request header (optional):** If the value matches the current ETag for that resource, the server responds with **`304 Not Modified`** and an **empty** body. This avoids re-downloading unchanged documents.
 - **`If-None-Match: *`** does not produce 304 when a representation exists (normal HTTP semantics).
@@ -65,7 +75,7 @@ would let a lookup resolve a value a filter could not, or vice versa.
 
 When notification clients are configured (see `DEVELOPMENT.md`), the feed delivers a signed `channel.added`, `channel.updated` or `channel.deleted` event carrying the canonical channel URL after the mutation commits. Events are best-effort and request-path only.
 
-**A member playlist write is a channel change.** `PUT` or `DELETE` of a playlist emits **`channel.updated` once for every channel that lists it**, in addition to changing each such channel's `ETag` (above). The event does not say which member changed or whether the channel document itself changed — the document bytes may be identical — so a consumer should re-fetch the channel and its members rather than short-circuit on a document hash. After a member `DELETE` the channel keeps listing the deleted URI, which now resolves to `404` (see "Reference-only ingest"). Fan-out is paced, not capped: with many listing channels, delivery proceeds a few at a time within the request's remaining deadline, and channels not reached in time are not notified — the same best-effort posture every channel event has. Playlist-groups have no notifications.
+**A member playlist write is a channel change.** `PUT` or `DELETE` of a playlist emits **`channel.updated` once for every channel that lists it**, in addition to changing each such channel's `ETag` (above). The event does not say which member changed or whether the channel document itself changed — the document bytes may be identical — so a consumer should re-fetch the channel and its members rather than short-circuit on a document hash. After a member `DELETE` the channel keeps listing the deleted URI, which now resolves to `404` (see "Reference-only ingest"). Fan-out is paced, not capped: with many listing channels, delivery proceeds a few at a time within the request's remaining deadline, and channels not reached in time are not notified — the same best-effort posture every channel event has.
 
 ---
 
@@ -75,7 +85,7 @@ When notification clients are configured (see `DEVELOPMENT.md`), the feed delive
 - **`displayAt`** — optional ISO 8601 datetime on a playlist item (same level as `source`, not inside `display`). Under playlist extension validation, accepted wire forms per §3.5.2 are local datetime with seconds and no timezone (`2026-07-21T00:00:00`, display-locale local), or absolute RFC 3339 date-time with `Z`/colon offset. Date-only (`YYYY-MM-DD`) and compact offset without colon are **not** accepted by that extension validator. This feed stores and returns the item metadata; it does not compute playback eligibility.
 - **`inlineManifest`** — optional complete Ref Manifest carried on a playlist item (same level as `source`) instead of behind `ref`, per §3.6. Under playlist extension validation it is checked against the unmodified ref-manifest schema, so a malformed manifest fails the whole write with **`400`**. With extensions **off**, the core schema does not describe the field and core DP-1 tolerates unknown ones, so the manifest is stored and returned **unchecked** (same posture as `displayAt`). The manifest is **not** returned byte-identical to the one submitted — signing and JSONB storage re-encode it — so do not hash, diff, or cache the returned blob. The feed does not fetch `ref`, merge the two, or apply the §3.6 precedence (a fetched `ref` manifest wins, the inline copy is the offline fallback) — that resolution belongs to players. The manifest is part of the signed payload, with no `refHash` counterpart of its own.
 - **`contentRating` / `contentReasons`** — optional Content Rating Extension v0.1.0 members on a playlist item (same level as `source`). Open vocabulary: `general` and `mature` are defined, an unrecognised value reads as unrated. Declared by the request models since the dp1-go v0.6.2 bump; before it the strict decoder answered them with **`400`** naming the member, so a publisher that signs them (dp1-publisher#26) could not publish a labelled item at all. Stored and returned as sent. Every playlist write (and every playlist fetched by URL during ingest) is validated against the content-rating overlay whether or not `extensions.enabled` is set, so a wrong-typed `contentRating` or an empty `contentReasons` entry is a **`400`**. The feed still does not check the label against the defined vocabulary (an unrecognised label is valid and reads as unrated) and applies no content policy — players do, on the signed document.
-  - **Two size limits apply.** Inbound bodies are capped by `server.max_request_bytes` (default 5 MiB, **`413`** beyond it), and a playlist fetched *by URL* during group/channel ingest is capped by `playlist.fetch_max_body_bytes` (default 4 MiB). A playlist carrying large inline manifests can therefore be publishable directly yet un-ingestable by another deployment. `playlist_item_index` also holds a second full copy of each manifest, which `GET /api/v1/playlist-items` returns up to 100 rows at a time. Size inline manifests with all three in mind.
+  - **Two size limits apply.** Inbound bodies are capped by `server.max_request_bytes` (default 5 MiB, **`413`** beyond it), and a playlist fetched *by URL* during channel ingest is capped by `playlist.fetch_max_body_bytes` (default 4 MiB). A playlist carrying large inline manifests can therefore be publishable directly yet un-ingestable by another deployment. `playlist_item_index` also holds a second full copy of each manifest, which `GET /api/v1/playlist-items` returns up to 100 rows at a time. Size inline manifests with all three in mind.
 
 ---
 
@@ -100,7 +110,7 @@ one **owner set** per document with a single rule, applied to every resource kin
   matches a signature's `kid`. They sit inside the signed bytes, so no
   relayer can change who owns the document without breaking every signature.
 - **Otherwise the single owner-role signer owns it.** A document with no declaration is accepted only when
-  it carries **exactly one** signature in the **owner role** (`curator` for playlists and playlist-groups,
+  it carries **exactly one** signature in the **owner role** (`curator` for playlists,
   `publisher` for channels), and that key is its sole owner. Two or more owner-role signatures with no
   declaration are refused (**`400` `bad_request`**). The reason is that signing is permissionless and
   `signatures` sits outside the signed bytes: anyone who sees a document before this feed does can append
@@ -108,20 +118,7 @@ one **owner set** per document with a single rule, applied to every resource kin
   gain delete and veto authority over the author's document. Without a declaration the feed cannot tell a
   co-author from that relayer, so it does not guess. Co-ownership is available only through the
   declaration, which is the one place it is tamper-proof. This is what lets core-only documents through,
-  as the spec allows. A playlist-group's `curator` is a display name in the core schema, not a key, so a
-  group always has exactly one owner — which matches the spec's singular `curator`.
-- **A group's `curator` string, when it names a signer, is its owner.** Under the previous contract the
-  key named by a group's signed `curator` string owned it, matched against signature kids regardless of
-  role, and other keys could co-sign in any role without authority. Stored rows from that era may
-  therefore carry several curator-role signatures, or an owner who signed under a non-curator role. They
-  are resolved by that signed declaration first: if `curator` is the kid of any of the row's client
-  signatures (the feed's own server-added `feed` signature never counts, so a display name that happens
-  to equal the feed's key does not make the feed the owner), that key is the owner; otherwise the single
-  curator-role signer is; otherwise (several curator-role
-  signers, none named) no key can replace or delete the row (**`403`** with a message saying so) until an
-  operator migrates it. To keep new rows unambiguous under the same resolution, a submitted group whose
-  `curator` names one of its signers must name the curator-role signer (**`400`** otherwise); a `curator`
-  that names no signer is a display name and is unconstrained.
+  as the spec allows.
 
 An **authorizing signature** must be *declared* (kid in the owner set), *proven* (verifies
 cryptographically) **and** *acting as owner* (`role` equals the owner role). The role check is what stops
@@ -161,11 +158,11 @@ Three postures, by verb:
    creation is the resource's **owners**.
 
 2. **PUT (replace) — owner-bound, owner-monotone, replay-bound.** The body is a route-specific replace envelope
-   (**`PlaylistReplaceRequest`**, **`PlaylistGroupReplaceRequest`**, **`ChannelReplaceRequest`**): `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
+   (**`PlaylistReplaceRequest`**, **`ChannelReplaceRequest`**): `{ "document": <full re-signed document>, "authorization": <signed intent> }`. Both halves
    are verified independently — one without the other authorizes nothing.
    - **Document:** **identity is immutable and validated, not substituted** — the submitted `id`, `slug`,
      and document `created` must **equal** the stored resource's, else **`400`** (`created` is compared as
-     an instant, since formatting may differ). For **playlists** the **owner set may grow but never shrink** (playlist-groups and channels are strictly single-owner, see below): every stored
+     an instant, since formatting may differ). For **playlists** the **owner set may grow but never shrink** (channels are strictly single-owner, see below): every stored
      owner must still be in the incoming owner set (**`403` `forbidden`** otherwise — removal would let one
      co-owner evict another), and **every key entering the owner set must sign the incoming document in the
      owner role** (**`403`** otherwise — that proves key possession and consent, so an owner cannot attribute
@@ -175,9 +172,7 @@ Three postures, by verb:
      therefore a single owner that cannot change, and an undeclared channel is equally single-owner (its
      one `publisher`-role signer; a second is **`400`**), so a channel's owner can never change or be
      joined; channel `curators` are attribution and may change
-     freely. A playlist-group has no owner declaration at all, so its single owner can never change or be
-     joined: the replacement must carry the same key's `curator`-role signature, a second one is
-     **`400`**, and only the `curator` display name may change. All signatures must cryptographically verify (**`400`**) and at least one must be an
+     freely. All signatures must cryptographically verify (**`400`**) and at least one must be an
      authorizing signature from a **stored** owner (**`403`**). Membership is permanent once granted, and
      a deleted id cannot be re-created, so key rotation is "add the new key" only; self-removal via the
      intent is the natural extension and is not built.
@@ -209,7 +204,7 @@ Three postures, by verb:
    stale on **every** feed — which is what makes this hold for documents mirrored across feeds.
 
 3. **DELETE — owner-bound, signed delete-intent.** The body is a route-specific delete intent
-   (`PlaylistDeleteRequest`, `PlaylistGroupDeleteRequest`, `ChannelDeleteRequest`)
+   (`PlaylistDeleteRequest`, `ChannelDeleteRequest`)
    (`{ action: "delete", target: { type, id, slug }, created, signatures }`). The intent must target the
    exact stored resource (`id` and `slug`), its `created` must fall within the server's freshness window
    (`auth.intent_max_clock_skew`, default 5m — bounds replay after a same-id re-create), its signatures
@@ -218,22 +213,22 @@ Three postures, by verb:
    feed-local. The delete is
    conditional on the generation observed at authorization (**`409`** if the resource changed in between),
    and it **tombstones the id** in the same transaction.
-   - **A third party cannot block it.** Creation is open, so anyone may publish a group or channel
+   - **A third party cannot block it.** Creation is open, so anyone may publish a channel
      referencing a playlist they do not own. Those references do **not** prevent the playlist owner's
      delete: the membership links are removed with the playlist. Otherwise a stranger could veto an
      owner's deletion indefinitely, since only that stranger may edit their own document.
    - The referencing documents are **not** modified — they are signed, and the feed does not own them. They
      keep listing the deleted playlist's URI (now a **`404`**), and a later `PUT` of one will fail to
      resolve that reference until its owner publishes an updated document. Membership rows are a derived
-     index over those documents, not content in their own right: a group is served from its stored
-     document, and the rows only back the `?playlist-group=` / `?channel=` list filters.
+     index over those documents, not content in their own right: a channel is served from its stored
+     document, and the rows only back the `?channel=` list filters and the channel's member state.
 
-**Membership ingestion is reference-only.** When a group or channel names a playlist URL, the feed
+**Membership ingestion is reference-only.** When a channel names a playlist URL, the feed
 **links** that playlist but never modifies it. A referenced id already stored here is linked as-is —
 whatever the remote document says is ignored, and its stored bytes, slug, owner and item index are
 untouched. Identity is resolved **before** the fetched body is judged, so this holds even when the origin
 has since rotted, rotated keys, or started serving something malformed: the id is enough to link the
-stored playlist, and a member's origin can never retroactively block groups that reference it.
+stored playlist, and a member's origin can never retroactively block channels that reference it.
 
 If the origin is **unreachable**, a remote URI falls back to the playlist it last resolved to, recorded at
 ingest. Unreachable means no usable answer — DNS failure, refused connection, timeout, or a `5xx`/`429`.
@@ -251,7 +246,7 @@ dropped when the playlist is deleted, so a retired id cannot be relinked. Refere
 referenced id that is *new* to this feed is being created, so it is held to the same bar as
 `POST`: the fetched document must carry a verifying `curator`-role signature from one of its owners, and
 must not name a tombstoned id. Consequently **a member playlist only ever changes through its own owner's `PUT`** —
-re-ingesting a group does not refresh member bodies. (Without this, any client able to create a channel
+re-ingesting a channel does not refresh member bodies. (Without this, any client able to create a channel
 could host a document reusing another owner's playlist id and overwrite it; verifying signatures alone
 would not help, since an attacker self-signs the spoof with their own key.) Cross-feed propagation is the
 webhook path's job, not ingestion's.
@@ -329,7 +324,7 @@ the remainder is discarded, never buffered — at most 256 KiB of it is read, or
 
 ## Pagination, sorting, and filtering
 
-**Lists** (`playlists`, `playlist-groups`, `channels`, `playlist-items`) share the parameters below. The
+**Lists** (`playlists`, `channels`, `playlist-items`) share the parameters below. The
 playlist and playlist-item lists also leave out playlists that are not listed (see *Playlist visibility*).
 
 | Query param | Meaning |
@@ -339,37 +334,36 @@ playlist and playlist-item lists also leave out playlists that are not listed (s
 | **`sort`** | **`asc`** or **`desc`**; default **`asc`**. Direction only — the key it applies to is below. |
 
 **Ordering key.** Every list orders by `created_at`, with one exception: `GET /api/v1/playlists` with a
-`channel` or `playlist-group` filter orders by **membership position** — the order the signed channel or
-group document lists its playlists — because that is what a player rendering the container needs, and
-`created_at` order would move a playlist to the end of every container the moment it is republished under
-a new id. A playlist the document lists at several positions is returned once per position. An unknown
-container id or slug yields an empty page, not **`404`** (the filter is a filter, not a lookup; use
+`channel` filter orders by **membership position** — the order the signed channel document lists its
+playlists — because that is what a player rendering the channel needs, and `created_at` order would move a
+playlist to the end of every channel the moment it is republished under a new id. A playlist the document
+lists at several positions is returned once per position. An unknown channel id or slug yields an empty page, not **`404`** (the filter is a filter, not a lookup; use
 `GET /api/v1/channels/{id}` to tell "no such channel" from "no members"). `GET /api/v1/playlist-items` keeps
-`created_at` order under the same filters (its index is keyed on the playlist's `created_at`). On both
+`created_at` order under the same filter (its index is keyed on the playlist's `created_at`). On both
 lists the `channel` filter requires **extensions**: with extensions disabled the response is **`404`**
 `extensions_disabled` before any filtering, so the empty page for an unknown channel is a guarantee only on
-deployments with extensions enabled (the `playlist-group` filter has no such gate).
+deployments with extensions enabled.
 
 **Cursors are bound to the ordering that issued them.** A token from a membership-ordered page cannot be
 used on a `created_at`-ordered list or vice versa, and a token that cannot be decoded, or whose fields are
 missing, null or out of range, is refused — all **`400` `bad_request`** — rather than silently restarting
 the list from the wrong place. A membership token is additionally bound to the **container** (kind and
 id) and the **`sort` direction** it was issued for, because a position is only a page boundary relative
-to those: presenting it with another existing `channel` / `playlist-group`, or the other `sort`, is
-**`400`**. It is also bound to the container's **membership revision** (its `updated_at`, which the
-schema keeps strictly increasing across every write to a row): a replace of the channel or group
-rebuilds its positions under the same id, so a token issued before the replace is refused (**`400`**)
+to those: presenting it with another existing `channel`, or the other `sort`, is **`400`** — as is a
+token issued for a playlist-group before those were removed. It is also bound to the container's
+**membership revision** (its `updated_at`, which the schema keeps strictly increasing across every write
+to a row): a replace of the channel rebuilds its positions under the same id, so a token issued before the replace is refused (**`400`**)
 and the client restarts from the first page, rather than assembling an order that matches neither
 signed document. An unknown container stays the empty page with or without a well-formed token — a client
 still paging a container deleted in the meantime sees an empty terminal page, not an error. A
 `created_at` token binds the ordering key only; its `(created_at, id)` boundary is the same row under
 either direction, so it may be presented with either `sort`.
 
-**Container filters resolve by id or by slug, never both.** On both `GET /api/v1/playlists` and
-`GET /api/v1/playlist-items`, a `channel` / `playlist-group` value that parses as a UUID is the id and
-anything else is a slug — the feed-wide rule above, so a filter resolves exactly what
-`GET /api/v1/channels/{id}` would. Slugs are client-chosen and create is open, so a container whose slug equals
-another container's UUID string is creatable; matching both would merge the two, interleaving a
+**The channel filter resolves by id or by slug, never both.** On both `GET /api/v1/playlists` and
+`GET /api/v1/playlist-items`, a `channel` value that parses as a UUID is the id and anything else is a
+slug — the feed-wide rule above, so a filter resolves exactly what `GET /api/v1/channels/{id}` would.
+Slugs are client-chosen and create is open, so a channel whose slug equals another channel's UUID string
+is creatable; matching both would merge the two, interleaving a
 position-ordered list and leaking the decoy's items into a UUID-filtered item list.
 
 **Envelope:** `items` (array), `hasMore` (boolean), `cursor` (string, omitted when no next page). See `ListResponse` in OpenAPI and `internal/httpserver/dto.go`.
@@ -377,15 +371,16 @@ position-ordered list and leaking the decoy's items into a UUID-filtered item li
 **Filtering (`playlist-items` and `playlists` lists):**
 
 - **`channel`** — restrict to playlists (or, on `GET /api/v1/playlist-items`, items) that belong to that channel (UUID or slug). On both lists it requires **extensions**; if extensions are off, the response is **`404`** `extensions_disabled` (same as other channel features). The empty page for an unknown channel applies only when extensions are enabled.
-- **`playlist-group`** — restrict to playlists that belong to that group (UUID or slug).
-- These two query params are **mutually exclusive** where the implementation enforces it; sending both may yield **400**.
+- **`playlist-group`** — **removed** with DP-1 playlist-groups. Any non-empty value is **`400`
+  `bad_request`** with a message pointing at `channel`, on both lists, whatever else the request carries;
+  an empty or whitespace-only value is treated as absent. Refused rather than ignored, because ignoring it
+  would return the unfiltered list.
 
-**Attribution filters (`playlists`, `playlist-groups`, `channels` lists):**
+**Attribution filters (`playlists`, `channels` lists):**
 
 | Endpoint | Param | Matches |
 | -------- | ----- | ------- |
 | `GET /api/v1/playlists` | **`curator`** | an entity in the signed `curators` array whose `key` equals the value |
-| `GET /api/v1/playlist-groups` | **`curator`** | the group's `curator` string |
 | `GET /api/v1/channels` | **`curator`** | an entity in the channel's `curators` array whose `key` equals the value |
 | `GET /api/v1/channels` | **`publisher`** | the channel's `publisher.key` |
 
@@ -399,21 +394,20 @@ position-ordered list and leaking the decoy's items into a UUID-filtered item li
     is a replace-time rule), so a match is an owner and not necessarily a signer.
   - A channel's `publisher` is its owner and had to sign the create. Channel `curators` are attribution
     only and may name any key.
-  - A group's `curator` is a display name in DP-1 core. It may hold a name or a key; when it names one of the
-    group's signers it must be the `curator`-role signer, but a key that did not sign at all is accepted. A
-    match is therefore only a claim the document makes.
 - Matching is **exact and case-sensitive** on the stored value, the same comparison ownership uses for
   `kid` vs `key`; the query value is trimmed, the stored value is not. Different spellings of one identity
   (e.g. mixed-case `did:pkh` addresses) are different values.
 - Ordering stays `created_at`, so the cursor is the ordinary `created_at` token and is not bound to the
   filter: presenting it with other filter values yields the rows past that boundary that match the new
   filters. An unknown value is an empty page, not **`404`**.
-- On `GET /api/v1/playlists`, `curator` cannot be combined with `channel` or `playlist-group` (**`400`**):
-  those order by membership position and one page cannot follow both keysets. On `GET /api/v1/channels`,
+- On `GET /api/v1/playlists`, `curator` cannot be combined with `channel` (**`400`**): that orders by
+  membership position and one page cannot follow both keysets. On `GET /api/v1/channels`,
   `curator` and `publisher` together are ANDed.
 - Backed by indexes over the stored `body` (migration 000009): GIN `jsonb_path_ops` for the `curators`
   arrays, hash indexes for the scalar fields. Both store hashes rather than the values, because the values
-  are client-supplied and unbounded and a btree entry over about 2.7 kB would fail the insert.
+  are client-supplied and unbounded and a btree entry over about 2.7 kB would fail the insert. (The
+  migration also indexes the `curator` string of `playlist_groups`; that table is kept for storage only and
+  no longer read.)
 
 ## Playlist visibility
 
@@ -427,30 +421,28 @@ who has the UUID can pass it on. The Feral File app marks every playlist a perso
 fails closed: `unlisted`, a value a later spec version defines, a different case, an empty string, or any
 non-string value. Any string is accepted on write, because the spec's vocabulary is open; a non-string
 value, `null` included, is a `400` naming the member (`models.Visibility`). A remote member ingested
-through a group or channel is checked by dp1-go instead: with the playlists extension enabled its schema
-refuses every non-string value, and with it disabled dp1-go refuses all but `null`, which is stored as its
-origin signed it and which the listing rule keeps out.
+through a channel is checked by dp1-go instead: the playlists extension schema refuses every non-string
+value. Channels exist only with extensions enabled, so no member is ingested without that check.
 
 | Surface | A playlist that is not listed |
 | ------- | ----------------------------- |
 | `GET /api/v1/playlists/{uuid}` | Served, as for any playlist. |
 | `GET /api/v1/playlists/{slug}`, and `PUT` / `DELETE` by slug | `404`, exactly as for a slug nobody holds. |
-| A group's or channel's same-origin reference by slug URL | Fails exactly as a reference to a missing slug; reference it by UUID. |
+| A channel's same-origin reference by slug URL | Fails exactly as a reference to a missing slug; reference it by UUID. |
 | `GET /api/v1/playlists` unfiltered, or with `curator` | Left out. |
-| `GET /api/v1/playlists` with `channel` / `playlist-group` | Included where that container names it. |
+| `GET /api/v1/playlists` with `channel` | Included where that channel names it. |
 | `GET /api/v1/playlist-items` unscoped | Its items are left out. |
-| `GET /api/v1/playlist-items` with `channel` / `playlist-group` | Its items are included where that container names it. |
+| `GET /api/v1/playlist-items` with `channel` | Its items are included where that channel names it. |
 | `GET /api/v1/playlist-items/{id}` | Answers only from listed playlists: an item held only by playlists that are not listed is `404`. Among listed copies the oldest playlist (by `created_at`) answers. |
-| `GET /api/v1/channels/{id}`, `GET /api/v1/playlist-groups/{id}` | Unchanged: the container's signed document names its members by URL. |
+| `GET /api/v1/channels/{id}` | Unchanged: the channel's signed document names its members by URL. |
 
 Why each line:
 
 - **Directories, curator filter included.** A curator filter enumerates playlists the caller did not
   name. Without the rule, one link shared with a friend would hand out a list of the same person's other
   unlisted playlists.
-- **Containers.** A channel or group that lists an unlisted playlist names it in its own signed document,
-  which is already public. Its member lists repeat what that document says; the container's author chose
-  to name it.
+- **Channels.** A channel that lists an unlisted playlist names it in its own signed document, which is
+  already public. Its member lists repeat what that document says; the channel's author chose to name it.
 - **Slugs.** The feed never derives a slug. The client supplies one, it is signed, and it must be unique.
   Clients usually derive it from the title (the Feral File app sends the title plus the first 8 hex digits
   of the id, about 32 bits), so it is far easier to guess than a random UUID. Slug resolution therefore
@@ -475,7 +467,7 @@ reference is stored from its own signed bytes, so its visibility applies from th
 
 - **POST** — create (open); body must carry an owner-role signature from one of its owners (see Authentication).
 - **GET** — fetch one or list.
-- **PUT** — full replacement of the document body (playlist, group, channel); owner-bound; a playlist's declared owners may be added but never removed, while a group's or channel's single owner cannot change (see Authentication).
+- **PUT** — full replacement of the document body (playlist, channel); owner-bound; a playlist's declared owners may be added but never removed, while a channel's single owner cannot change (see Authentication).
 - **DELETE** — remove resource (membership tables follow DB CASCADE rules); body is a route-specific signed delete-intent.
 - **PATCH** — not supported. A partial update is merged server-side, so no client signature can cover the result; edit by submitting a fully re-signed **PUT**.
 
@@ -499,10 +491,11 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | HTTP status | `error` (typical) | When |
 | ----------- | ----------------- | ---- |
 | **400** | `bad_request` | Malformed input, bad cursor/limit, constraint violations surfaced as HTTP 400 from handlers/store. |
-| **400** | `bad_request` | A group or channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
-| **400** | `bad_request` | The playlists a group or channel references exceed `playlist.max_resolved_bytes` in total (`ErrResolvedTooLarge`). The reference cap bounds the count, this bounds their combined size — the two multiply, so both are needed. |
+| **400** | `bad_request` | A channel referencing more playlists than `playlist.max_playlist_references` (`ErrTooManyReferences`); the count is bounded before any reference is resolved. |
+| **400** | `bad_request` | The playlists a channel references exceed `playlist.max_resolved_bytes` in total (`ErrResolvedTooLarge`). The reference cap bounds the count, this bounds their combined size — the two multiply, so both are needed. |
 | **400** | `bad_request` | A reference URI longer than 2048 bytes (`ErrPlaylistURITooLong`). |
-| **400** | `bad_request` | A group or channel referencing no playlists at all (`ErrNoPlaylistReferences`); the schemas declare `minItems: 1`. |
+| **400** | `bad_request` | A non-empty `playlist-group` filter on `GET /api/v1/playlists` or `GET /api/v1/playlist-items`: the filter was removed with DP-1 playlist-groups; use `channel`. |
+| **400** | `bad_request` | A channel referencing no playlists at all (`ErrNoPlaylistReferences`); the schemas declare `minItems: 1`. |
 | **400** | `validation_error` | DP-1 JSON Schema / parse validation failed after signing path (`IsDP1ValidationError`). |
 | **400** | `signature_invalid` | Signing or signature-related failure (`IsDP1SignError`). |
 | **400** | `signature_verification_failed` | Cryptographic signature verification failed for user-provided signatures, or a create carries no owner-role signature from an owner (`IsSignatureVerificationError`). |
@@ -513,7 +506,7 @@ Mapping is implemented in `internal/httpserver/errors.go`. Common cases:
 | **403** | `forbidden` | Signature is valid but the signer is not an owner acting in the owner role, a PUT tried to remove a stored owner, or it added an owner whose key did not sign the document in the owner role (`IsForbiddenError`). |
 | **404** | `not_found` | Unknown id/slug or missing row. |
 | **404** | `not_found` | The target was **deleted** between authorization and the write. Deliberately not a `409`: the id is tombstoned, so "re-read and retry" could never succeed, whereas `404` is both accurate and terminal. A resource deleted *and re-created* in that window is a `409` instead, because the row exists and a retry can succeed. |
-| **404** | `not_found` | No such endpoint: an unrecognised path, or a method this API does not serve on that path (for example `PATCH`, which was removed). Unmatched requests answer in the same `{error, message}` envelope as everything else rather than the framework's plain-text default, so a client parsing errors uniformly does not hit a different shape at the one place it least expects. |
+| **404** | `not_found` | No such endpoint: an unrecognised path, or a method this API does not serve on that path (for example `PATCH`, which was removed). Every `/api/v1/playlist-groups` route answers this way since playlist-groups were removed. Unmatched requests answer in the same `{error, message}` envelope as everything else rather than the framework's plain-text default, so a client parsing errors uniformly does not hit a different shape at the one place it least expects. |
 | **404** | `extensions_disabled` | Channel/extension APIs used while extensions are off. |
 | **409** | `conflict` | The resource changed between authorization and the write (concurrent write, or deleted and re-created). Re-read and retry. |
 | **409** | `conflict` | `POST` collided with a **live** resource: the `id` or `slug` is already taken. A lost-response retry — `GET` the resource; a slug collision needs a different `slug`. Do **not** republish under a new id. |
@@ -531,7 +524,7 @@ Clients should branch on **`error`** (stable) and treat **`message`** as diagnos
 
 - **200** — OK (GET, PUT).
 - **304** — Not Modified (single-resource GET only, when `If-None-Match` matches the current `ETag`; empty body).
-- **201** — Created (POST for new playlists, groups, channels as specified per path in OpenAPI).
+- **201** — Created (POST for new playlists and channels as specified per path in OpenAPI).
 
 ---
 

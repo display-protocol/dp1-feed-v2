@@ -146,23 +146,23 @@ func TestIntegration_VisibilityHTTP_containerReferenceBySlug(t *testing.T) {
 	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlists",
 		signedVisibilityPlaylist(t, priv, kid, unlistedID, "kept-off-lists", "e4000000-0000-4000-8000-000000000001", "unlisted"), http.StatusCreated)
 
-	group := func(id, slug, uri string) map[string]any {
-		return signedGroupBody(t, priv, kid, id, slug, slug, "2026-10-28T00:00:00Z", []string{uri})
+	channel := func(id, slug, uri string) map[string]any {
+		return signedChannelBody(t, priv, kid, id, slug, slug, "2026-10-28T00:00:00Z", []string{uri})
 	}
-	missing := doRawAnyStatus(t, srv, http.MethodPost, "/api/v1/playlist-groups",
-		group("e5000000-0000-4000-8000-000000000001", "points-at-nothing", "http://example.com/api/v1/playlists/no-such-slug"))
-	bySlug := doRawAnyStatus(t, srv, http.MethodPost, "/api/v1/playlist-groups",
-		group("e5000000-0000-4000-8000-000000000002", "points-at-slug", "http://example.com/api/v1/playlists/kept-off-lists"))
+	missing := doRawAnyStatus(t, srv, http.MethodPost, "/api/v1/channels",
+		channel("e5000000-0000-4000-8000-000000000001", "points-at-nothing", "http://example.com/api/v1/playlists/no-such-slug"))
+	bySlug := doRawAnyStatus(t, srv, http.MethodPost, "/api/v1/channels",
+		channel("e5000000-0000-4000-8000-000000000002", "points-at-slug", "http://example.com/api/v1/playlists/kept-off-lists"))
 	if missing.status == http.StatusCreated || bySlug.status != missing.status || bySlug.code != missing.code {
 		t.Fatalf("slug reference to an unlisted playlist answered %d %q; a missing slug answers %d %q — they must match", bySlug.status, bySlug.code, missing.status, missing.code)
 	}
-	mustDoRaw(t, srv, http.MethodPost, "/api/v1/playlist-groups",
-		group("e5000000-0000-4000-8000-000000000003", "points-at-id", "http://example.com/api/v1/playlists/"+unlistedID), http.StatusCreated)
+	mustDoRaw(t, srv, http.MethodPost, "/api/v1/channels",
+		channel("e5000000-0000-4000-8000-000000000003", "points-at-id", "http://example.com/api/v1/playlists/"+unlistedID), http.StatusCreated)
 
 	var members ListResponse[playlist.Playlist]
-	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlists?playlist-group=points-at-id", nil, http.StatusOK, &members)
+	mustDoJSON(t, srv, http.MethodGet, "/api/v1/playlists?channel=points-at-id", nil, http.StatusOK, &members)
 	if len(members.Items) != 1 || members.Items[0].ID != unlistedID {
-		t.Fatalf("group members: got %d, want the unlisted playlist the group names", len(members.Items))
+		t.Fatalf("channel members: got %d, want the unlisted playlist the channel names", len(members.Items))
 	}
 }
 

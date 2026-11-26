@@ -11,7 +11,6 @@ import (
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	"github.com/google/uuid"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
@@ -107,59 +106,12 @@ func TestIntegration_ListPlaylists_curatorFilter(t *testing.T) {
 		assertDeepEqual(t, "pages", []string{"b-only", "a-and-b", "a-as-name"}, append(playlistSlugs(page1), playlistSlugs(page2)...))
 	})
 
-	t.Run("refused with a container filter", func(t *testing.T) {
-		for _, p := range []*store.ListPlaylistsParams{
-			{Limit: 10, CuratorFilter: keyA, ChannelFilter: "some-channel"},
-			{Limit: 10, CuratorFilter: keyA, PlaylistGroupFilter: "some-group"},
-		} {
-			if _, _, err := st.ListPlaylists(ctx, p); !errors.Is(err, store.ErrInvalidListFilter) {
-				t.Fatalf("want ErrInvalidListFilter for %+v, got %v", p, err)
-			}
+	t.Run("refused with a channel filter", func(t *testing.T) {
+		p := &store.ListPlaylistsParams{Limit: 10, CuratorFilter: keyA, ChannelFilter: "some-channel"}
+		if _, _, err := st.ListPlaylists(ctx, p); !errors.Is(err, store.ErrInvalidListFilter) {
+			t.Fatalf("want ErrInvalidListFilter for %+v, got %v", p, err)
 		}
 	})
-}
-
-func TestIntegration_ListPlaylistGroups_curatorFilter(t *testing.T) {
-	st := newStore(t)
-	ctx := context.Background()
-
-	for _, g := range []struct{ id, slug, curator string }{
-		{"a2000000-0000-4000-8000-000000000001", "by-a", keyA},
-		{"a2000000-0000-4000-8000-000000000002", "by-name", "Gallery Curator"},
-		{"a2000000-0000-4000-8000-000000000003", "no-curator", ""},
-		{"a2000000-0000-4000-8000-000000000004", "also-a", keyA},
-	} {
-		gid := uuid.MustParse(g.id)
-		if err := st.CreatePlaylistGroup(ctx, &store.PlaylistGroupInput{
-			ID: gid, Slug: g.slug,
-			Raw: rawDoc(t, playlistgroup.Group{ID: gid.String(), Slug: g.slug, Title: g.slug, Curator: g.curator, Playlists: []string{}, Created: "2026-01-01T00:00:00Z"}),
-		}); err != nil {
-			t.Fatalf("create group %s: %v", g.slug, err)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-
-	for _, tc := range []struct {
-		name, curator string
-		want          []string
-	}{
-		{name: "key-shaped curator", curator: keyA, want: []string{"by-a", "also-a"}},
-		{name: "display-name curator", curator: "Gallery Curator", want: []string{"by-name"}},
-		{name: "exact, case-sensitive", curator: "gallery curator", want: []string{}},
-		{name: "no filter lists all", curator: "", want: []string{"by-a", "by-name", "no-curator", "also-a"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := st.ListPlaylistGroups(ctx, &store.ListPlaylistsParams{Limit: 10, Sort: store.SortAsc, CuratorFilter: tc.curator})
-			if err != nil {
-				t.Fatal(err)
-			}
-			slugs := make([]string, 0, len(got))
-			for _, r := range got {
-				slugs = append(slugs, r.Slug)
-			}
-			assertDeepEqual(t, "slugs", tc.want, slugs)
-		})
-	}
 }
 
 func TestIntegration_ListChannels_curatorAndPublisherFilters(t *testing.T) {

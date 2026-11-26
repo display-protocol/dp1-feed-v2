@@ -464,7 +464,7 @@ func TestValidate_notificationConfiguration(t *testing.T) {
 		{
 			// Without notification clients the only budget check used to be against the reserve, so a config
 			// could allow 30s per fetch while handing reference-resolving writes a 1s deadline. That is
-			// accepted at startup and then fails every group/channel write that actually fetches, which is
+			// accepted at startup and then fails every channel write that actually fetches, which is
 			// the worst combination: valid-looking config, unserveable requests.
 			name: "write timeout does not cover a fetch when no notification clients are configured",
 			mutate: func(cfg *Config) {

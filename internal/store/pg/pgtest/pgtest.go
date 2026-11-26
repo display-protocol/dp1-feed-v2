@@ -96,7 +96,9 @@ func (p *Provider) NewStore() store.Store {
 }
 
 // Cleanup implements [store.TestProvider].
-// Truncates all tables in dependency order (child tables before parents).
+// Truncates all tables the application writes, in dependency order (child tables before parents).
+// playlist_groups / playlist_group_members are kept by the migrations for storage only and never written
+// by the application; CASCADE clears any membership rows through their playlist FK regardless.
 func (p *Provider) Cleanup(t testing.TB) {
 	t.Helper()
 	ctx := context.Background()
@@ -104,9 +106,7 @@ func (p *Provider) Cleanup(t testing.TB) {
 TRUNCATE TABLE
 	playlist_item_index,
 	channel_members,
-	playlist_group_members,
 	channels,
-	playlist_groups,
 	playlists
 RESTART IDENTITY CASCADE`
 

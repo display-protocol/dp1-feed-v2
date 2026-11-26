@@ -14,7 +14,7 @@ var ErrListLimitExceeded = errors.New("list limit exceeds store maximum")
 var ErrInvalidCursor = errors.New("invalid cursor")
 
 // ErrInvalidListFilter is returned when a list query combines filters that have no single ordering: a
-// curator filter pages by created_at, a channel or playlist-group filter by membership position, so the
+// curator filter pages by created_at, a channel filter by membership position, so the
 // two cannot share one keyset. Maps to HTTP 400. The HTTP layer rejects the combination first; the store
 // refuses it too rather than silently dropping one filter.
 var ErrInvalidListFilter = errors.New("invalid list filter")

@@ -99,7 +99,7 @@ This creates two files:
 
 ### Automatic Timestamps
 
-The `playlists`, `playlist_groups`, and `channels` tables have an `updated_at` column maintained automatically by PostgreSQL triggers. You don't need to set it in your UPDATE statements—just modify `body` or other fields, and the trigger handles the timestamp.
+The `playlists` and `channels` tables (and the storage-only `playlist_groups` table, see `docs/architecture.md`) have an `updated_at` column maintained automatically by PostgreSQL triggers. You don't need to set it in your UPDATE statements—just modify `body` or other fields, and the trigger handles the timestamp.
 
 ## Testing
 
@@ -162,7 +162,7 @@ auth:
 
 playlist:
   fetch_timeout: 30s
-  max_playlist_references: 1000   # fan-out cap: playlist refs per group/channel
+  max_playlist_references: 1000   # fan-out cap: playlist refs per channel
   max_resolved_bytes: 67108864    # memory cap: total resolved playlist bytes per write
   signing_key_hex: 64-char-hex-encoded-ed25519-private-key
   public_base_url: https://feed.example
@@ -274,8 +274,8 @@ The `.env` file contains all necessary environment variables for Docker deployme
 - `DP1_FEED_DATABASE_URL` — PostgreSQL connection string (use `postgres` as hostname)
 - `DP1_FEED_INTENT_MAX_CLOCK_SKEW` — Freshness window for signed mutation intents, both PUT replace and DELETE (Go duration, default 5m)
 - `DP1_FEED_MAX_REQUEST_BYTES` — Inbound request body cap in bytes (default 5 MiB)
-- `DP1_FEED_MAX_PLAYLIST_REFERENCES` — Max playlist URIs one group/channel may reference (default 1000)
-- `DP1_FEED_MAX_RESOLVED_BYTES` — Total resolved-playlist bytes one group/channel write may hold (default 64 MiB)
+- `DP1_FEED_MAX_PLAYLIST_REFERENCES` — Max playlist URIs one channel may reference (default 1000)
+- `DP1_FEED_MAX_RESOLVED_BYTES` — Total resolved-playlist bytes one channel write may hold (default 64 MiB)
 - `DP1_FEED_SIGNING_KEY_HEX` — Ed25519 signing key (64 hex characters)
 - `DP1_FEED_LOG_DEBUG` — Enable debug logging
 - `DP1_FEED_LOG_SERVICE` — Stable service name in remote records (default `dp1-feed-v2`)
@@ -358,7 +358,7 @@ For Docker: `make up-infra` or `make up`. For local `go run`: ensure Postgres is
 **"unauthorized" API responses**  
 Mutating requests are authorized by signatures, not an API key. A `401 unauthorized` means the request
 body carried no `signatures` array; a `403 forbidden` means no signer is an owner acting in the owner role
-(`curator` for playlists and groups, `publisher` for channels — an owner key signing as `licensor` or
+(`curator` for playlists, `publisher` for channels — an owner key signing as `licensor` or
 `agent` does not count), or a PUT tried to remove a stored owner or add one without that key's owner-role
 signature. See [docs/api_design.md](docs/api_design.md#authentication-and-authorization).
 

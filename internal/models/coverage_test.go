@@ -7,7 +7,6 @@ import (
 
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 )
 
 // Request bodies are decoded with unknown fields rejected (internal/httpserver/bind.go). That makes the
@@ -22,7 +21,6 @@ func TestCreateRequestsCoverDocumentStructs(t *testing.T) {
 		doc  any
 	}{
 		{"playlist", PlaylistCreateRequest{}, playlist.Playlist{}},
-		{"playlist-group", PlaylistGroupCreateRequest{}, playlistgroup.Group{}},
 		{"channel", ChannelCreateRequest{}, channels.Channel{}},
 	}
 	for _, tc := range cases {

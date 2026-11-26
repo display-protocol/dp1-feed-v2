@@ -17,7 +17,6 @@ import (
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/extension/identity"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 	dp1sign "github.com/display-protocol/dp1-go/sign"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -203,37 +202,30 @@ func curatorEntities(kid string) []identity.Entity {
 	return []identity.Entity{{Name: "Curator", Key: kid}}
 }
 
-// signedGroupBody curator-signs a playlist-group (curator = kid) as the feed rebuilds it, returning the
-// POST/PUT JSON body. uris are the member playlist URIs, preserved verbatim in the signed document.
-func signedGroupBody(t *testing.T, priv ed25519.PrivateKey, kid, id, slug, title, created string, uris []string) map[string]any {
+// signedChannelBody publisher-signs a channel that declares kid as its publisher, returning the POST/PUT
+// JSON body. uris are the member playlist URIs, preserved verbatim in the signed document. It is the
+// vehicle for tests about playlist-reference ingestion, which every playlist-listing document shares.
+func signedChannelBody(t *testing.T, priv ed25519.PrivateKey, kid, id, slug, title, created string, uris []string) map[string]any {
 	t.Helper()
-	doc := playlistgroup.Group{
-		ID:        id,
-		Slug:      slug,
-		Title:     title,
-		Playlists: uris,
-		Created:   created,
-		Curator:   kid,
+	body := map[string]any{
+		"id":        id,
+		"created":   created,
+		"slug":      slug,
+		"title":     title,
+		"version":   "1.0.0",
+		"publisher": map[string]string{"name": "Publisher", "key": kid},
+		"playlists": uris,
 	}
-	unsigned, err := json.Marshal(doc)
+	unsigned, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, playlist.RoleCurator, created)
+	sig, err := dp1sign.SignMultiEd25519(unsigned, priv, channels.RolePublisher, created)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No dpVersion: the playlist-group schema (and playlistgroup.Group) does not define it, and the body
-	// must be byte-identical to what was signed above.
-	return map[string]any{
-		"id":         id,
-		"created":    created,
-		"slug":       slug,
-		"title":      title,
-		"curator":    kid,
-		"playlists":  uris,
-		"signatures": []playlist.Signature{sig},
-	}
+	body["signatures"] = []playlist.Signature{sig}
+	return body
 }
 
 func mustDoPlaylistJSON(t *testing.T, srv *Server, method, path string, body any, wantStatus int) playlist.Playlist {

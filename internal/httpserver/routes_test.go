@@ -27,8 +27,10 @@ func newRoutedEngine(t *testing.T) *gin.Engine {
 //
 // This is the one client-facing behavior this change introduces, and it exists because removing an
 // endpoint should not hand callers a different response shape than every other error. It also serves as
-// the durable record that the curated channel registry is gone: a future contributor re-registering a
-// /registry route fails this test rather than silently reviving a removed surface.
+// the durable record that the curated channel registry and DP-1 playlist-groups are gone: a future
+// contributor re-registering a /registry or /playlist-groups route fails this test rather than silently
+// reviving a removed surface. Removed routes answer the ordinary NoRoute 404, deliberately not a 410 or a
+// bespoke handler.
 func TestRegisterRoutes_unmatchedRequestsUseTheErrorEnvelope(t *testing.T) {
 	t.Parallel()
 
@@ -37,6 +39,12 @@ func TestRegisterRoutes_unmatchedRequestsUseTheErrorEnvelope(t *testing.T) {
 	}{
 		{"removed channel registry", http.MethodGet, "/api/v1/registry/channels"},
 		{"removed registry write", http.MethodPut, "/api/v1/registry/channels"},
+		// DP-1 removed the beta Playlist-Group (Exhibition) object on 2026-07-31; Channels supersede it.
+		{"removed playlist-group list", http.MethodGet, "/api/v1/playlist-groups"},
+		{"removed playlist-group read", http.MethodGet, "/api/v1/playlist-groups/11111111-1111-1111-1111-111111111111"},
+		{"removed playlist-group create", http.MethodPost, "/api/v1/playlist-groups"},
+		{"removed playlist-group replace", http.MethodPut, "/api/v1/playlist-groups/11111111-1111-1111-1111-111111111111"},
+		{"removed playlist-group delete", http.MethodDelete, "/api/v1/playlist-groups/11111111-1111-1111-1111-111111111111"},
 		{"unknown path under the API prefix", http.MethodGet, "/api/v1/nope"},
 		{"unknown path outside it", http.MethodGet, "/nope"},
 		// PATCH was removed with the signatures-only change; it has no route on any resource.

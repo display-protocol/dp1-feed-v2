@@ -5,7 +5,6 @@ import (
 
 	"github.com/display-protocol/dp1-go/extension/channels"
 	"github.com/display-protocol/dp1-go/playlist"
-	"github.com/display-protocol/dp1-go/playlistgroup"
 
 	"github.com/display-protocol/dp1-feed-v2/internal/store"
 )
@@ -28,15 +27,6 @@ func playlistRec(p playlist.Playlist) store.PlaylistRecord {
 
 func playlistRecPtr(p playlist.Playlist) *store.PlaylistRecord {
 	r := playlistRec(p)
-	return &r
-}
-
-func groupRec(g playlistgroup.Group) store.PlaylistGroupRecord {
-	return store.PlaylistGroupRecord{Raw: mustJSON(g), Body: g}
-}
-
-func groupRecPtr(g playlistgroup.Group) *store.PlaylistGroupRecord {
-	r := groupRec(g)
 	return &r
 }
 

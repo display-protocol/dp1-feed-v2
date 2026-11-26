@@ -13,7 +13,7 @@ import (
 // A document may repeat a reference, and resolution shares one resolved value across every position it
 // occupies — those positions alias a single Raw slice, so the resolved set stays inside
 // max_resolved_bytes. Building insert parameters per position undid that, because string(p.Raw)
-// allocates: a group naming one large playlist 1000 times passed the resolution budget and then produced
+// allocates: a channel naming one large playlist 1000 times passed the resolution budget and then produced
 // ~1000 distinct copies here (and again on the wire) before the CTE's DISTINCT ON could discard them.
 //
 // The assertion is on the number of bodies built, which is what carries the bytes.
