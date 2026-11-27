@@ -72,6 +72,23 @@ Built with Go, Gin, and PostgreSQL. No complex auth, no message queues—just st
    signature format and the signed delete-intent, and the integration tests under `internal/httpserver`
    for end-to-end signing examples.
 
+## Signature Algorithms
+
+The feed verifies incoming signatures with these `alg` values (send them in lowercase):
+
+| `alg` | `kid` |
+| --- | --- |
+| `ed25519` | Ed25519 `did:key` |
+| `eip191` | `did:pkh:eip155` |
+
+Every entry in a `signatures` array must verify. A request carrying any other
+algorithm is refused with `400` and nothing is written, even when its other entries are valid. This
+includes `ecdsa-secp256k1` and `ecdsa-p256`, which the DP-1 spec lists but this feed does not verify.
+A channel write is refused the same way when it references, by URL, a playlist the feed does not yet
+hold and that playlist carries such an entry.
+
+Separately, the signature the feed itself adds to a stored document is always `ed25519`.
+
 ## Docker
 
 Prefer containers? We've got you covered.
