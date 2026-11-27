@@ -1142,7 +1142,15 @@ components:
       properties:
         alg:
           type: string
-          description: Signature algorithm
+          description: >-
+            Signature algorithm. On incoming signatures the feed verifies `ed25519` (`kid` is an
+            Ed25519 `did:key`) and `eip191` (`kid` is a `did:pkh:eip155` identifier); send these values
+            in lowercase. Every entry in a `signatures` array must verify, so a request carrying any
+            other algorithm is refused with 400 and nothing is written, even when its other entries are
+            valid. That includes `ecdsa-secp256k1` and `ecdsa-p256`, which the DP-1 spec lists but this
+            feed does not verify. A channel write is refused the same way when it references, by URL, a
+            playlist the feed does not yet hold and that playlist carries such an entry. The signature
+            the feed itself adds is always `ed25519`.
           example: "ed25519"
         kid:
           type: string
